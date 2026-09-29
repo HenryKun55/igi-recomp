@@ -401,28 +401,39 @@ SHIM(msvfw32, ICDecompress)
                 bmask = RD32(bi_out + 48u);
             }
             uint32_t pitch = (((uint32_t)w * bpp / 8u) + 3u) & ~3u;
-            /* Indeo's VfW driver zooms (e.g. 320x240 -> 640x480): sample nearest. */
+            /* No divisions per pixel: the Vita's Cortex-A9 has no hardware divide. */
+            static int32_t xmap[2048];
+            if (w > 2048)
+                w = 2048;
+            for (int x = 0; x < w; x++)
+                xmap[x] = (int32_t)((int64_t)x * k->width / w);
+            int rs = __builtin_ctz(rm), gs = __builtin_ctz(gm), bs = __builtin_ctz(bmask);
+            int rb = __builtin_popcount(rm), gb = __builtin_popcount(gm), bb = __builtin_popcount(bmask);
             for (int y = 0; y < h; y++) {
                 int sy = (int)((int64_t)y * k->height / h);
                 const uint32_t *src = k->rgba + (size_t)sy * (size_t)k->width;
                 uint32_t row = top_down ? (uint32_t)y : (uint32_t)(h - 1 - y);
                 uint8_t *dst = g_mem + bits + row * pitch;
-                for (int x = 0; x < w; x++) {
-                    uint32_t p = src[(int64_t)x * k->width / w];
-                    uint32_t R = p & 0xFFu, G = (p >> 8) & 0xFFu, B = (p >> 16) & 0xFFu;
-                    if (bpp == 32u) {
-                        uint32_t v = B | (G << 8) | (R << 16);
-                        memcpy(dst + x * 4, &v, 4);
-                    } else if (bpp == 24u) {
-                        dst[x * 3] = (uint8_t)B;
-                        dst[x * 3 + 1] = (uint8_t)G;
-                        dst[x * 3 + 2] = (uint8_t)R;
-                    } else if (bpp == 16u) {
-                        uint32_t v = (((R * (rm >> __builtin_ctz(rm))) / 255u) << __builtin_ctz(rm)) |
-                                     (((G * (gm >> __builtin_ctz(gm))) / 255u) << __builtin_ctz(gm)) |
-                                     (((B * (bmask >> __builtin_ctz(bmask))) / 255u) << __builtin_ctz(bmask));
+                if (bpp == 16u) {
+                    for (int x = 0; x < w; x++) {
+                        uint32_t p = src[xmap[x]];
+                        uint32_t v = (((p & 0xFFu) >> (8 - rb)) << rs) | ((((p >> 8) & 0xFFu) >> (8 - gb)) << gs) |
+                                     ((((p >> 16) & 0xFFu) >> (8 - bb)) << bs);
                         dst[x * 2] = (uint8_t)v;
                         dst[x * 2 + 1] = (uint8_t)(v >> 8);
+                    }
+                } else if (bpp == 32u) {
+                    for (int x = 0; x < w; x++) {
+                        uint32_t p = src[xmap[x]];
+                        uint32_t v = ((p >> 16) & 0xFFu) | (p & 0xFF00u) | ((p & 0xFFu) << 16);
+                        memcpy(dst + x * 4, &v, 4);
+                    }
+                } else if (bpp == 24u) {
+                    for (int x = 0; x < w; x++) {
+                        uint32_t p = src[xmap[x]];
+                        dst[x * 3] = (uint8_t)(p >> 16);
+                        dst[x * 3 + 1] = (uint8_t)(p >> 8);
+                        dst[x * 3 + 2] = (uint8_t)p;
                     }
                 }
             }

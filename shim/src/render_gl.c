@@ -513,23 +513,73 @@ void render_fill(const Rect *r, uint32_t rgba)
 /* ---- textures ----------------------------------------------------------- */
 
 /* Convert a surface's guest pixels to RGBA8; color-keyed texels get alpha 0. */
+/* 16-bit formats convert through a 65536-entry table built once per format:
+ * no per-pixel math (the Vita's CPU has no hardware divide). */
+typedef struct Lut16 {
+    PixFmt pf;
+    uint32_t *rgba;
+} Lut16;
+
+static const uint32_t *lut16(const PixFmt *pf)
+{
+    static Lut16 luts[6];
+    for (int i = 0; i < 6; i++)
+        if (luts[i].rgba && !memcmp(&luts[i].pf, pf, sizeof(*pf)))
+            return luts[i].rgba;
+    int slot = 0;
+    while (slot < 5 && luts[slot].rgba)
+        slot++;
+    free(luts[slot].rgba);
+    luts[slot].pf = *pf;
+    luts[slot].rgba = malloc(65536u * 4u);
+    for (uint32_t v = 0; v < 65536u; v++) {
+        uint8_t b[2] = { (uint8_t)v, (uint8_t)(v >> 8) };
+        luts[slot].rgba[v] = pixel_to_rgba(pf, b);
+    }
+    return luts[slot].rgba;
+}
+
+/* Convert a surface's guest pixels to RGBA8; color-keyed texels get alpha 0. */
 static uint32_t *surface_rgba(Surface *s)
 {
     surface_alloc_mem(s);
     uint32_t *out = conv((size_t)s->w * s->h);
     uint32_t bpp = s->pf.bits / 8u;
+    const uint32_t *lut = bpp == 2u ? lut16(&s->pf) : NULL;
+    int plain32 = bpp == 4u && s->pf.r == 0x00FF0000u && s->pf.g == 0x0000FF00u && s->pf.b == 0x000000FFu;
+    uint32_t alpha32 = (s->pf.flags & DDPF_ALPHAPIXELS) ? 0u : 0xFF000000u;
     for (uint32_t y = 0; y < s->h; y++) {
         const uint8_t *row = g_mem + s->mem + y * s->pitch;
-        for (uint32_t x = 0; x < s->w; x++) {
-            const uint8_t *p = row + x * bpp;
-            uint32_t v = pixel_to_rgba(&s->pf, p);
-            if (s->has_ck) {
-                uint32_t raw = 0;
-                memcpy(&raw, p, bpp);
-                if (raw >= s->ck_lo && raw <= s->ck_hi)
+        uint32_t *o = out + (size_t)y * s->w;
+        if (lut) {
+            for (uint32_t x = 0; x < s->w; x++) {
+                uint32_t raw = (uint32_t)row[x * 2u] | ((uint32_t)row[x * 2u + 1u] << 8);
+                uint32_t v = lut[raw];
+                if (s->has_ck && raw >= s->ck_lo && raw <= s->ck_hi)
                     v &= 0x00FFFFFFu;
+                o[x] = v;
             }
-            out[y * s->w + x] = v;
+        } else if (plain32) {
+            for (uint32_t x = 0; x < s->w; x++) {
+                uint32_t raw;
+                memcpy(&raw, row + x * 4u, 4);
+                uint32_t v = ((raw >> 16) & 0xFFu) | (raw & 0xFF00FF00u) | ((raw & 0xFFu) << 16) | alpha32;
+                if (s->has_ck && (raw & 0x00FFFFFFu) >= s->ck_lo && (raw & 0x00FFFFFFu) <= s->ck_hi)
+                    v &= 0x00FFFFFFu;
+                o[x] = v;
+            }
+        } else {
+            for (uint32_t x = 0; x < s->w; x++) {
+                const uint8_t *p = row + x * bpp;
+                uint32_t v = pixel_to_rgba(&s->pf, p);
+                if (s->has_ck) {
+                    uint32_t raw = 0;
+                    memcpy(&raw, p, bpp);
+                    if (raw >= s->ck_lo && raw <= s->ck_hi)
+                        v &= 0x00FFFFFFu;
+                }
+                o[x] = v;
+            }
         }
     }
     return out;
