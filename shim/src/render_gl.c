@@ -970,6 +970,15 @@ static void mat_mul(const float *a, const float *b, float *out)
 
 static void apply_transforms(int pretransformed)
 {
+    /* Direct3D never rasterizes outside the current viewport, pre-transformed
+     * vertices included: the viewport rectangle acts as a scissor. */
+    {
+        GLint sx, sy;
+        GLsizei sw, sh;
+        to_fb(g_rs.vp_x, g_rs.vp_y, g_rs.vp_w, g_rs.vp_h, &sx, &sy, &sw, &sh);
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(sx, sy, sw, sh);
+    }
     if (pretransformed) {
         load_screen_ortho();
         return;
@@ -1044,14 +1053,15 @@ void render_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, u
         const StageState *s0 = &g_rs.stage[0], *s1 = &g_rs.stage[1];
         rt_log("draw prim %d nv %u ni %u tl %d n %d c %d s %d t %d box %.1f,%.1f-%.1f,%.1f col0 %08X | z %u/%u "
                "blend %u %u/%u atest %u %u/%u ck %u fog %u light %u cull %u | s0 c%u(%X,%X) a%u(%X,%X) tex %ux%u/%ubpp ck%d "
-               "| s1 c%u a%u tex %ux%u tf %08X",
+               "| s1 c%u a%u tex %ux%u tf %08X | vp %d,%d %dx%d",
                prim, nv, ni, pretransformed, has_normal, has_color, has_spec, ntex, (double)x0, (double)y0, (double)x1,
                (double)y1, v[0].color, g_rs.rs[7], g_rs.rs[14], g_rs.rs[27], g_rs.rs[19], g_rs.rs[20], g_rs.rs[15],
                g_rs.rs[25], g_rs.rs[24], g_rs.rs[41], g_rs.rs[28], g_rs.rs[137], g_rs.rs[22], s0->colorop,
                s0->colorarg1, s0->colorarg2, s0->alphaop, s0->alphaarg1, s0->alphaarg2,
                s0->texture ? s0->texture->w : 0u, s0->texture ? s0->texture->h : 0u,
                s0->texture ? s0->texture->pf.bits : 0u, s0->texture ? s0->texture->has_ck : 0, s1->colorop,
-               s1->alphaop, s1->texture ? s1->texture->w : 0u, s1->texture ? s1->texture->h : 0u, g_rs.rs[60]);
+               s1->alphaop, s1->texture ? s1->texture->w : 0u, s1->texture ? s1->texture->h : 0u, g_rs.rs[60],
+               g_rs.vp_x, g_rs.vp_y, g_rs.vp_w, g_rs.vp_h);
     }
     if (g_trace_next_frame == 2 && pretransformed && nv <= 8) {
         for (uint32_t i = 0; i < nv; i++)
