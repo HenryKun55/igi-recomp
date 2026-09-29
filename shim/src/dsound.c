@@ -56,6 +56,14 @@ static struct {
 
 /* ---- gain --------------------------------------------------------------- */
 
+static int trace_sound(void)
+{
+    static int t = -1;
+    if (t < 0)
+        t = getenv("IGI_TRACE_SOUND") != NULL;
+    return t;
+}
+
 static float db_to_gain(int32_t v)
 {
     if (v <= -10000)
@@ -78,7 +86,8 @@ static void update_gain(SoundBuffer *b)
             d.y -= listener.pos.y;
             d.z -= listener.pos.z;
         }
-        float dist = sqrtf(d.x * d.x + d.y * d.y + d.z * d.z) * listener.distance_factor;
+        /* Min/max distances are in the same units as positions (DistanceFactor only affects doppler). */
+        float dist = sqrtf(d.x * d.x + d.y * d.y + d.z * d.z);
         float att = 1.0f;
         if (dist > b->min_dist) {
             float dd = dist < b->max_dist ? dist : b->max_dist;
@@ -185,6 +194,7 @@ static int audio_open(void)
         rt_log("SDL_OpenAudioDevice: %s", SDL_GetError());
         return 0;
     }
+    rt_log("audio device opened: %d Hz, %d channels", have.freq, have.channels);
     SDL_PauseAudioDevice(dev, 0);
     return 1;
 }
@@ -368,6 +378,9 @@ static void b_Play(Ctx *c)
     b->looping = (ARG(3) & 1u) != 0;
     b->playing = 1;
     SDL_UnlockAudioDevice(dev);
+    if (trace_sound())
+        rt_log("DS Play %08X loop %d vol %d pan %d freq %u 3d %d gain %.3f/%.3f", b->obj, b->looping, b->volume,
+               b->pan, b->freq, b->is3d, (double)b->gain_l, (double)b->gain_r);
     stdcall_ret(c, DS_OK, 4);
 }
 
@@ -730,6 +743,9 @@ static void ds_CreateSoundBuffer(Ctx *c)
     }
     b->freq = (uint32_t)b->rate;
     update_gain(b);
+    if (trace_sound())
+        rt_log("DS CreateSoundBuffer flags %08X bytes %u fmt %dch %dbit %dHz -> %08X", flags, bytes, b->channels,
+               b->bits, b->rate, b->obj);
     WR32(ARG(2), b->obj);
     stdcall_ret(c, DS_OK, 4);
 }

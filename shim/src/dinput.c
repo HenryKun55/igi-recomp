@@ -47,7 +47,7 @@ static void d_Release(Ctx *c)
     Device *d = devp(o);
     if (RD32(o + 8u) <= 1u) {
         if (d->kind == KIND_MOUSE && d->acquired)
-            SDL_SetRelativeMouseMode(SDL_FALSE);
+            platform_capture_mouse(0);
         free(d);
     }
     stdcall_ret(c, com_release(o), 1);
@@ -91,7 +91,7 @@ static void d_Acquire(Ctx *c)
 {
     Device *d = devp(THIS);
     if (!d->acquired && d->kind == KIND_MOUSE) {
-        SDL_SetRelativeMouseMode(SDL_TRUE);
+        platform_capture_mouse(1);
         g_mouse.dx = g_mouse.dy = g_mouse.dz = 0;
     }
     d->acquired = 1;
@@ -102,7 +102,7 @@ static void d_Unacquire(Ctx *c)
 {
     Device *d = devp(THIS);
     if (d->acquired && d->kind == KIND_MOUSE)
-        SDL_SetRelativeMouseMode(SDL_FALSE);
+        platform_capture_mouse(0);
     d->acquired = 0;
     stdcall_ret(c, DI_OK, 1);
 }

@@ -21,6 +21,8 @@ void platform_pump(void);
 /* Block until at least one event is available, then pump. */
 void platform_wait(void);
 void platform_show_cursor(int show);
+/* Keep the host cursor inside the window and report relative motion. */
+void platform_capture_mouse(int on);
 
 /* Keyboard state indexed by DirectInput DIK_* code. */
 extern uint8_t g_key_state[256];

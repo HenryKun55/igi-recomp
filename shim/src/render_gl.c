@@ -478,7 +478,8 @@ static int apply_stages(int ntex)
         StageState *st = &g_rs.stage[i];
         glActiveTexture(GL_TEXTURE0 + (GLenum)i);
         glClientActiveTexture(GL_TEXTURE0 + (GLenum)i);
-        if (st->colorop == 1u || (i > 0 && active < i)) {
+        /* A stage without a texture passes the previous result through, as in D3D. */
+        if (st->colorop == 1u || (i > 0 && active < i) || !st->texture) {
             glDisable(GL_TEXTURE_2D);
             glDisableClientState(GL_TEXTURE_COORD_ARRAY);
             continue;

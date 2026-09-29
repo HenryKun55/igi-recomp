@@ -581,6 +581,13 @@ static void dev_ValidateDevice(Ctx *c)
 static void draw(uint32_t prim, uint32_t fvf, uint32_t verts, uint32_t stride, uint32_t nv,
                  uint32_t indices, uint32_t ni)
 {
+    if (getenv("IGI_TRACE_DRAW")) {
+        float fs, fe;
+        memcpy(&fs, &g_rs.rs[36], 4);
+        memcpy(&fe, &g_rs.rs[37], 4);
+        rt_log("draw prim %u fvf %03X nv %u ni %u fog %u table %u vertex %u range %g..%g color %08X light %u",
+               prim, fvf, nv, ni, g_rs.rs[28], g_rs.rs[35], g_rs.rs[140], fs, fe, g_rs.rs[34], g_rs.rs[137]);
+    }
     Decoded d;
     RVertex *v = decode(fvf, verts, stride, nv, &d);
     render_draw((int)prim, v, nv, indices ? (const uint16_t *)gptr(indices) : NULL, ni, d.pretransformed,

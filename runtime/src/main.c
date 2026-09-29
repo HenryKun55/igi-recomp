@@ -12,9 +12,24 @@ static Ctx g_ctx;
 
 static FILE *log_file;
 
+#include <time.h>
+
+static double log_time(void)
+{
+    static struct timespec t0;
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    if (!t0.tv_sec)
+        t0 = t;
+    return (double)(t.tv_sec - t0.tv_sec) + (double)(t.tv_nsec - t0.tv_nsec) * 1e-9;
+}
+
 void rt_log(const char *fmt, ...)
 {
     va_list ap;
+    fprintf(stderr, "[%7.3f] ", log_time());
+    if (log_file)
+        fprintf(log_file, "[%7.3f] ", log_time());
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
     fputc('\n', stderr);
