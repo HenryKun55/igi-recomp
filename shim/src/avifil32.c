@@ -377,7 +377,7 @@ SHIM(msvfw32, ICDecompress)
     uint32_t data = ARG(3), bi_out = ARG(4), bits = ARG(5), bi_fmt = ARG(2);
     uint32_t r = ICERR_BADFORMAT;
     static int logged;
-    if (logged < 2 && bi_out) {
+    if (logged < 1 && bi_out) {
         logged++;
         rt_log("ICDecompress(hic %08X flags %08X data %08X bits %08X): out %dx%d %ubpp comp %u size %u", ARG(0), ARG(1),
                data, bits, (int32_t)RD32(bi_out + 4u), (int32_t)RD32(bi_out + 8u), RD16(bi_out + 14u),

@@ -265,7 +265,7 @@ static void rect_read(uint32_t a, Rect *r, const Surface *s)
     }
 }
 
-static int dd_trace_left = 12;   /* first surface operations are logged (video path diagnosis) */
+static int dd_trace_left = 0;     /* first surface operations are logged (video path diagnosis) */
 
 static int is_render_target(const Surface *s)
 {
