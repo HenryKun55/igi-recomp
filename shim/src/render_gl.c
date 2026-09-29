@@ -1013,6 +1013,16 @@ void render_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, u
 {
     if (!nv)
         return;
+    if (pretransformed) {
+        /* rhw <= 0 means w is infinite or behind the eye: Direct3D hardware drops such
+         * primitives. IGI's cutscenes build an overlay whose rhw is never filled in (0);
+         * drawing it paints a green band over the scene. */
+        uint32_t valid = 0;
+        for (uint32_t i = 0; i < nv; i++)
+            valid += v[i].w > 0.0f;
+        if (!valid)
+            return;
+    }
     if (g_trace_next_frame == 2) {
         float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
         for (uint32_t i = 0; i < nv; i++) {
