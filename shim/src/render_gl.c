@@ -1724,6 +1724,26 @@ static void trace_draw(int prim, const RVertex *v, uint32_t nv, uint32_t ni, int
            s0->texture ? s0->texture->pf.bits : 0u, s0->texture ? s0->texture->has_ck : 0, s1->colorop,
            s1->alphaop, s1->texture ? s1->texture->w : 0u, s1->texture ? s1->texture->h : 0u, g_rs.rs[60],
            g_rs.vp_x, g_rs.vp_y, g_rs.vp_w, g_rs.vp_h);
+    /* Depth range of the draw: screen z / rhw for pre-transformed vertices, clip z/w and w otherwise. */
+    float zmin = 1e30f, zmax = -1e30f, wmin = 1e30f, wmax = -1e30f;
+    float m[16];
+    mat_mul(g_rs.world, g_rs.view, m);
+    mat_mul(m, g_rs.proj, m);
+    for (uint32_t i = 0; i < nv; i++) {
+        float z = v[i].z, w = v[i].w;
+        if (!pretransformed) {
+            float cz = v[i].x * m[2] + v[i].y * m[6] + v[i].z * m[10] + m[14];
+            w = v[i].x * m[3] + v[i].y * m[7] + v[i].z * m[11] + m[15];
+            z = w != 0.0f ? cz / w : 0.0f;
+        }
+        zmin = z < zmin ? z : zmin;
+        zmax = z > zmax ? z : zmax;
+        wmin = w < wmin ? w : wmin;
+        wmax = w > wmax ? w : wmax;
+    }
+    rt_log("    depth: zfunc %u z %.6f..%.6f %s %.4f..%.4f range %.3f..%.3f fogcol %08X", g_rs.rs[23], (double)zmin,
+           (double)zmax, pretransformed ? "rhw" : "w", (double)wmin, (double)wmax, (double)g_rs.vp_minz,
+           (double)g_rs.vp_maxz, g_rs.rs[34]);
     if (pretransformed && nv <= 8) {
         for (uint32_t i = 0; i < nv; i++)
             rt_log("    v%u: %.1f %.1f z %.4f rhw %.4f col %08X spec %08X uv %.3f %.3f", i, (double)v[i].x,
