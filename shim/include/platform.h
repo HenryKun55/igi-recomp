@@ -18,6 +18,8 @@ void platform_swap(void);
 
 /* Pump host events: posts Win32 messages and updates the input state below. */
 void platform_pump(void);
+/* Renderer: step to the next live diagnostic mode. */
+void render_diag_cycle(void);
 /* Block until at least one event is available, then pump. */
 void platform_wait(void);
 void platform_show_cursor(int show);

@@ -340,6 +340,18 @@ static int aspect_fill = -1;
 
 /* Culling override for diagnosis: 0 normal, 1 off, 2 flipped (cull=off|flip). */
 static int cull_override;
+/* Live diagnostic mode (Vita: L+R+SELECT cycles it), shown on the overlay. */
+enum { DIAG_NONE, DIAG_NO_BATCH, DIAG_NO_CULL, DIAG_NO_ZREMAP, DIAG_NO_SCREEN, DIAG_NO_3D, DIAG_DEPTH_LEQUAL,
+       DIAG_COUNT };
+static const char *const diag_names[DIAG_COUNT] = { "NORMAL", "NO BATCH", "NO CULL", "NO ZREMAP",
+                                                     "NO 2D VERTS", "NO 3D VERTS", "DEPTH LEQUAL" };
+static int diag_mode;
+
+void render_diag_cycle(void)
+{
+    diag_mode = (diag_mode + 1) % DIAG_COUNT;
+    rt_log("diagnostic mode %d: %s", diag_mode, diag_names[diag_mode]);
+}
 /* 1: remap D3D clip z [0,w] to GL [-w,w] (desktop GL). zremap=0 in igi.cfg disables it. */
 static int z_remap = 1;
 
@@ -1318,7 +1330,10 @@ static void apply_lights(void)
 static void apply_states(int pretransformed, int has_normal)
 {
     uint32_t *rs = g_rs.rs;
-    if (rs[7]) {
+    if (diag_mode == DIAG_DEPTH_LEQUAL && !pretransformed) {
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LEQUAL);
+    } else if (rs[7]) {
         glEnable(GL_DEPTH_TEST);
         glDepthFunc(gl_cmp(rs[23]));
     } else {
@@ -1349,7 +1364,7 @@ static void apply_states(int pretransformed, int has_normal)
     } else {
         glDisable(GL_ALPHA_TEST);
     }
-    if (rs[22] == 1u || pretransformed || cull_override == 1) {
+    if (rs[22] == 1u || pretransformed || cull_override == 1 || diag_mode == DIAG_NO_CULL) {
         glDisable(GL_CULL_FACE);
     } else {
         glEnable(GL_CULL_FACE);
@@ -1425,7 +1440,7 @@ static void apply_transforms(int pretransformed)
     /* D3D clip-space z is [0, w]; GL wants [-w, w]: z' = 2z - w. */
     float p[16];
     memcpy(p, g_rs.proj, sizeof(p));
-    if (z_remap)
+    if (z_remap && diag_mode != DIAG_NO_ZREMAP)
         for (int r = 0; r < 4; r++)
             p[r * 4 + 2] = 2.0f * g_rs.proj[r * 4 + 2] - g_rs.proj[r * 4 + 3];
     c_load_matrix(GL_PROJECTION, p);
@@ -1789,12 +1804,14 @@ static void batch_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *
         return;
     if (pretransformed && rhw_invisible(prim, v, nv))
         return;
+    if ((diag_mode == DIAG_NO_SCREEN && pretransformed) || (diag_mode == DIAG_NO_3D && !pretransformed))
+        return;
     if (batch_enabled < 0) {
         const char *e = getenv("IGI_BATCH");
         batch_enabled = !(e && e[0] == '0');
     }
     uint32_t n = idx ? ni : nv;
-    int batchable = batch_enabled &&
+    int batchable = batch_enabled && diag_mode != DIAG_NO_BATCH &&
                     (prim == PRIM_TRIANGLES || prim == PRIM_TRIANGLE_STRIP || prim == PRIM_TRIANGLE_FAN);
     uint32_t tris = prim == PRIM_TRIANGLES ? n / 3u : (n >= 3u ? n - 2u : 0u);
     if (!batchable || nv > BATCH_MAX_V || tris * 3u > BATCH_MAX_I || g_trace_next_frame == 2) {
@@ -1912,7 +1929,7 @@ static void overlay_text(float x, float y, float px, const char *s)
  *   U textures uploaded  K unchanged dirty textures skipped  KB uploaded
  *   2D blits  ms  KB converted (inside G)  R render target read backs
  */
-#define OVERLAY_LINES 11
+#define OVERLAY_LINES 12
 
 static void perf_overlay_draw(void)
 {
@@ -1935,6 +1952,7 @@ static void perf_overlay_draw(void)
              (unsigned)(a[PC_TEX_BYTES] / 1024.0f));
     snprintf(lines[10], sizeof(lines[10]), "2D %.1f %.1f KB %u R %.1f", (double)a[PC_2D_N],
              (double)(a[PC_2D_US] / 1000.0f), (unsigned)(a[PC_2D_BYTES] / 1024.0f), (double)a[PC_READBACK_N]);
+    snprintf(lines[11], sizeof(lines[11]), "M %d %s", diag_mode, diag_names[diag_mode]);
     size_t width = 0;
     for (int i = 0; i < OVERLAY_LINES; i++) {
         size_t l = strlen(lines[i]);

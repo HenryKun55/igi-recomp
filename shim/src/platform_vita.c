@@ -159,6 +159,9 @@ void platform_pump(void)
         else
             set_key(m->dik, down);
     }
+    const uint32_t diag = SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER | SCE_CTRL_SELECT;
+    if ((pad.buttons & diag) == diag && (prev_buttons & diag) != diag)
+        render_diag_cycle();
     prev_buttons = pad.buttons;
 
     /* Left stick: arrow keys (move / strafe). */
