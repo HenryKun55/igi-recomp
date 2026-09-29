@@ -9,6 +9,7 @@
 #define IGI_RECOMP_H
 
 #include <math.h>
+#include <setjmp.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -146,6 +147,12 @@ void rt_rep_movs(Ctx *c, int size);
 void rt_rep_stos(Ctx *c, int size);
 
 /* ---- control transfer -------------------------------------------------- */
+
+/* Host jump buffer backing the guest setjmp buffer at `guest_buf`. */
+jmp_buf *rt_jmpbuf(uint32_t guest_buf);
+/* Resume the matching host setjmp; guest registers are already in the context. */
+void rt_longjmp(Ctx *c, uint32_t guest_buf) __attribute__((noreturn));
+
 
 /* Call the guest code at `target` (a recompiled function or a host thunk). */
 void rt_dispatch(Ctx *c, uint32_t target);

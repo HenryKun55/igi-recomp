@@ -265,6 +265,8 @@ static void rect_read(uint32_t a, Rect *r, const Surface *s)
     }
 }
 
+static int dd_trace_left = 12;   /* first surface operations are logged (video path diagnosis) */
+
 static int is_render_target(const Surface *s)
 {
     return s == g_backbuffer || s == g_primary;
@@ -326,6 +328,12 @@ static void soft_fill(Surface *dst, const Rect *r, uint32_t v)
 static void surf_Blt(Ctx *c)
 {
     Surface *dst = surface_from_obj(THIS);
+    if (dd_trace_left > 0) {
+        Surface *s2 = surface_from_obj(ARG(2));
+        dd_trace_left--;
+        rt_log("Blt to %ux%u (rt %d) from %ux%u flags %08X", dst->w, dst->h, is_render_target(dst), s2 ? s2->w : 0u,
+               s2 ? s2->h : 0u, ARG(4));
+    }
     Rect dr, sr;
     rect_read(ARG(1), &dr, dst);
     Surface *src = surface_from_obj(ARG(2));
@@ -359,6 +367,10 @@ static void surf_Blt(Ctx *c)
 static void surf_BltFast(Ctx *c)
 {
     Surface *dst = surface_from_obj(THIS);
+    if (dd_trace_left > 0) {
+        dd_trace_left--;
+        rt_log("BltFast to %ux%u (rt %d) at %d,%d", dst->w, dst->h, is_render_target(dst), (int32_t)ARG(1), (int32_t)ARG(2));
+    }
     int32_t x = (int32_t)ARG(1), y = (int32_t)ARG(2);
     Surface *src = surface_from_obj(ARG(3));
     uint32_t trans = ARG(5);
@@ -461,6 +473,10 @@ static void surf_Restore(Ctx *c) { stdcall_ret(c, DD_OK, 1); }
 static void surf_Lock(Ctx *c)
 {
     Surface *s = surface_from_obj(THIS);
+    if (dd_trace_left > 0 && !s->is_texture) {
+        dd_trace_left--;
+        rt_log("Lock %ux%u %ubpp primary %d back %d mem %08X", s->w, s->h, s->pf.bits, s->is_primary, s->is_back, s->mem);
+    }
     uint32_t rect = ARG(1), desc = ARG(2);
     surface_alloc_mem(s);
     if (is_render_target(s)) {

@@ -251,3 +251,31 @@ void rt_noreturn(Ctx *c, uint32_t addr)
     rt_fatal(c, "returned from a no-return call at %08X", addr);
 }
 
+
+/* ---- setjmp / longjmp ---------------------------------------------------- */
+
+#define MAX_JMPBUFS 16
+static uint32_t jmp_guest[MAX_JMPBUFS];
+static jmp_buf jmp_host[MAX_JMPBUFS];
+
+jmp_buf *rt_jmpbuf(uint32_t guest_buf)
+{
+    for (int i = 0; i < MAX_JMPBUFS; i++)
+        if (jmp_guest[i] == guest_buf)
+            return &jmp_host[i];
+    for (int i = 0; i < MAX_JMPBUFS; i++)
+        if (!jmp_guest[i]) {
+            jmp_guest[i] = guest_buf;
+            return &jmp_host[i];
+        }
+    rt_fatal(NULL, "too many setjmp buffers");
+}
+
+void rt_longjmp(Ctx *c, uint32_t guest_buf)
+{
+    (void)c;
+    for (int i = 0; i < MAX_JMPBUFS; i++)
+        if (jmp_guest[i] == guest_buf)
+            longjmp(jmp_host[i], 1);
+    rt_fatal(c, "longjmp to unknown buffer %08X", guest_buf);
+}

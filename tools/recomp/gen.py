@@ -50,6 +50,11 @@ GAME_HOOKS = [
     0x00497860,   # 2D render queue: per-node state setup
 ]
 
+# MSVC CRT setjmp/longjmp: setjmp call sites become host setjmp, and the
+# longjmp's final indirect jump becomes a host longjmp (see rt_jmpbuf).
+SETJMP_FUNC = 0x004A5000
+LONGJMP_JUMP = 0x004A50F1
+
 NORETURN_IMPORTS = {'ExitProcess', 'TerminateProcess', 'RaiseException'}
 
 
@@ -892,6 +897,9 @@ class FuncGen:
     def i_jmp(self, ins):
         fn = self.fn
         a = ins.addr
+        if a == LONGJMP_JUMP:
+            # Registers are already restored from the jump buffer (edx points at it).
+            return ['SPILL; rt_longjmp(c, edx);']
         t = self.an.direct_target(ins)
         if t is not None:
             if a in fn.tail_calls or t not in fn.insns:
@@ -926,6 +934,9 @@ class FuncGen:
     def i_call(self, ins):
         ret = h(ins.addr + ins.size)
         t = self.an.direct_target(ins)
+        if t == SETJMP_FUNC:
+            return ['esp -= 4u; WR32(esp, %s); SPILL;' % ret,
+                    'if (setjmp(*rt_jmpbuf(RD32(esp + 4u)))) { RELOAD; } else { f_%08X(c); RELOAD; }' % t]
         if t is not None:
             if t in self.g.func_set:
                 return ['esp -= 4u; WR32(esp, %s); SPILL; f_%08X(c); RELOAD;' % (ret, t)]
