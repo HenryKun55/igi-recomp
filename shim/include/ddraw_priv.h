@@ -80,8 +80,7 @@ struct Surface {
     int client_mem;        /* mem belongs to the game (DDSD_LPSURFACE): never freed */
     /* Video fast path: the decoder hands its RGBA frame straight to the renderer
      * instead of converting it into the surface's pixel format. */
-    const uint32_t *video_rgba;
-    int video_w, video_h;
+    struct VideoFrameSource *video;   /* set while the surface shows a decoded movie */
     uint32_t priv[8];      /* renderer scratch */
 };
 
@@ -98,8 +97,18 @@ void pixfmt_read(uint32_t addr, PixFmt *pf);
 PixFmt pixfmt_rgb(int bits);
 /* Surface whose pixel memory is the game-supplied buffer at `mem`, if any. */
 Surface *surface_by_client_mem(uint32_t mem);
-/* Drop video fast-path references to a decoder buffer that is going away. */
-void surface_forget_video(const uint32_t *rgba);
+/* True if `mem` is (or was) the pixel memory of a game-supplied surface. */
+int ddraw_is_client_mem(uint32_t mem);
+
+/* Decoded movie frame shared by the AVI shim and the renderer. */
+typedef struct VideoFrameSource {
+    int width, height;
+    uint32_t mem;                       /* game buffer the frame was decoded "into" */
+    uint32_t serial;                    /* bumps on every decoded frame */
+    const uint32_t *(*rgba)(struct VideoFrameSource *);   /* converts lazily */
+} VideoFrameSource;
+/* The movie frame destined for the surface memory `mem`, if any. */
+VideoFrameSource *video_source_for(uint32_t mem);
 
 /* Convert one pixel of `pf` at `p` to RGBA8 (R in the low byte). */
 uint32_t pixel_to_rgba(const PixFmt *pf, const uint8_t *p);

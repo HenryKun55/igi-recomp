@@ -14,6 +14,7 @@ struct VideoDecoder {
     AVPacket *pkt;
     AVFrame *frame;
     int width, height;
+    int have_frame;
 };
 
 static enum AVCodecID codec_for(uint32_t fourcc)
@@ -62,7 +63,7 @@ static uint8_t clamp8(int v)
     return (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v);
 }
 
-int video_decode(VideoDecoder *d, const uint8_t *data, size_t size, uint32_t *rgba)
+int video_decode(VideoDecoder *d, const uint8_t *data, size_t size)
 {
     d->pkt->data = (uint8_t *)data;
     d->pkt->size = (int)size;
@@ -70,10 +71,18 @@ int video_decode(VideoDecoder *d, const uint8_t *data, size_t size, uint32_t *rg
         return -1;
     if (avcodec_receive_frame(d->ctx, d->frame) < 0)
         return -1;
+    d->have_frame = 1;
+    return 0;
+}
+
+void video_frame_rgba(VideoDecoder *d, uint32_t *rgba)
+{
     AVFrame *f = d->frame;
+    if (!d->have_frame)
+        return;
     const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get((enum AVPixelFormat)f->format);
     if (!desc || !(desc->flags & AV_PIX_FMT_FLAG_PLANAR) || desc->nb_components < 3)
-        return -1;
+        return;
     int sx = desc->log2_chroma_w, sy = desc->log2_chroma_h;
     int w = f->width < d->width ? f->width : d->width;
     int h = f->height < d->height ? f->height : d->height;
@@ -91,7 +100,6 @@ int video_decode(VideoDecoder *d, const uint8_t *data, size_t size, uint32_t *rg
             out[x] = (uint32_t)r | ((uint32_t)g << 8) | ((uint32_t)b << 16) | 0xFF000000u;
         }
     }
-    return 0;
 }
 
 void video_decoder_close(VideoDecoder *d)
@@ -114,13 +122,18 @@ VideoDecoder *video_decoder_open(uint32_t fourcc, int width, int height)
     return NULL;
 }
 
-int video_decode(VideoDecoder *d, const uint8_t *data, size_t size, uint32_t *rgba)
+int video_decode(VideoDecoder *d, const uint8_t *data, size_t size)
 {
     (void)d;
     (void)data;
     (void)size;
-    (void)rgba;
     return -1;
+}
+
+void video_frame_rgba(VideoDecoder *d, uint32_t *rgba)
+{
+    (void)d;
+    (void)rgba;
 }
 
 void video_decoder_close(VideoDecoder *d) { (void)d; }

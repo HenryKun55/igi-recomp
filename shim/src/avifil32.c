@@ -300,6 +300,8 @@ SHIM(avifil32, AVIFileRelease)
 /* ---- msvfw32: the Indeo decompressor ------------------------------------ */
 
 typedef struct Codec {
+    VideoFrameSource src;   /* first member: the renderer's view of this decoder */
+    uint32_t converted_serial;
     VideoDecoder *dec;
     uint32_t fourcc;
     int width, height;
@@ -314,6 +316,24 @@ static Codec *codec_by_handle(uint32_t h)
 {
     uint32_t i = h - HIC_BASE;
     return i < 4u && codecs[i].dec ? &codecs[i] : NULL;
+}
+
+static const uint32_t *codec_frame_rgba(VideoFrameSource *vs)
+{
+    Codec *k = (Codec *)vs;
+    if (k->converted_serial != vs->serial) {
+        video_frame_rgba(k->dec, k->rgba);
+        k->converted_serial = vs->serial;
+    }
+    return k->rgba;
+}
+
+VideoFrameSource *video_source_for(uint32_t mem)
+{
+    for (uint32_t i = 0; i < 4u; i++)
+        if (codecs[i].dec && codecs[i].src.mem == mem && codecs[i].src.serial)
+            return &codecs[i].src;
+    return NULL;
 }
 
 SHIM(msvfw32, ICLocate)
@@ -337,6 +357,9 @@ SHIM(msvfw32, ICLocate)
         codecs[i].width = w;
         codecs[i].height = h;
         codecs[i].rgba = calloc((size_t)w * (size_t)h, 4u);
+        codecs[i].src.width = w;
+        codecs[i].src.height = h;
+        codecs[i].src.rgba = codec_frame_rgba;
         stdcall_ret(c, HIC_BASE + i, 5);
         return;
     }
@@ -364,7 +387,6 @@ SHIM(msvfw32, ICClose)
 {
     Codec *k = codec_by_handle(ARG(0));
     if (k) {
-        surface_forget_video(k->rgba);
         video_decoder_close(k->dec);
         free(k->rgba);
         memset(k, 0, sizeof(*k));
@@ -388,8 +410,10 @@ SHIM(msvfw32, ICDecompress)
     if (k && data && bits && bi_out) {
         uint32_t size = data == last_read_buf ? last_read_size : RD32(bi_fmt + 20u);
         /* Empty / undecodable packets (drop frames) repeat the previous picture. */
-        if (size == 0u || video_decode(k->dec, gptr(data), size, k->rgba) != 0)
+        if (size == 0u || video_decode(k->dec, gptr(data), size) != 0)
             k->bad_frames++;
+        k->src.serial++;
+        k->src.mem = bits;
         {
             int w = (int)RD32(bi_out + 4u);
             int32_t hh = (int32_t)RD32(bi_out + 8u);
@@ -402,19 +426,14 @@ SHIM(msvfw32, ICDecompress)
                 gm = RD32(bi_out + 44u);
                 bmask = RD32(bi_out + 48u);
             }
-            Surface *target = surface_by_client_mem(bits);
-            if (target) {
-                /* Fast path: the renderer uploads the decoded frame and lets the GPU
-                 * scale it; nothing is converted into the 16-bit DIB. */
-                target->video_rgba = k->rgba;
-                target->video_w = k->width;
-                target->video_h = k->height;
-                target->dirty = 1;
-                r = ICERR_OK;
-                c->r[0] = r;
+            if (ddraw_is_client_mem(bits)) {
+                /* The frame reaches the screen through a game-memory surface: the
+                 * renderer converts it lazily, only when that surface is drawn. */
+                c->r[0] = ICERR_OK;
                 c->r[4] += 4u;
                 return;
             }
+            const uint32_t *rgba = codec_frame_rgba(&k->src);
             uint32_t pitch = (((uint32_t)w * bpp / 8u) + 3u) & ~3u;
             /* No divisions per pixel: the Vita's Cortex-A9 has no hardware divide. */
             static int32_t xmap[2048];
@@ -426,7 +445,7 @@ SHIM(msvfw32, ICDecompress)
             int rb = __builtin_popcount(rm), gb = __builtin_popcount(gm), bb = __builtin_popcount(bmask);
             for (int y = 0; y < h; y++) {
                 int sy = (int)((int64_t)y * k->height / h);
-                const uint32_t *src = k->rgba + (size_t)sy * (size_t)k->width;
+                const uint32_t *src = rgba + (size_t)sy * (size_t)k->width;
                 uint32_t row = top_down ? (uint32_t)y : (uint32_t)(h - 1 - y);
                 uint8_t *dst = g_mem + bits + row * pitch;
                 if (bpp == 16u) {

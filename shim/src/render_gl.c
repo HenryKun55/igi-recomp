@@ -676,13 +676,15 @@ static void draw_rgba_quad(const uint32_t *px, int w, int h, const Rect *sr, con
 
 void render_blit(Surface *src, const Rect *sr, const Rect *dr, int use_ck)
 {
-    if (src->video_rgba) {
-        /* Video frame: upload the decoder's picture as is; the GPU scales it. */
-        Rect vr = { (int32_t)((int64_t)sr->l * src->video_w / (int32_t)src->w),
-                    (int32_t)((int64_t)sr->t * src->video_h / (int32_t)src->h),
-                    (int32_t)((int64_t)sr->r * src->video_w / (int32_t)src->w),
-                    (int32_t)((int64_t)sr->b * src->video_h / (int32_t)src->h) };
-        draw_rgba_quad(src->video_rgba, src->video_w, src->video_h, &vr, dr, 0);
+    VideoFrameSource *vs = src->client_mem ? video_source_for(src->mem) : NULL;
+    if (vs) {
+        /* Movie frame: convert it once, upload at native size, let the GPU scale. */
+        const uint32_t *px = vs->rgba(vs);
+        Rect vr = { (int32_t)((int64_t)sr->l * vs->width / (int32_t)src->w),
+                    (int32_t)((int64_t)sr->t * vs->height / (int32_t)src->h),
+                    (int32_t)((int64_t)sr->r * vs->width / (int32_t)src->w),
+                    (int32_t)((int64_t)sr->b * vs->height / (int32_t)src->h) };
+        draw_rgba_quad(px, vs->width, vs->height, &vr, dr, 0);
         return;
     }
     int saved_ck = src->has_ck;

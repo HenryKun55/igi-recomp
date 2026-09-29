@@ -112,11 +112,26 @@ static void client_surface_track(Surface *s, int add)
     }
 }
 
-void surface_forget_video(const uint32_t *rgba)
+static uint32_t client_mems[16];
+
+static void remember_client_mem(uint32_t mem)
 {
-    for (int i = 0; i < MAX_CLIENT_SURFACES; i++)
-        if (client_surfaces[i] && client_surfaces[i]->video_rgba == rgba)
-            client_surfaces[i]->video_rgba = NULL;
+    for (int i = 0; i < 16; i++)
+        if (client_mems[i] == mem)
+            return;
+    for (int i = 0; i < 16; i++)
+        if (!client_mems[i]) {
+            client_mems[i] = mem;
+            return;
+        }
+}
+
+int ddraw_is_client_mem(uint32_t mem)
+{
+    for (int i = 0; i < 16; i++)
+        if (client_mems[i] == mem)
+            return 1;
+    return 0;
 }
 
 Surface *surface_by_client_mem(uint32_t mem)
@@ -512,7 +527,6 @@ static void surf_Lock(Ctx *c)
     }
     uint32_t rect = ARG(1), desc = ARG(2);
     surface_alloc_mem(s);
-    s->video_rgba = NULL;
     if (is_render_target(s)) {
         render_readback(s);
         s->lock_readback = 1;
@@ -560,6 +574,7 @@ static void surf_SetSurfaceDesc(Ctx *c)
             client_surface_track(s, 1);
         s->mem = RD32(d + 36u);
         s->client_mem = 1;
+        remember_client_mem(s->mem);
         if (flags & DDSD_PITCH)
             s->pitch = RD32(d + 16u);
         if (flags & DDSD_WIDTH)
@@ -777,6 +792,7 @@ static void dd_CreateSurface(Ctx *c)
         s->mem = RD32(d + 36u);
         s->client_mem = 1;
         client_surface_track(s, 1);
+        remember_client_mem(s->mem);
         if (flags & DDSD_PITCH)
             s->pitch = RD32(d + 16u);
     }
