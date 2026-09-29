@@ -281,6 +281,12 @@ static void to_game(int wx, int wy, int32_t *gx, int32_t *gy)
 
 static void handle_event(const SDL_Event *e)
 {
+    /* IGI_NO_HOST_INPUT=1: automated runs ignore the real keyboard and mouse. */
+    static int no_host_input = -1;
+    if (no_host_input < 0)
+        no_host_input = getenv("IGI_NO_HOST_INPUT") != NULL;
+    if (no_host_input && e->type != SDL_QUIT && e->type != SDL_WINDOWEVENT)
+        return;
     switch (e->type) {
     case SDL_QUIT:
         user32_post_message(0x0010, 0, 0);   /* WM_CLOSE */

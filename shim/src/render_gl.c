@@ -1033,6 +1033,12 @@ void render_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, u
                s0->texture ? s0->texture->pf.bits : 0u, s0->texture ? s0->texture->has_ck : 0, s1->colorop,
                s1->alphaop, s1->texture ? s1->texture->w : 0u, s1->texture ? s1->texture->h : 0u, g_rs.rs[60]);
     }
+    if (g_trace_next_frame == 2 && pretransformed && nv <= 8) {
+        for (uint32_t i = 0; i < nv; i++)
+            rt_log("    v%u: %.1f %.1f z %.4f rhw %.4f col %08X spec %08X uv %.3f %.3f", i, (double)v[i].x,
+                   (double)v[i].y, (double)v[i].z, (double)v[i].w, v[i].color, v[i].spec, (double)v[i].uv[0][0],
+                   (double)v[i].uv[0][1]);
+    }
     apply_states(pretransformed, has_normal);
     int stages = apply_stages(ntex);
     apply_transforms(pretransformed);
