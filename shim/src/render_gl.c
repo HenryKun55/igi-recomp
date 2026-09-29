@@ -225,10 +225,39 @@ static int rt_w = 640, rt_h = 480;       /* game resolution */
 static int fb_w = 640, fb_h = 480;       /* drawable size in pixels */
 static int vp_x, vp_y, vp_w = 640, vp_h = 480;   /* game image inside the drawable (aspect kept) */
 
+/* Output framing: 1 = stretch to fill the display, 0 = keep 4:3 with black bars.
+ * IGI_ASPECT=fill|keep on desktop, "aspect=fill|keep" in ux0:data/igi/igi.cfg on the Vita. */
+static int aspect_fill = -1;
+
+static void load_aspect_setting(void)
+{
+    const char *v = getenv("IGI_ASPECT");
+#if defined(__vita__)
+    aspect_fill = 1;
+    static char line[128];
+    FILE *f = fopen("ux0:data/igi/igi.cfg", "r");
+    if (f) {
+        while (fgets(line, sizeof(line), f))
+            if (strncmp(line, "aspect=", 7) == 0)
+                v = line + 7;
+        fclose(f);
+    }
+#else
+    aspect_fill = 0;
+#endif
+    if (v)
+        aspect_fill = strncmp(v, "fill", 4) == 0;
+}
+
 static void update_letterbox(void)
 {
+    if (aspect_fill < 0)
+        load_aspect_setting();
     platform_get_drawable_size(&fb_w, &fb_h);
-    if ((int64_t)fb_w * rt_h > (int64_t)fb_h * rt_w) {
+    if (aspect_fill) {
+        vp_w = fb_w;
+        vp_h = fb_h;
+    } else if ((int64_t)fb_w * rt_h > (int64_t)fb_h * rt_w) {
         vp_h = fb_h;
         vp_w = (int)((int64_t)fb_h * rt_w / rt_h);
     } else {
@@ -238,6 +267,44 @@ static void update_letterbox(void)
     vp_x = (fb_w - vp_w) / 2;
     vp_y = (fb_h - vp_h) / 2;
 }
+
+/* Paint the area outside the game image black (glClear alone is not reliable
+ * outside the viewport on vitaGL). */
+static void draw_bars(void)
+{
+    if (vp_w == fb_w && vp_h == fb_h)
+        return;
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_BLEND);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_ALPHA_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_LIGHTING);
+    glDisable(GL_FOG);
+    glActiveTexture(GL_TEXTURE1);
+    glDisable(GL_TEXTURE_2D);
+    glActiveTexture(GL_TEXTURE0);
+    glDisable(GL_TEXTURE_2D);
+    glViewport(0, 0, fb_w, fb_h);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glOrtho(0, fb_w, 0, fb_h, -1, 1);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glColor4f(0, 0, 0, 1);
+    float x0 = (float)vp_x, x1 = (float)(vp_x + vp_w), y0 = (float)vp_y, y1 = (float)(vp_y + vp_h);
+    float w = (float)fb_w, h = (float)fb_h;
+    const float quads[4][4] = { { 0, 0, x0, h }, { x1, 0, w, h }, { 0, 0, w, y0 }, { 0, y1, w, h } };
+    glBegin(GL_QUADS);
+    for (int i = 0; i < 4; i++) {
+        glVertex2f(quads[i][0], quads[i][1]);
+        glVertex2f(quads[i][2], quads[i][1]);
+        glVertex2f(quads[i][2], quads[i][3]);
+        glVertex2f(quads[i][0], quads[i][3]);
+    }
+    glEnd();
+}
+
 static GLuint white_tex;
 static GLuint blit_tex;
 static int blit_tex_w, blit_tex_h;
@@ -310,70 +377,6 @@ void render_init(int w, int h)
 void render_begin_frame(void)
 {
     update_letterbox();
-    if (vp_w != fb_w || vp_h != fb_h) {
-        /* Keep the bars around the 4:3 image black. */
-        glDisable(GL_SCISSOR_TEST);
-        glDisable(GL_BLEND);
-        glDisable(GL_DEPTH_TEST);
-        glDisable(GL_ALPHA_TEST);
-        glDisable(GL_CULL_FACE);
-        glViewport(0, 0, fb_w, fb_h);
-        glClearColor(0, 0, 0, 1);
-        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-        glClear(GL_COLOR_BUFFER_BIT);
-    }
-}
-
-/* IGI_SHOT=N: save every Nth presented frame as shot_<frame>.bmp (debugging aid). */
-static void maybe_screenshot(void)
-{
-    static int every = -1;
-    static unsigned frame;
-    if (every < 0) {
-        const char *e = getenv("IGI_SHOT");
-        every = e ? atoi(e) : 0;
-    }
-    frame++;
-    int forced = g_trace_next_frame == 2;
-    if (!forced && (every <= 0 || frame % (unsigned)every))
-        return;
-    uint8_t *px = malloc((size_t)fb_w * (size_t)fb_h * 4u);
-    glPixelStorei(GL_PACK_ALIGNMENT, 4);
-    glReadPixels(0, 0, fb_w, fb_h, GL_BGRA, GL_UNSIGNED_BYTE, px);
-    char name[64];
-    snprintf(name, sizeof(name), "shot_%05u.bmp", frame);
-    FILE *f = fopen(name, "wb");
-    if (f) {
-        uint32_t size = 54u + (uint32_t)fb_w * (uint32_t)fb_h * 4u;
-        uint8_t h[54] = { 'B', 'M' };
-        memcpy(h + 2, &size, 4);
-        h[10] = 54;
-        h[14] = 40;
-        int32_t w = fb_w, hh = fb_h;
-        memcpy(h + 18, &w, 4);
-        memcpy(h + 22, &hh, 4);
-        h[26] = 1;
-        h[28] = 32;
-        fwrite(h, 1, 54, f);
-        fwrite(px, 4, (size_t)fb_w * (size_t)fb_h, f);
-        fclose(f);
-    }
-    free(px);
-}
-
-void render_present(void)
-{
-    maybe_screenshot();   /* before the trace state advances: saves the traced frame */
-    if (g_trace_next_frame == 2) {
-        g_trace_next_frame = 0;
-        rt_log("---- frame trace end ----");
-    } else if (g_trace_next_frame == 1) {
-        g_trace_next_frame = 2;
-        rt_log("---- frame trace begin ----");
-    }
-    platform_swap();
-    platform_pump();
-    render_begin_frame();
 }
 
 /* Game pixel rectangle -> GL window rectangle (y up). */
