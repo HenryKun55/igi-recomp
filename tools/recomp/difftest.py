@@ -44,7 +44,7 @@ def collect_forms(an, funcs, per_form):
     for fn in funcs.values():
         for ins in fn.insns.values():
             base = ins.mnem.split()[-1]
-            if base in SKIP or ins.mnem.startswith('rep') and base not in ('movsd', 'movsb', 'stosd', 'stosb'):
+            if base in SKIP or ins.mnem.startswith('rep') and base not in ('movsd', 'movsb', 'stosd', 'stosb', 'scasb'):
                 continue
             if any(o.type == X.X86_OP_REG and an.md.reg_name(o.reg) in ('cs', 'ds', 'es', 'ss', 'fs', 'gs')
                    for o in ins.ops):
