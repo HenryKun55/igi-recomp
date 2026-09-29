@@ -216,7 +216,8 @@ typedef struct Decoded {
     int pretransformed, has_normal, has_color, has_spec, ntex;
 } Decoded;
 
-static RVertex *decode(uint32_t fvf, uint32_t base, uint32_t stride, uint32_t count, Decoded *d)
+/* Decodes `count` vertices: vertex i comes from base + (src ? src[i] : i) * stride. */
+static RVertex *decode(uint32_t fvf, uint32_t base, uint32_t stride, const uint32_t *src, uint32_t count, Decoded *d)
 {
     if (count > vbuf_cap) {
         vbuf_cap = count + 256u;
@@ -253,8 +254,9 @@ static RVertex *decode(uint32_t fvf, uint32_t base, uint32_t stride, uint32_t co
     }
     const int pretransformed = d->pretransformed, has_normal = d->has_normal;
     const int has_color = d->has_color, has_spec = d->has_spec;
-    const uint8_t *p = g_mem + base;
-    for (uint32_t i = 0; i < count; i++, p += stride) {
+    const uint8_t *vb = g_mem + base;
+    for (uint32_t i = 0; i < count; i++) {
+        const uint8_t *p = vb + (size_t)(src ? src[i] : i) * stride;
         RVertex *v = &vbuf[i];
         memcpy(&v->x, p, 12);
         if (pretransformed)
@@ -616,16 +618,54 @@ static void draw(uint32_t prim, uint32_t fvf, uint32_t verts, uint32_t stride, u
             rebased_cap = ni + 1024u;
             rebased = realloc(rebased, rebased_cap * sizeof(uint16_t));
         }
-        for (uint32_t i = 0; i < ni; i++) {
-            uint32_t x = (uint32_t)ip[i * 2u] | ((uint32_t)ip[i * 2u + 1u] << 8);
-            rebased[i] = (uint16_t)(x - lo);
+        uint32_t range = hi - lo + 1u;
+        if (range <= ni) {
+            for (uint32_t i = 0; i < ni; i++) {
+                uint32_t x = (uint32_t)ip[i * 2u] | ((uint32_t)ip[i * 2u + 1u] << 8);
+                rebased[i] = (uint16_t)(x - lo);
+            }
+            RVertex *v = decode(fvf, verts + lo * stride, stride, NULL, range, &d);
+            render_draw((int)prim, v, range, rebased, ni, d.pretransformed, d.has_normal, d.has_color,
+                        d.has_spec, d.ntex);
+            return;
         }
-        RVertex *v = decode(fvf, verts + lo * stride, stride, hi - lo + 1u, &d);
-        render_draw((int)prim, v, hi - lo + 1u, rebased, ni, d.pretransformed, d.has_normal, d.has_color,
-                    d.has_spec, d.ntex);
+        /* Sparse use of a big range: decode only the referenced vertices, in
+         * first-use order. slot_gen marks which range entries this draw mapped. */
+        static uint32_t *slot, *slot_gen, *used;
+        static uint32_t slot_cap, used_cap, gen;
+        if (range > slot_cap) {
+            slot_cap = range + 1024u;
+            slot = realloc(slot, slot_cap * sizeof(uint32_t));
+            slot_gen = realloc(slot_gen, slot_cap * sizeof(uint32_t));
+            memset(slot_gen, 0, slot_cap * sizeof(uint32_t));
+            gen = 0;
+        }
+        if (ni > used_cap) {
+            used_cap = ni + 1024u;
+            used = realloc(used, used_cap * sizeof(uint32_t));
+        }
+        if (++gen == 0) {
+            memset(slot_gen, 0, slot_cap * sizeof(uint32_t));
+            gen = 1;
+        }
+        uint32_t nu = 0;
+        for (uint32_t i = 0; i < ni; i++) {
+            uint32_t x = ((uint32_t)ip[i * 2u] | ((uint32_t)ip[i * 2u + 1u] << 8)) - lo;
+            if (x >= range)
+                x = range - 1u;
+            if (slot_gen[x] != gen) {
+                slot_gen[x] = gen;
+                slot[x] = nu;
+                used[nu++] = x;
+            }
+            rebased[i] = (uint16_t)slot[x];
+        }
+        RVertex *v = decode(fvf, verts + lo * stride, stride, used, nu, &d);
+        render_draw((int)prim, v, nu, rebased, ni, d.pretransformed, d.has_normal, d.has_color, d.has_spec,
+                    d.ntex);
         return;
     }
-    RVertex *v = decode(fvf, verts, stride, nv, &d);
+    RVertex *v = decode(fvf, verts, stride, NULL, nv, &d);
     render_draw((int)prim, v, nv, NULL, 0, d.pretransformed, d.has_normal, d.has_color, d.has_spec, d.ntex);
 }
 
