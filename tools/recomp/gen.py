@@ -867,7 +867,11 @@ class FuncGen:
         self.fused.add(n.addr)
         self.fused_pairs[ins.addr] = n.addr
         cc = cond_of(n.mnem)
-        if is_test:
+        fcc = self.fcom_test(ins, idx) if is_test and cc in ('e', 'ne') else None
+        if fcc is not None:
+            # fcom ... fnstsw ax; test ah, K; je/jne: branch on the compared values.
+            e = fcc if cc == 'e' else '!(%s)' % fcc
+        elif is_test:
             e = {
                 'e': 'r == 0', 'ne': 'r != 0', 's': '(%s)r < 0' % st, 'ns': '(%s)r >= 0' % st,
                 'l': '(%s)r < 0' % st, 'ge': '(%s)r >= 0' % st, 'le': '(%s)r <= 0' % st, 'g': '(%s)r > 0' % st,
@@ -891,6 +895,41 @@ class FuncGen:
         out.append('if (%s) { %s }' % (e, self.goto(t)))
         out.append('}')
         return [' '.join(out)]
+
+    # test ah, K after fnstsw ax: the condition "(C3,C2,C0 & K) == 0" in terms of the
+    # compared values (C0: a < b, C3: a == b, all three set when unordered).
+    FCOM_ZERO = {0x01: 'fp_ca >= fp_cb', 0x05: 'fp_ca >= fp_cb',
+                 0x40: '(fp_ca < fp_cb || fp_ca > fp_cb)', 0x44: '(fp_ca < fp_cb || fp_ca > fp_cb)',
+                 0x41: 'fp_ca > fp_cb', 0x45: 'fp_ca > fp_cb'}
+
+    def fcom_test(self, ins, idx):
+        """If `ins` is `test ah, K` reading the status word stored by `fnstsw ax` right
+        before it, and the last x87 instruction before that (same basic block, no call
+        in between) is a compare, return the C condition for "result is zero"."""
+        d_op, s_op = ins.ops
+        if d_op.type != X.X86_OP_REG or self.rname(d_op.reg) != 'ah' or s_op.type != X.X86_OP_IMM:
+            return None
+        cond = self.FCOM_ZERO.get(s_op.imm & 0xFF)
+        if cond is None or idx < 2:
+            return None
+        fn = self.fn
+        prev = fn.insns[self.order[idx - 1]]
+        if prev.addr + prev.size != ins.addr or ins.addr in fn.block_starts or prev.mnem != 'fnstsw' \
+                or not prev.ops or self.rname(prev.ops[0].reg) != 'ax':
+            return None
+        cur = prev
+        for j in range(idx - 2, -1, -1):
+            p = fn.insns[self.order[j]]
+            if p.addr + p.size != cur.addr or cur.addr in fn.block_starts:
+                return None
+            if p.mnem == 'call':
+                return None
+            info = self.g.x87_info(p)
+            if info is not None:
+                code = ' '.join(self.emit_x87(p, bytes(p.raw.bytes)))
+                return cond if 'FCOM(' in code else None
+            cur = p
+        return None
 
     def i_cmp(self, ins):
         return self.cmp_like(ins, False)
@@ -1698,6 +1737,9 @@ class Generator:
         if fg.fmode != 'none':
             out.append('    uint32_t fp_sw = c->fsw;')
             voids.append('fp_sw')
+        if 'FCOM(' in text or 'fp_ca' in text:
+            out.append('    x87_t fp_ca = 0.0, fp_cb = 0.0;')
+            voids += ['fp_ca', 'fp_cb']
         regs = sorted(fg.fregs_used)
         if regs:
             out.append('    x87_t %s;' % ', '.join('fr%d = 0.0' % k for k in regs))

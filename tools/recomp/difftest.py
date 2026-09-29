@@ -85,10 +85,12 @@ def emit_test(g, ins, idx, mode):
     fpu = ''
     if mode == 'static':
         fpu = ('    const uint32_t fp_top0 = c->ftop; uint32_t fp_sw = c->fsw; (void)fp_top0; (void)fp_sw;\n'
+               '    x87_t fp_ca = 0.0, fp_cb = 0.0; (void)fp_ca; (void)fp_cb;\n'
                '    x87_t %s; %s\n') % (', '.join('fr%d = 0.0' % k for k in range(1, 9)),
                                         ' '.join('(void)fr%d;' % k for k in range(1, 9)))
     elif mode == 'dynamic':
         fpu = '    uint32_t fp_top = c->ftop; uint32_t fp_sw = c->fsw; (void)fp_top; (void)fp_sw;\n'
+        fpu += '    x87_t fp_ca = 0.0, fp_cb = 0.0; (void)fp_ca; (void)fp_cb;\n'
     return ('static uint64_t t_%d(Ctx *c)\n{\n'
             '    uint32_t eax = c->r[0], ecx = c->r[1], edx = c->r[2], ebx = c->r[3];\n'
             '    uint32_t esp = c->r[4], ebp = c->r[5], esi = c->r[6], edi = c->r[7];\n'

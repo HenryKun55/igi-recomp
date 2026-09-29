@@ -162,7 +162,9 @@ static inline uint32_t rt_fcom(uint32_t sw, double a, double b)
     return (sw & ~(FSW_C0 | FSW_C1 | FSW_C2 | FSW_C3)) | cc;
 }
 
-#define FCOM(a, b) (fp_sw = rt_fcom(fp_sw, (a), (b)))
+/* The operands are kept in fp_ca/fp_cb so that a following `fnstsw ax; test ah, K;
+ * jcc` can branch on them directly (FuncGen.fcom_test). */
+#define FCOM(a, b) (fp_ca = (a), fp_cb = (b), fp_sw = rt_fcom(fp_sw, fp_ca, fp_cb))
 
 static inline uint32_t rt_fstsw(uint32_t sw, uint32_t top) { return (sw & ~0x3800u) | ((top & 7u) << 11); }
 
