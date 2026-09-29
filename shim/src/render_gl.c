@@ -1865,7 +1865,6 @@ static int rhw_invisible(int prim, const RVertex *v, uint32_t nv)
 
 static uint16_t batch_i[BATCH_MAX_I];
 static uint32_t batch_nv, batch_ni;
-static RenderState batch_rs;
 static uint32_t batch_serial;
 static Layout batch_layout;
 static int batch_active;
@@ -1896,17 +1895,16 @@ static void flush_batch(void)
     batch_active = 0;
     if (!batch_ni)
         return;
-    if (g_rs_serial == batch_serial) {
-        submit(PRIM_TRIANGLES, &batch_layout, batch_nv, batch_i, batch_ni);
-    } else {
-        /* The state changed since the batch started: draw it with its own state. */
-        static RenderState saved;
-        saved = g_rs;
-        g_rs = batch_rs;
-        submit(PRIM_TRIANGLES, &batch_layout, batch_nv, batch_i, batch_ni);
-        g_rs = saved;
-    }
+    /* State setters flush before changing g_rs (render_state_changing), so the
+     * current state is still the batch's. */
+    submit(PRIM_TRIANGLES, &batch_layout, batch_nv, batch_i, batch_ni);
     batch_nv = batch_ni = 0;
+}
+
+void render_state_changing(void)
+{
+    render_flush();
+    g_rs_serial++;
 }
 
 void render_flush(void)
@@ -1977,9 +1975,15 @@ static int near_clip_impl(int prim, const RVertex *v, uint32_t nv, const uint16_
         d_cap = nv + 1024u;
         d = realloc(d, d_cap * sizeof(float));
     }
-    float m[16];
-    mat_mul(g_rs.world, g_rs.view, m);
-    mat_mul(m, g_rs.proj, m);
+    static float m[16];
+    static uint32_t m_serial;
+    static int m_valid;
+    if (!m_valid || m_serial != g_rs_serial) {
+        mat_mul(g_rs.world, g_rs.view, m);
+        mat_mul(m, g_rs.proj, m);
+        m_serial = g_rs_serial;
+        m_valid = 1;
+    }
     int any = 0;
     for (uint32_t i = 0; i < nv; i++) {
         d[i] = v[i].x * m[2] + v[i].y * m[6] + v[i].z * m[10] + m[14];
@@ -2090,7 +2094,6 @@ static void batch_draw_impl(int prim, const RVertex *v, uint32_t nv, const uint1
         render_flush();
     if (!batch_active) {
         batch_active = 1;
-        batch_rs = g_rs;
         batch_serial = g_rs_serial;
         layout_init(&batch_layout, pretransformed, has_normal, has_color, has_spec, ntex);
         batch_nv = batch_ni = 0;

@@ -422,8 +422,8 @@ static void dev_SetTransform(Ctx *c)
 {
     float *m = transform_slot(ARG(1));
     if (m && memcmp(m, gptr(ARG(2)), 64)) {
+        render_state_changing();
         memcpy(m, gptr(ARG(2)), 64);
-        g_rs_serial++;
     }
     stdcall_ret(c, D3D_OK, 3);
 }
@@ -445,34 +445,33 @@ static void dev_MultiplyTransform(Ctx *c)
         for (int i = 0; i < 4; i++)
             for (int j = 0; j < 4; j++)
                 r[i * 4 + j] = m[i * 4] * b[j] + m[i * 4 + 1] * b[4 + j] + m[i * 4 + 2] * b[8 + j] + m[i * 4 + 3] * b[12 + j];
-        memcpy(m, r, 64);
-        g_rs_serial++;
+        if (memcmp(m, r, 64)) {
+            render_state_changing();
+            memcpy(m, r, 64);
+        }
     }
     stdcall_ret(c, D3D_OK, 3);
 }
 
-/* Bumps g_rs_serial if the state bytes [p, p+n) differ from `old`. */
-static void rs_note(const void *old, const void *p, size_t n)
-{
-    if (memcmp(old, p, n))
-        g_rs_serial++;
-}
 
 static void dev_SetViewport(Ctx *c)
 {
     uint32_t v = ARG(1);
-    int32_t old_i[4] = { g_rs.vp_x, g_rs.vp_y, g_rs.vp_w, g_rs.vp_h };
-    float old_z[2] = { g_rs.vp_minz, g_rs.vp_maxz };
-    g_rs.vp_x = (int32_t)RD32(v);
-    g_rs.vp_y = (int32_t)RD32(v + 4u);
-    g_rs.vp_w = (int32_t)RD32(v + 8u);
-    g_rs.vp_h = (int32_t)RD32(v + 12u);
-    memcpy(&g_rs.vp_minz, gptr(v + 16u), 4);
-    memcpy(&g_rs.vp_maxz, gptr(v + 20u), 4);
-    int32_t new_i[4] = { g_rs.vp_x, g_rs.vp_y, g_rs.vp_w, g_rs.vp_h };
-    float new_z[2] = { g_rs.vp_minz, g_rs.vp_maxz };
-    rs_note(old_i, new_i, sizeof(old_i));
-    rs_note(old_z, new_z, sizeof(old_z));
+    int32_t vi[4];
+    float vz[2];
+    for (int k = 0; k < 4; k++)
+        vi[k] = (int32_t)RD32(v + 4u * (uint32_t)k);
+    memcpy(vz, gptr(v + 16u), 8);
+    if (vi[0] != g_rs.vp_x || vi[1] != g_rs.vp_y || vi[2] != g_rs.vp_w || vi[3] != g_rs.vp_h ||
+        memcmp(&vz[0], &g_rs.vp_minz, 4) || memcmp(&vz[1], &g_rs.vp_maxz, 4)) {
+        render_state_changing();
+        g_rs.vp_x = vi[0];
+        g_rs.vp_y = vi[1];
+        g_rs.vp_w = vi[2];
+        g_rs.vp_h = vi[3];
+        g_rs.vp_minz = vz[0];
+        g_rs.vp_maxz = vz[1];
+    }
     stdcall_ret(c, D3D_OK, 2);
 }
 
@@ -491,24 +490,17 @@ static void dev_GetViewport(Ctx *c)
 static void dev_SetMaterial(Ctx *c)
 {
     uint32_t m = ARG(1);
-    float old[17];
-    memcpy(old, g_rs.mat_diffuse, 16);
-    memcpy(old + 4, g_rs.mat_ambient, 16);
-    memcpy(old + 8, g_rs.mat_specular, 16);
-    memcpy(old + 12, g_rs.mat_emissive, 16);
-    old[16] = g_rs.mat_power;
-    memcpy(g_rs.mat_diffuse, gptr(m), 16);
-    memcpy(g_rs.mat_ambient, gptr(m + 16u), 16);
-    memcpy(g_rs.mat_specular, gptr(m + 32u), 16);
-    memcpy(g_rs.mat_emissive, gptr(m + 48u), 16);
-    memcpy(&g_rs.mat_power, gptr(m + 64u), 4);
-    float now[17];
-    memcpy(now, g_rs.mat_diffuse, 16);
-    memcpy(now + 4, g_rs.mat_ambient, 16);
-    memcpy(now + 8, g_rs.mat_specular, 16);
-    memcpy(now + 12, g_rs.mat_emissive, 16);
-    now[16] = g_rs.mat_power;
-    rs_note(old, now, sizeof(old));
+    const uint8_t *g = gptr(m);
+    if (memcmp(g_rs.mat_diffuse, g, 16) || memcmp(g_rs.mat_ambient, g + 16, 16) ||
+        memcmp(g_rs.mat_specular, g + 32, 16) || memcmp(g_rs.mat_emissive, g + 48, 16) ||
+        memcmp(&g_rs.mat_power, g + 64, 4)) {
+        render_state_changing();
+        memcpy(g_rs.mat_diffuse, g, 16);
+        memcpy(g_rs.mat_ambient, g + 16, 16);
+        memcpy(g_rs.mat_specular, g + 32, 16);
+        memcpy(g_rs.mat_emissive, g + 48, 16);
+        memcpy(&g_rs.mat_power, g + 64, 4);
+    }
     stdcall_ret(c, D3D_OK, 2);
 }
 
@@ -527,16 +519,18 @@ static void dev_SetLight(Ctx *c)
 {
     uint32_t i = ARG(1), p = ARG(2);
     if (i < MAX_LIGHTS) {
-        Light *l = &g_rs.lights[i];
-        Light old = *l;
-        l->type = RD32(p);
-        memcpy(l->diffuse, gptr(p + 4u), 16);
-        memcpy(l->specular, gptr(p + 20u), 16);
-        memcpy(l->ambient, gptr(p + 36u), 16);
-        memcpy(l->pos, gptr(p + 52u), 12);
-        memcpy(l->dir, gptr(p + 64u), 12);
-        memcpy(&l->range, gptr(p + 76u), 28);
-        rs_note(&old, l, sizeof(old));
+        Light n = g_rs.lights[i];
+        n.type = RD32(p);
+        memcpy(n.diffuse, gptr(p + 4u), 16);
+        memcpy(n.specular, gptr(p + 20u), 16);
+        memcpy(n.ambient, gptr(p + 36u), 16);
+        memcpy(n.pos, gptr(p + 52u), 12);
+        memcpy(n.dir, gptr(p + 64u), 12);
+        memcpy(&n.range, gptr(p + 76u), 28);
+        if (memcmp(&n, &g_rs.lights[i], sizeof(n))) {
+            render_state_changing();
+            g_rs.lights[i] = n;
+        }
     }
     stdcall_ret(c, D3D_OK, 3);
 }
@@ -545,8 +539,8 @@ static void dev_LightEnable(Ctx *c)
 {
     uint32_t i = ARG(1);
     if (i < MAX_LIGHTS && g_rs.lights[i].enabled != (ARG(2) != 0)) {
+        render_state_changing();
         g_rs.lights[i].enabled = ARG(2) != 0;
-        g_rs_serial++;
     }
     stdcall_ret(c, D3D_OK, 3);
 }
@@ -562,8 +556,8 @@ static void dev_SetRenderState(Ctx *c)
 {
     uint32_t s = ARG(1);
     if (s < 256u && g_rs.rs[s] != ARG(2)) {
+        render_state_changing();
         g_rs.rs[s] = ARG(2);
-        g_rs_serial++;
     }
     stdcall_ret(c, D3D_OK, 3);
 }
@@ -581,8 +575,8 @@ static void dev_SetTexture(Ctx *c)
     if (stage < MAX_STAGES) {
         Surface *t = surface_from_obj(ARG(2));
         if (g_rs.stage[stage].texture != t) {
+            render_state_changing();
             g_rs.stage[stage].texture = t;
-            g_rs_serial++;
         }
     }
     stdcall_ret(c, D3D_OK, 3);
@@ -624,13 +618,13 @@ static void dev_SetTextureStageState(Ctx *c)
         StageState *st = &g_rs.stage[stage];
         if (type == 12u) {           /* ADDRESS sets both */
             if (st->addressu != value || st->addressv != value)
-                g_rs_serial++;
+                render_state_changing();
             st->addressu = st->addressv = value;
         } else {
             uint32_t *p = tss_slot(st, type);
             if (p && *p != value) {
+                render_state_changing();
                 *p = value;
-                g_rs_serial++;
             }
         }
     }
