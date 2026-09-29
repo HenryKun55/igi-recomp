@@ -285,9 +285,12 @@ static RVertex *decode_vertices(uint32_t fvf, uint32_t base, uint32_t stride, co
         v->color = d3dcolor_to_rgba(col);
         v->spec = d3dcolor_to_rgba(spec);
         for (int t = 0; t < nuv; t++) {
-            memcpy(v->uv[t], p + uv_off[t], uv_bytes[t]);
-            if (uv_bytes[t] == 4u)
+            if (uv_bytes[t] == 8u) {
+                memcpy(v->uv[t], p + uv_off[t], 8);
+            } else {
+                memcpy(v->uv[t], p + uv_off[t], 4);
                 v->uv[t][1] = 0.0f;
+            }
         }
     }
     return vbuf;
@@ -413,8 +416,10 @@ static float *transform_slot(uint32_t type)
 static void dev_SetTransform(Ctx *c)
 {
     float *m = transform_slot(ARG(1));
-    if (m)
+    if (m && memcmp(m, gptr(ARG(2)), 64)) {
         memcpy(m, gptr(ARG(2)), 64);
+        g_rs_serial++;
+    }
     stdcall_ret(c, D3D_OK, 3);
 }
 
@@ -436,19 +441,33 @@ static void dev_MultiplyTransform(Ctx *c)
             for (int j = 0; j < 4; j++)
                 r[i * 4 + j] = m[i * 4] * b[j] + m[i * 4 + 1] * b[4 + j] + m[i * 4 + 2] * b[8 + j] + m[i * 4 + 3] * b[12 + j];
         memcpy(m, r, 64);
+        g_rs_serial++;
     }
     stdcall_ret(c, D3D_OK, 3);
+}
+
+/* Bumps g_rs_serial if the state bytes [p, p+n) differ from `old`. */
+static void rs_note(const void *old, const void *p, size_t n)
+{
+    if (memcmp(old, p, n))
+        g_rs_serial++;
 }
 
 static void dev_SetViewport(Ctx *c)
 {
     uint32_t v = ARG(1);
+    int32_t old_i[4] = { g_rs.vp_x, g_rs.vp_y, g_rs.vp_w, g_rs.vp_h };
+    float old_z[2] = { g_rs.vp_minz, g_rs.vp_maxz };
     g_rs.vp_x = (int32_t)RD32(v);
     g_rs.vp_y = (int32_t)RD32(v + 4u);
     g_rs.vp_w = (int32_t)RD32(v + 8u);
     g_rs.vp_h = (int32_t)RD32(v + 12u);
     memcpy(&g_rs.vp_minz, gptr(v + 16u), 4);
     memcpy(&g_rs.vp_maxz, gptr(v + 20u), 4);
+    int32_t new_i[4] = { g_rs.vp_x, g_rs.vp_y, g_rs.vp_w, g_rs.vp_h };
+    float new_z[2] = { g_rs.vp_minz, g_rs.vp_maxz };
+    rs_note(old_i, new_i, sizeof(old_i));
+    rs_note(old_z, new_z, sizeof(old_z));
     stdcall_ret(c, D3D_OK, 2);
 }
 
@@ -467,11 +486,24 @@ static void dev_GetViewport(Ctx *c)
 static void dev_SetMaterial(Ctx *c)
 {
     uint32_t m = ARG(1);
+    float old[17];
+    memcpy(old, g_rs.mat_diffuse, 16);
+    memcpy(old + 4, g_rs.mat_ambient, 16);
+    memcpy(old + 8, g_rs.mat_specular, 16);
+    memcpy(old + 12, g_rs.mat_emissive, 16);
+    old[16] = g_rs.mat_power;
     memcpy(g_rs.mat_diffuse, gptr(m), 16);
     memcpy(g_rs.mat_ambient, gptr(m + 16u), 16);
     memcpy(g_rs.mat_specular, gptr(m + 32u), 16);
     memcpy(g_rs.mat_emissive, gptr(m + 48u), 16);
     memcpy(&g_rs.mat_power, gptr(m + 64u), 4);
+    float now[17];
+    memcpy(now, g_rs.mat_diffuse, 16);
+    memcpy(now + 4, g_rs.mat_ambient, 16);
+    memcpy(now + 8, g_rs.mat_specular, 16);
+    memcpy(now + 12, g_rs.mat_emissive, 16);
+    now[16] = g_rs.mat_power;
+    rs_note(old, now, sizeof(old));
     stdcall_ret(c, D3D_OK, 2);
 }
 
@@ -491,6 +523,7 @@ static void dev_SetLight(Ctx *c)
     uint32_t i = ARG(1), p = ARG(2);
     if (i < MAX_LIGHTS) {
         Light *l = &g_rs.lights[i];
+        Light old = *l;
         l->type = RD32(p);
         memcpy(l->diffuse, gptr(p + 4u), 16);
         memcpy(l->specular, gptr(p + 20u), 16);
@@ -498,6 +531,7 @@ static void dev_SetLight(Ctx *c)
         memcpy(l->pos, gptr(p + 52u), 12);
         memcpy(l->dir, gptr(p + 64u), 12);
         memcpy(&l->range, gptr(p + 76u), 28);
+        rs_note(&old, l, sizeof(old));
     }
     stdcall_ret(c, D3D_OK, 3);
 }
@@ -505,8 +539,10 @@ static void dev_SetLight(Ctx *c)
 static void dev_LightEnable(Ctx *c)
 {
     uint32_t i = ARG(1);
-    if (i < MAX_LIGHTS)
+    if (i < MAX_LIGHTS && g_rs.lights[i].enabled != (ARG(2) != 0)) {
         g_rs.lights[i].enabled = ARG(2) != 0;
+        g_rs_serial++;
+    }
     stdcall_ret(c, D3D_OK, 3);
 }
 
@@ -520,8 +556,10 @@ static void dev_GetLightEnable(Ctx *c)
 static void dev_SetRenderState(Ctx *c)
 {
     uint32_t s = ARG(1);
-    if (s < 256u)
+    if (s < 256u && g_rs.rs[s] != ARG(2)) {
         g_rs.rs[s] = ARG(2);
+        g_rs_serial++;
+    }
     stdcall_ret(c, D3D_OK, 3);
 }
 
@@ -535,8 +573,13 @@ static void dev_GetRenderState(Ctx *c)
 static void dev_SetTexture(Ctx *c)
 {
     uint32_t stage = ARG(1);
-    if (stage < MAX_STAGES)
-        g_rs.stage[stage].texture = surface_from_obj(ARG(2));
+    if (stage < MAX_STAGES) {
+        Surface *t = surface_from_obj(ARG(2));
+        if (g_rs.stage[stage].texture != t) {
+            g_rs.stage[stage].texture = t;
+            g_rs_serial++;
+        }
+    }
     stdcall_ret(c, D3D_OK, 3);
 }
 
@@ -575,11 +618,15 @@ static void dev_SetTextureStageState(Ctx *c)
     if (stage < MAX_STAGES) {
         StageState *st = &g_rs.stage[stage];
         if (type == 12u) {           /* ADDRESS sets both */
+            if (st->addressu != value || st->addressv != value)
+                g_rs_serial++;
             st->addressu = st->addressv = value;
         } else {
             uint32_t *p = tss_slot(st, type);
-            if (p)
+            if (p && *p != value) {
                 *p = value;
+                g_rs_serial++;
+            }
         }
     }
     stdcall_ret(c, D3D_OK, 4);

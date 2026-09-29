@@ -143,8 +143,14 @@ static int deadzone(int v)
 
 void platform_pump(void)
 {
-    static uint64_t last_look;
+    static uint64_t last_look, last_pump;
     platform_scripted_input();
+    /* The game polls input and messages many times per frame; the pad only
+     * needs sampling every couple of milliseconds. */
+    uint64_t t = sceKernelGetProcessTimeWide();
+    if (t - last_pump < 2000u)
+        return;
+    last_pump = t;
     SceCtrlData pad;
     if (sceCtrlPeekBufferPositive(0, &pad, 1) < 0)
         return;

@@ -16,6 +16,7 @@
 #endif
 
 RenderState g_rs;
+uint32_t g_rs_serial;
 static uint32_t perf_gpu_draws;   /* draws actually submitted to GL this frame */
 static void perf_frame_begin_swap(void);
 static void perf_swap(void);
@@ -493,6 +494,7 @@ void render_init(int w, int h)
     }
     /* D3D defaults. */
     memset(&g_rs, 0, sizeof(g_rs));
+    g_rs_serial++;
     g_rs.rs[7] = 1;          /* ZENABLE */
     g_rs.rs[14] = 1;         /* ZWRITEENABLE */
     g_rs.rs[19] = 2;         /* SRCBLEND ONE */
@@ -1857,6 +1859,7 @@ static int rhw_invisible(int prim, const RVertex *v, uint32_t nv)
 static uint16_t batch_i[BATCH_MAX_I];
 static uint32_t batch_nv, batch_ni;
 static RenderState batch_rs;
+static uint32_t batch_serial;
 static Layout batch_layout;
 static int batch_active;
 static int batch_enabled = -1;
@@ -1886,11 +1889,16 @@ static void flush_batch(void)
     batch_active = 0;
     if (!batch_ni)
         return;
-    static RenderState saved;
-    saved = g_rs;
-    g_rs = batch_rs;
-    submit(PRIM_TRIANGLES, &batch_layout, batch_nv, batch_i, batch_ni);
-    g_rs = saved;
+    if (g_rs_serial == batch_serial) {
+        submit(PRIM_TRIANGLES, &batch_layout, batch_nv, batch_i, batch_ni);
+    } else {
+        /* The state changed since the batch started: draw it with its own state. */
+        static RenderState saved;
+        saved = g_rs;
+        g_rs = batch_rs;
+        submit(PRIM_TRIANGLES, &batch_layout, batch_nv, batch_i, batch_ni);
+        g_rs = saved;
+    }
     batch_nv = batch_ni = 0;
 }
 
@@ -2060,11 +2068,12 @@ static void batch_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *
     if (batch_active &&
         (batch_nv + nv > BATCH_MAX_V || batch_ni + tris * 3u > BATCH_MAX_I || bl->pretransformed != pretransformed ||
          bl->has_normal != has_normal || bl->has_color != has_color || bl->has_spec != has_spec || bl->ntex != ntex ||
-         memcmp(&g_rs, &batch_rs, sizeof(g_rs)) != 0))
+         g_rs_serial != batch_serial))
         render_flush();
     if (!batch_active) {
         batch_active = 1;
         batch_rs = g_rs;
+        batch_serial = g_rs_serial;
         layout_init(&batch_layout, pretransformed, has_normal, has_color, has_spec, ntex);
         batch_nv = batch_ni = 0;
     }
