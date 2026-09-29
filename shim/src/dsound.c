@@ -19,7 +19,7 @@
 #define DSBSTATUS_LOOPING 0x4u
 
 #define OUT_RATE 44100
-#define MAX_BUFFERS 256
+#define MAX_BUFFERS 4096
 
 typedef struct Vec3 {
     float x, y, z;
@@ -703,14 +703,18 @@ static SoundBuffer *buffer_new(void)
     b->max_dist = 1e9f;
     b->gain_l = b->gain_r = 1.0f;
     b->obj = com_new(buf_vtbl, b);
+    int slot = -1;
     SDL_LockAudioDevice(dev);
     for (int i = 0; i < MAX_BUFFERS; i++) {
         if (!buffers[i]) {
             buffers[i] = b;
+            slot = i;
             break;
         }
     }
     SDL_UnlockAudioDevice(dev);
+    if (slot < 0)
+        rt_log("DirectSound: more than %d buffers, this one will be silent", MAX_BUFFERS);
     return b;
 }
 
@@ -792,12 +796,8 @@ static void ds_GetCaps(Ctx *c)
     WR32(p + 4u, 0x00000F5Fu);   /* DSCAPS_*: primary/secondary mono/stereo 8/16, continuous rate */
     WR32(p + 8u, 100);
     WR32(p + 12u, 100000);
-    WR32(p + 20u, MAX_BUFFERS);
-    WR32(p + 24u, MAX_BUFFERS);
-    WR32(p + 28u, MAX_BUFFERS);
-    WR32(p + 32u, MAX_BUFFERS);
-    WR32(p + 36u, MAX_BUFFERS);
-    WR32(p + 40u, MAX_BUFFERS);
+    for (uint32_t k = 20u; k <= 40u; k += 4u)
+        WR32(p + k, 256);
     stdcall_ret(c, DS_OK, 2);
 }
 
