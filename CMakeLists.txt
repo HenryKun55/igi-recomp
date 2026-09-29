@@ -48,14 +48,17 @@ list(TRANSFORM GEN_FILES PREPEND "${GEN_DIR}/")
 
 add_library(igi_recomp STATIC ${GEN_FILES})
 target_include_directories(igi_recomp PUBLIC runtime/include "${GEN_DIR}")
-target_compile_options(igi_recomp PRIVATE -Wall -Wextra -O2)
+# Guest code relies on x86 semantics: wrapping signed arithmetic, type punning
+# and signed char. Without these, GCC (Vita) and clang (macOS) optimize the
+# recompiled code differently.
+target_compile_options(igi_recomp PRIVATE -Wall -Wextra -O2 -fwrapv -fno-strict-aliasing -fsigned-char)
 
 file(GLOB RUNTIME_SOURCES CONFIGURE_DEPENDS runtime/src/*.c)
 file(GLOB SHIM_SOURCES CONFIGURE_DEPENDS shim/src/*.c)
 
 add_executable(igi ${RUNTIME_SOURCES} ${SHIM_SOURCES})
 target_include_directories(igi PRIVATE runtime/include shim/include "${GEN_DIR}")
-target_compile_options(igi PRIVATE -Wall -Wextra)
+target_compile_options(igi PRIVATE -Wall -Wextra -fwrapv -fno-strict-aliasing -fsigned-char)
 
 if(VITA)
     target_include_directories(igi PRIVATE "$ENV{VITASDK}/arm-vita-eabi/include/SDL2")
