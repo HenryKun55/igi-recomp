@@ -16,6 +16,8 @@
 #endif
 
 RenderState g_rs;
+static void perf_frame_begin_swap(void);
+static void perf_swap(void);
 
 /* ---- GL state cache ------------------------------------------------------
  * D3D state is re-applied before every draw. Forwarding redundant calls is
@@ -459,7 +461,8 @@ void render_present(void)
         g_trace_next_frame = 2;
         rt_log("---- frame trace begin ----");
     }
-    platform_swap();
+    perf_frame_begin_swap();
+    perf_swap();
     platform_pump();
     render_begin_frame();
 }
@@ -1108,8 +1111,8 @@ static float *nrm_buf;
 static float *uv_buf[MAX_STAGES];
 static size_t pos_cap;
 
-void render_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, uint32_t ni,
-                 int pretransformed, int has_normal, int has_color, int has_spec, int ntex)
+static void render_draw_impl(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, uint32_t ni,
+                             int pretransformed, int has_normal, int has_color, int has_spec, int ntex)
 {
     if (!nv)
         return;
@@ -1246,4 +1249,163 @@ void render_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, u
         glDrawElements(gl_prim(prim), (GLsizei)ni, GL_UNSIGNED_SHORT, idx);
     else
         glDrawArrays(gl_prim(prim), 0, (GLsizei)nv);
+}
+
+/* ---- on-screen performance overlay ----------------------------------------
+ * Per-frame averages over one second: total frame time, time spent submitting
+ * draws to GL, time blocked in the buffer swap, and the rest (game code), plus
+ * draw count. Enabled by default on the Vita; IGI_OVERLAY=1 on desktop.
+ */
+extern uint64_t win32_perf_counter(void);   /* microseconds */
+
+static struct {
+    uint64_t draw_us, swap_us, frame_start;
+    uint32_t draws, frames;
+    uint64_t acc_frame, acc_draw, acc_swap, window_start;
+    uint32_t acc_draws;
+    float fps, ms_frame, ms_draw, ms_swap, ms_game;
+    uint32_t draws_per_frame;
+    int enabled;
+} perf = { .enabled = -1 };
+
+void render_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, uint32_t ni,
+                 int pretransformed, int has_normal, int has_color, int has_spec, int ntex)
+{
+    uint64_t t0 = win32_perf_counter();
+    render_draw_impl(prim, v, nv, idx, ni, pretransformed, has_normal, has_color, has_spec, ntex);
+    perf.draw_us += win32_perf_counter() - t0;
+    perf.draws++;
+}
+
+/* 3x5 pixel glyphs, one bit per pixel, rows top to bottom. */
+static const uint16_t *glyph(char ch)
+{
+    static const uint16_t digits[10][5] = {
+        { 7, 5, 5, 5, 7 }, { 2, 6, 2, 2, 7 }, { 7, 1, 7, 4, 7 }, { 7, 1, 7, 1, 7 }, { 5, 5, 7, 1, 1 },
+        { 7, 4, 7, 1, 7 }, { 7, 4, 7, 5, 7 }, { 7, 1, 1, 1, 1 }, { 7, 5, 7, 5, 7 }, { 7, 5, 7, 1, 7 },
+    };
+    static const uint16_t dot[5] = { 0, 0, 0, 0, 2 };
+    static const struct { char c; uint16_t g[5]; } letters[] = {
+        { 'F', { 7, 4, 6, 4, 4 } }, { 'G', { 7, 4, 5, 5, 7 } }, { 'D', { 6, 5, 5, 5, 6 } },
+        { 'S', { 7, 4, 7, 1, 7 } }, { 'N', { 5, 7, 7, 7, 5 } }, { 'T', { 7, 2, 2, 2, 2 } },
+    };
+    if (ch >= '0' && ch <= '9')
+        return digits[ch - '0'];
+    if (ch == '.')
+        return dot;
+    for (unsigned i = 0; i < sizeof(letters) / sizeof(letters[0]); i++)
+        if (letters[i].c == ch)
+            return letters[i].g;
+    return NULL;
+}
+
+static void overlay_text(float x, float y, float px, const char *s)
+{
+    for (; *s; s++, x += 4.0f * px) {
+        const uint16_t *g = glyph(*s);
+        if (!g)
+            continue;
+        for (int row = 0; row < 5; row++)
+            for (int col = 0; col < 3; col++)
+                if (g[row] & (4u >> col)) {
+                    float x0 = x + (float)col * px, y0 = y + (float)row * px;
+                    glVertex2f(x0, y0);
+                    glVertex2f(x0 + px, y0);
+                    glVertex2f(x0 + px, y0 + px);
+                    glVertex2f(x0, y0 + px);
+                }
+    }
+}
+
+static void perf_overlay_draw(void)
+{
+    char lines[5][32];
+    snprintf(lines[0], sizeof(lines[0]), "F %.1f", (double)perf.fps);
+    snprintf(lines[1], sizeof(lines[1]), "T %.1f", (double)perf.ms_frame);
+    snprintf(lines[2], sizeof(lines[2]), "G %.1f", (double)perf.ms_game);
+    snprintf(lines[3], sizeof(lines[3]), "D %.1f", (double)perf.ms_draw);
+    snprintf(lines[4], sizeof(lines[4]), "S %.1f N %u", (double)perf.ms_swap, perf.draws_per_frame);
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_BLEND);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_ALPHA_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_LIGHTING);
+    glDisable(GL_FOG);
+    glActiveTexture(GL_TEXTURE1);
+    glDisable(GL_TEXTURE_2D);
+    glActiveTexture(GL_TEXTURE0);
+    glDisable(GL_TEXTURE_2D);
+    glDisableClientState(GL_COLOR_ARRAY);
+    glDisableClientState(GL_NORMAL_ARRAY);
+    glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    glViewport(0, 0, fb_w, fb_h);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glOrtho(0, fb_w, fb_h, 0, -1, 1);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    float px = (float)fb_h / 136.0f;   /* ~4 px per font pixel at 544 lines */
+    glColor4f(0, 0, 0, 1);
+    glBegin(GL_QUADS);
+    glVertex2f(0, 0);
+    glVertex2f(px * 60.0f, 0);
+    glVertex2f(px * 60.0f, px * 32.0f);
+    glVertex2f(0, px * 32.0f);
+    glEnd();
+    glColor4f(1, 1, 0, 1);
+    glBegin(GL_QUADS);
+    for (int i = 0; i < 5; i++)
+        overlay_text(px, px * (1.0f + 6.0f * (float)i), px, lines[i]);
+    glEnd();
+    glColor4f(1, 1, 1, 1);
+}
+
+static void perf_frame_begin_swap(void)
+{
+    if (perf.enabled < 0) {
+        const char *e = getenv("IGI_OVERLAY");
+#if defined(__vita__)
+        perf.enabled = !(e && e[0] == '0');
+#else
+        perf.enabled = e && e[0] == '1';
+#endif
+    }
+    uint64_t now = win32_perf_counter();
+    if (!perf.frame_start) {
+        perf.frame_start = now;
+        perf.window_start = now;
+    }
+    perf.acc_frame += now - perf.frame_start;
+    perf.acc_draw += perf.draw_us;
+    perf.acc_draws += perf.draws;
+    perf.frames++;
+    perf.draw_us = 0;
+    perf.draws = 0;
+    perf.frame_start = now;
+    if (now - perf.window_start >= 1000000u && perf.frames) {
+        float n = (float)perf.frames;
+        perf.fps = n * 1e6f / (float)(now - perf.window_start);
+        perf.ms_frame = (float)perf.acc_frame / n / 1000.0f;
+        perf.ms_draw = (float)perf.acc_draw / n / 1000.0f;
+        perf.ms_swap = (float)perf.acc_swap / n / 1000.0f;
+        perf.ms_game = perf.ms_frame - perf.ms_draw - perf.ms_swap;
+        perf.draws_per_frame = perf.acc_draws / perf.frames;
+        rt_log("perf: %.1f fps, frame %.1f ms = game %.1f + draw %.1f + swap %.1f, %u draws", (double)perf.fps,
+               (double)perf.ms_frame, (double)perf.ms_game, (double)perf.ms_draw, (double)perf.ms_swap,
+               perf.draws_per_frame);
+        perf.acc_frame = perf.acc_draw = perf.acc_swap = 0;
+        perf.acc_draws = 0;
+        perf.frames = 0;
+        perf.window_start = now;
+    }
+    if (perf.enabled)
+        perf_overlay_draw();
+}
+
+static void perf_swap(void)
+{
+    uint64_t t0 = win32_perf_counter();
+    platform_swap();
+    perf.acc_swap += win32_perf_counter() - t0;
 }
