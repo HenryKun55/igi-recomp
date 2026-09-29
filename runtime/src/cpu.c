@@ -48,9 +48,8 @@ void rt_st80(uint32_t a, double v)
     WR16(a + 8u, se);
 }
 
-void rt_fxam(Ctx *c)
+uint32_t rt_fxam(uint32_t sw, double v)
 {
-    double v = ST(0);
     uint32_t cc;
     if (isnan(v))
         cc = FSW_C0;
@@ -64,7 +63,7 @@ void rt_fxam(Ctx *c)
         cc = FSW_C2;
     if (signbit(v))
         cc |= FSW_C1;
-    c->fsw = (c->fsw & ~(FSW_C0 | FSW_C1 | FSW_C2 | FSW_C3)) | cc;
+    return (sw & ~(FSW_C0 | FSW_C1 | FSW_C2 | FSW_C3)) | cc;
 }
 
 void rt_fninit(Ctx *c)
@@ -77,7 +76,7 @@ void rt_fninit(Ctx *c)
 void rt_fnstenv(Ctx *c, uint32_t a)
 {
     WR32(a + 0u, c->fcw);
-    WR32(a + 4u, rt_fstsw(c));
+    WR32(a + 4u, rt_fstsw(c->fsw, c->ftop));
     WR32(a + 8u, 0xFFFFu);  /* tag word: we do not track empty registers */
     for (uint32_t i = 12u; i < 28u; i += 4u)
         WR32(a + i, 0);
@@ -196,20 +195,21 @@ void rt_rep_stos(Ctx *c, int size)
 
 /* ---- dispatch ---------------------------------------------------------- */
 
+/* Open-addressing hash table built by the generator (dispatch_table.c): a
+ * power-of-two sized array of {addr, fn} with linear probing and empty slots
+ * (addr 0) terminating each probe sequence. */
 static GuestFn lookup_func(uint32_t addr)
 {
-    uint32_t lo = 0, hi = g_guest_func_count;
-    while (lo < hi) {
-        uint32_t mid = (lo + hi) / 2u;
-        uint32_t a = g_guest_funcs[mid].addr;
-        if (a == addr)
-            return g_guest_funcs[mid].fn;
-        if (a < addr)
-            lo = mid + 1u;
-        else
-            hi = mid;
+    uint32_t mask = g_guest_func_hash_mask;
+    uint32_t i = GUEST_FUNC_HASH(addr) & mask;
+    for (;;) {
+        const GuestFunc *e = &g_guest_func_hash[i];
+        if (e->addr == addr)
+            return e->fn;
+        if (!e->addr)
+            return NULL;
+        i = (i + 1u) & mask;
     }
-    return NULL;
 }
 
 uint32_t g_current_thunk;
@@ -235,6 +235,13 @@ void rt_dispatch(Ctx *c, uint32_t target)
         rt_fatal(c, "guest returned to the host return address as a jump target");
     rt_fatal(c, "dispatch to unknown address %08X (return address %08X)", target, RD32(c->r[4]));
 }
+
+#ifdef IGI_X87_CHECK
+void rt_x87_mismatch(Ctx *c, uint32_t addr, uint32_t expect)
+{
+    rt_fatal(c, "x87 stack top %u after the call at %08X, expected %u", c->ftop, addr, expect);
+}
+#endif
 
 void rt_unimplemented(Ctx *c, uint32_t addr, const char *what)
 {

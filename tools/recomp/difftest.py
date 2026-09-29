@@ -20,7 +20,7 @@ from unicorn import x86_const as U
 
 sys.path.insert(0, os.path.dirname(__file__))
 from analyze import Analyzer, Function, JCC  # noqa: E402
-from gen import FuncGen, Generator, ALL, FLAG_NAMES  # noqa: E402
+from gen import FuncGen, Generator, ALL, FLAG_NAMES, REGS32  # noqa: E402
 
 SCRATCH = 0x02000000
 SCRATCH_SIZE = 0x01000000
@@ -58,7 +58,16 @@ def collect_forms(an, funcs, per_form):
     return [i for lst in forms.values() for i in lst]
 
 
-def emit_test(g, ins, idx):
+def test_modes(g, ins):
+    """Code-generation modes to test an instruction in. x87 instructions run both with
+    the stack in locals (static depth, as in most functions) and in the context copy."""
+    info = g.x87_info(ins)
+    if info is None:
+        return ['none']
+    return ['dynamic'] if info[1] else ['static', 'dynamic']
+
+
+def emit_test(g, ins, idx, mode):
     """C function running one instruction with every flag live, then saving flags."""
     fn = Function(ins.addr)
     fn.insns = {ins.addr: ins}
@@ -68,17 +77,27 @@ def emit_test(g, ins, idx):
         fg.live_out[a] = ALL
     fg.order = [ins.addr]
     code = fg.emit_insn(ins, 0)
-    body = '\n    '.join(code)
+    lines, depth, _ = fg.lower(ins.addr, code, mode, 'L', 0, set(REGS32))
+    body = '\n    '.join(lines)
+    exit_code = fg.int_spill(set(REGS32)) + fg.fpu_flush(mode, depth)
     flags = ' | '.join('((uint32_t)%s << %d)' % (n, FLAG_BITS[n]) for _, n in FLAG_NAMES)
     labels = ''.join('L_%08X:; ' % t for t in fg.labels_used)
+    fpu = ''
+    if mode == 'static':
+        fpu = ('    const uint32_t fp_top0 = c->ftop; uint32_t fp_sw = c->fsw; (void)fp_top0; (void)fp_sw;\n'
+               '    double %s; %s\n') % (', '.join('fr%d = 0.0' % k for k in range(1, 9)),
+                                        ' '.join('(void)fr%d;' % k for k in range(1, 9)))
+    elif mode == 'dynamic':
+        fpu = '    uint32_t fp_top = c->ftop; uint32_t fp_sw = c->fsw; (void)fp_top; (void)fp_sw;\n'
     return ('static void t_%d(Ctx *c)\n{\n'
             '    uint32_t eax = c->r[0], ecx = c->r[1], edx = c->r[2], ebx = c->r[3];\n'
             '    uint32_t esp = c->r[4], ebp = c->r[5], esi = c->r[6], edi = c->r[7];\n'
+            '    uint8_t *const gm = g_mem; (void)gm;\n'
             '    int cf = (int)(c->eflags_extra & 1u), pf = (int)((c->eflags_extra >> 2) & 1u), '
             'zf = (int)((c->eflags_extra >> 6) & 1u), sf = (int)((c->eflags_extra >> 7) & 1u), '
-            'of = (int)((c->eflags_extra >> 11) & 1u);\n'
-            '    %s\n    goto done;\n    %s\ndone:\n    SPILL;\n    c->eflags_extra = %s;\n}\n\n') % (
-        idx, body, labels or '', flags)
+            'of = (int)((c->eflags_extra >> 11) & 1u);\n%s'
+            '    %s\n    goto done;\n    %s\ndone:\n    %s\n    c->eflags_extra = %s;\n}\n\n') % (
+        idx, fpu, body, labels or '', exit_code, flags)
 
 
 HARNESS = r'''
@@ -91,6 +110,8 @@ GuestFn thunk_lookup(uint32_t a) { (void)a; return NULL; }
 void rt_fatal(Ctx *c, const char *fmt, ...) { (void)c; printf("FATAL %s\n", fmt); exit(3); }
 const GuestFunc g_guest_funcs[1];
 const uint32_t g_guest_func_count = 0;
+const GuestFunc g_guest_func_hash[1];
+const uint32_t g_guest_func_hash_mask = 0;
 const GuestImport g_guest_imports[1];
 const uint32_t g_guest_import_count = 0;
 %TESTS%
@@ -249,8 +270,9 @@ def main():
     parts, keep = [], []
     for ins in tests:
         try:
-            parts.append(emit_test(g, ins, len(keep)))
-            keep.append(ins)
+            for mode in test_modes(g, ins):
+                parts.append(emit_test(g, ins, len(keep), mode))
+                keep.append((ins, mode))
         except Exception as e:  # unsupported form in isolation
             print('skip', ins.text, e)
     image = bytearray(CODE_END - 0x400000)
@@ -273,7 +295,7 @@ def main():
                            os.path.join(root, 'runtime/src/cpu.c'), '-lm'])
     rnd = random.Random(1234)
     lines, expect = [], []
-    for idx, ins in enumerate(keep):
+    for idx, (ins, mode) in enumerate(keep):
         for _ in range(runs):
             regs, flags, fcw, vals = random_state(ins, rnd)
             addrs = mem_addrs(ins, regs) + [regs[4]]
@@ -294,15 +316,16 @@ def main():
                          for v in vals),
                 len(mem), ' '.join('%X %s' % (a, d.hex()) for a, d in mem))
             lines.append(line)
-            expect.append((ins, regs, flags, fcw, vals, mem, res))
+            expect.append((ins, mode, regs, flags, fcw, vals, mem, res))
     p = subprocess.run([os.path.join(work, 'harness')], input='\n'.join(lines) + '\n', capture_output=True,
                        text=True, cwd=work)
     outs = p.stdout.strip().split('\n')
     fails = {}
-    for (ins, regs, flags, fcw, vals, mem, res), out in zip(expect, outs):
+    for (ins, mode, regs, flags, fcw, vals, mem, res), out in zip(expect, outs):
+        tname = ins.text if mode == 'none' else '%s [%s]' % (ins.text, mode)
         u_regs, u_ef, u_fsw, u_top, u_st, u_mem = res
         if not out.startswith('R'):
-            fails.setdefault(ins.text, []).append('harness: ' + out)
+            fails.setdefault(tname, []).append('harness: ' + out)
             continue
         f = out.split()
         c_regs = [int(x, 16) for x in f[1:9]]
@@ -341,7 +364,7 @@ def main():
             if m < len(c_mem) and c_mem[m] != u_mem[m]:
                 problems.append('mem %08X %s vs %s' % (a, c_mem[m].hex(), u_mem[m].hex()))
         if problems:
-            fails.setdefault(ins.text, []).append('; '.join(problems) + '  | in regs ' + ' '.join(
+            fails.setdefault(tname, []).append('; '.join(problems) + '  | in regs ' + ' '.join(
                 '%08X' % r for r in regs) + ' fl %X fcw %X' % (flags, fcw))
     print('tests run: %d, failing instructions: %d' % (len(outs), len(fails)))
     for text, probs in sorted(fails.items()):

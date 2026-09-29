@@ -15,7 +15,7 @@ import sys
 
 from capstone import x86 as X
 
-from analyze import Analyzer, JCC
+from analyze import Analyzer, Function, JCC
 
 REGS32 = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi']
 SUB16 = {'ax': 'eax', 'cx': 'ecx', 'dx': 'edx', 'bx': 'ebx', 'sp': 'esp', 'bp': 'ebp', 'si': 'esi', 'di': 'edi'}
@@ -29,8 +29,10 @@ FLAG_NAMES = [(CF, 'cf'), (ZF, 'zf'), (SF, 'sf'), (OF, 'of'), (PF, 'pf')]
 MASK = {1: '0xFFu', 2: '0xFFFFu', 4: '0xFFFFFFFFu'}
 SBIT = {1: 7, 2: 15, 4: 31}
 STYPE = {1: 'int8_t', 2: 'int16_t', 4: 'int32_t'}
-RD = {1: 'RD8', 2: 'RD16', 4: 'RD32'}
-WR = {1: 'WR8', 2: 'WR16', 4: 'WR32'}
+RD = {1: 'GRD8', 2: 'GRD16', 4: 'GRD32'}
+WR = {1: 'GWR8', 2: 'GWR16', 4: 'GWR32'}
+PRD = {1: 'PRD8', 2: 'PRD16', 4: 'PRD32'}
+PWR = {1: 'PWR8', 2: 'PWR16', 4: 'PWR32'}
 
 COND = {
     'o': ('of', OF), 'no': ('!of', OF), 'b': ('cf', CF), 'ae': ('!cf', CF),
@@ -56,6 +58,27 @@ SETJMP_FUNC = 0x004A5000
 LONGJMP_JUMP = 0x004A50F1
 
 NORETURN_IMPORTS = {'ExitProcess', 'TerminateProcess', 'RaiseException'}
+
+# Instruction emitters produce C with a few tokens that are expanded per code copy
+# (FuncGen.lower): ST(i), fpush(c, v), fpop(c) and FTOP address the x87 stack;
+# SPILL/RELOAD synchronise registers and x87 state with the context around calls,
+# ISPILL/IRELOAD only the integer registers, XSPILL/XRELOAD only the x87 state.
+REG_ALT = '|'.join(REGS32)
+TOKEN_RE = re.compile(r'\bST\((\d)\)|\bfpush\(c, |\bfpop\(c\);|\bFTOP\b|\bgoto L_'
+                      r'|\b(%s)\s*(?:[-+*/%%&|^]|<<|>>)?=(?!=)'
+                      r'|\b[IX]?SPILL;|\b[IX]?RELOAD;' % REG_ALT)
+# `fst st(0)`, `fxch st(0)`... lower to self-assignments, which compilers warn about.
+SELF_ASSIGN_RE = re.compile(r'(?<![\w\]])(fr\d|c->st\[[^\]]*\]) = \1;')
+REGWRITE_RE = re.compile(r'\b(%s)\s*(?:[-+*/%%&|^]|<<|>>)?=(?!=)|\bI?RELOAD;' % REG_ALT)
+
+
+class _Top:
+    """Unknown x87 stack effect (lattice top)."""
+    def __repr__(self):
+        return 'TOP'
+
+
+TOP = _Top()
 
 
 class Unsupported(Exception):
@@ -134,6 +157,12 @@ class FuncGen:
         self.fused = set()
         self.fused_pairs = {}
         self.cur_idx = 0
+        self.fdepth = {}
+        self.fcalls = {}
+        self.dirty = {}
+        self.fregs_used = set()
+        self.fmode = 'none'
+        self.need_dyn = False
 
     # ----------------------------------------------------------- operands
     def rname(self, reg):
@@ -182,6 +211,29 @@ class FuncGen:
             return parts[0]
         return '(uint32_t)(%s)' % ' + '.join(parts)
 
+    def mptr(self, op):
+        """Host pointer to a memory operand. A small displacement off a base register
+        is applied to the host pointer rather than the 32-bit guest address, so the
+        compiler can use a register+offset addressing mode and share base+register
+        between accesses. This differs from 32-bit wrap-around only when base+index
+        is not itself a valid guest address, which compiled code does not produce
+        for a small field or stack offset."""
+        m = op.mem
+        disp = ((m.disp + 0x80000000) & 0xFFFFFFFF) - 0x80000000
+        if not m.base or disp == 0 or not -0x10000 < disp < 0x10000:
+            return 'gm + %s' % self.addr(op)
+        parts = []
+        if m.segment and self.rname(m.segment) == 'fs':
+            parts.append('c->fs_base')
+        elif m.segment and self.rname(m.segment) not in ('ds', 'ss', 'es', 'cs'):
+            raise Unsupported('segment %s' % self.rname(m.segment))
+        parts.append(self.reg_read(self.rname(m.base)))
+        if m.index:
+            idx = self.reg_read(self.rname(m.index))
+            parts.append(idx if m.scale == 1 else '%s * %du' % (idx, m.scale))
+        regs = parts[0] if len(parts) == 1 else '(uint32_t)(%s)' % ' + '.join(parts)
+        return 'gm + %s %s %d' % (regs, '+' if disp > 0 else '-', abs(disp))
+
     def rd(self, op, size=None, addr_var=None):
         size = size or op.size
         if op.type == X.X86_OP_REG:
@@ -189,7 +241,7 @@ class FuncGen:
         if op.type == X.X86_OP_IMM:
             return h(op.imm & ((1 << (8 * size)) - 1))
         if op.type == X.X86_OP_MEM:
-            return '%s(%s)' % (RD[size], addr_var or self.addr(op))
+            return '%s(%s)' % (PRD[size], addr_var or self.mptr(op))
         raise Unsupported('operand')
 
     def wr(self, op, expr, size=None, addr_var=None):
@@ -197,11 +249,14 @@ class FuncGen:
         if op.type == X.X86_OP_REG:
             return self.reg_write(self.rname(op.reg), expr)
         if op.type == X.X86_OP_MEM:
-            return '%s(%s, %s);' % (WR[size], addr_var or self.addr(op), expr)
+            return '%s(%s, %s);' % (PWR[size], addr_var or self.mptr(op), expr)
         raise Unsupported('write operand')
 
     # ------------------------------------------------------------- flags
-    def compute_liveness(self):
+    def compute_succ(self):
+        """Intra-function successors of every instruction (tail calls and returns have none)."""
+        if self.succ:
+            return
         fn = self.fn
         an = self.an
         for a in self.order:
@@ -227,6 +282,9 @@ class FuncGen:
                 if nxt in fn.insns:
                     s = [nxt]
             self.succ[a] = s
+
+    def compute_liveness(self):
+        self.compute_succ()
         live_in = {a: 0 for a in self.order}
         changed = True
         while changed:
@@ -300,11 +358,314 @@ class FuncGen:
         imp = self.an.import_of(ins)
         return imp is not None and imp[1] in NORETURN_IMPORTS
 
+    # ------------------------------------------------------ x87 stack depth
+    def x87_fpu_info(self, ins):
+        """(stack delta, forces dynamic mode) of an x87 instruction, else None."""
+        return self.g.x87_info(ins)
+
+    def call_fpu(self, ins, summ, proven):
+        """x87 effect of a call: (delta, proven, callee). delta None: the callee never
+        returns according to the analysis. Host imports never touch the x87 stack."""
+        t = self.an.direct_target(ins)
+        if t is not None:
+            if t in self.g.func_set:
+                s = summ.get(t)
+                if s is None:
+                    return None, False, t
+                if s is TOP:
+                    return 0, False, t
+                # setjmp returns twice; the second return is not modelled.
+                ok = t != SETJMP_FUNC and (proven is None or proven.get(t, False))
+                return s, ok, t
+            return 0, False, None               # dispatched at run time
+        if self.an.import_of(ins):
+            return 0, True, None
+        return 0, False, None                   # indirect call
+
+    def exit_targets(self, a):
+        """Ways instruction `a` leaves the function: list of ('ret'|'tail'|'dyn', target)."""
+        fn = self.fn
+        ins = fn.insns[a]
+        m = ins.mnem.split()[-1]
+        out = []
+        nxt = a + ins.size
+        if m in ('ret', 'retf', 'iretd'):
+            return [('ret', None)]
+        if m in ('int3', 'hlt'):
+            return []
+        if m == 'jmp':
+            if a == LONGJMP_JUMP:
+                return []
+            t = self.an.direct_target(ins)
+            if t is not None:
+                if a in fn.tail_calls or t not in fn.insns:
+                    return [('tail', t)]
+                return []
+            if self.an.import_of(ins):
+                return [('ret', None)]
+            if a in fn.jump_tables:
+                return []                       # the out-of-table default is unreachable
+            return [('dyn', None)]
+        if m in JCC:
+            t = self.an.direct_target(ins)
+            if t not in fn.insns:
+                out.append(('tail', t))
+        if m == 'call' and self.is_noreturn_call(ins):
+            return out
+        if nxt not in fn.insns:
+            out.append(('tail', nxt))
+        return out
+
+    def fpu_flow(self, summ, proven=None):
+        """Forward dataflow of the x87 stack depth relative to the function entry.
+
+        Sets self.fdepth (depth before each reached instruction), self.fcalls (call
+        site -> (delta, proven)), and returns (exit summary, locally unproven, callees,
+        conflict). `conflict` means static depths cannot be used for code generation."""
+        self.compute_succ()
+        fn = self.fn
+        depth = {fn.entry: 0}
+        work = [fn.entry]
+        exits = set()
+        conflict = False
+        unproven = False
+        callees = set()
+        calls = {}
+        while work:
+            a = work.pop()
+            d = depth[a]
+            ins = fn.insns[a]
+            base = ins.mnem.split()[-1]
+            info = self.x87_fpu_info(ins)
+            o = d
+            if info is not None:
+                delta, dyn = info
+                if dyn:
+                    conflict = True
+                o = d + delta
+            elif base == 'call':
+                if self.is_noreturn_call(ins):
+                    continue
+                delta, ok, callee = self.call_fpu(ins, summ, proven)
+                calls[a] = (delta, ok)
+                if callee is not None:
+                    callees.add(callee)
+                if not ok:
+                    unproven = True
+                if delta is None:
+                    continue                    # never returns (per analysis)
+                if callee is not None and summ.get(callee) is TOP:
+                    exits.add(TOP)
+                o = d + delta
+            if o < -8 or o > 8:
+                conflict = True
+                o = max(-8, min(8, o))
+            for kind, t in self.exit_targets(a):
+                if kind == 'ret':
+                    exits.add(o)
+                elif kind == 'dyn':
+                    unproven = True
+                    exits.add(o)
+                elif t in self.g.func_set:
+                    callees.add(t)
+                    s = summ.get(t)
+                    if s is None:
+                        unproven = True
+                    elif s is TOP:
+                        exits.add(TOP)
+                        unproven = True
+                    else:
+                        exits.add(o + s)
+                        if proven is not None and not proven.get(t, False):
+                            unproven = True
+                else:
+                    unproven = True
+                    exits.add(o)
+            for s in self.succ[a]:
+                if s not in depth:
+                    depth[s] = o
+                    work.append(s)
+                elif depth[s] != o:
+                    conflict = True
+        self.fdepth = depth
+        self.fcalls = calls
+        if conflict or TOP in exits or len(exits) > 1:
+            summary = TOP
+        elif exits:
+            summary = exits.pop()
+        else:
+            summary = None
+        return summary, unproven, callees, conflict
+
+    def has_x87(self):
+        return any(self.x87_fpu_info(self.fn.insns[a]) is not None for a in self.order)
+
+    # ------------------------------------------------------ dirty registers
+    def compute_dirty(self, raw):
+        """Registers possibly modified since the context copy was last synchronised
+        (entry or the reload after a call), before each instruction. Only these are
+        stored back to the context before a call or return."""
+        trans = {}
+        for a, code in raw.items():
+            gen, reset = set(), False
+            for m in REGWRITE_RE.finditer(' '.join(code)):
+                if m.group(1):
+                    gen.add(m.group(1))
+                else:
+                    gen, reset = set(), True
+            trans[a] = (gen, reset)
+        dirty = {self.fn.entry: frozenset()}
+        work = [self.fn.entry]
+        while work:
+            a = work.pop()
+            gen, reset = trans.get(a, (set(), False))
+            out = frozenset(gen) if reset else dirty[a] | gen
+            for s in self.succ[a]:
+                old = dirty.get(s)
+                new = out if old is None else old | out
+                if new != old:
+                    dirty[s] = new
+                    work.append(s)
+        self.dirty = dirty
+
+    # ------------------------------------------------------------ lowering
+    def fslot(self, k):
+        """C lvalue of x87 stack position k (1 = first value pushed by this function)."""
+        if 1 <= k <= 8:
+            self.fregs_used.add(k)
+            return 'fr%d' % k
+        return 'c->st[(fp_top0 + %du) & 7u]' % ((-k) & 7)
+
+    def int_spill(self, dirty):
+        return ''.join('c->r[%d] = %s; ' % (i, r) for i, r in enumerate(REGS32) if r in dirty)
+
+    def fpu_flush(self, mode, d):
+        if mode == 'none':
+            return ''
+        if mode == 'dynamic':
+            return 'c->ftop = fp_top; c->fsw = fp_sw; '
+        s = ''
+        for k in range(1, min(d, 8) + 1):
+            self.fregs_used.add(k)
+            s += 'c->st[(fp_top0 + %du) & 7u] = fr%d; ' % ((-k) & 7, k)
+        return s +'c->ftop = (fp_top0 + %du) & 7u; c->fsw = fp_sw; ' % ((-d) & 7)
+
+    def lower(self, a, code, mode, prefix, d, dirty):
+        """Expand the generator tokens (ST, fpush, fpop, FTOP, SPILL, RELOAD, ...) of
+        one instruction for a code copy. Returns (lines, depth after, transitioned)."""
+        st = {'d': d, 'dirty': set(dirty), 'dspill': d, 'trans': False}
+        lines = [SELF_ASSIGN_RE.sub('', self.lower_text(a, line, mode, prefix, st)) for line in code]
+        return lines, st['d'], st['trans']
+
+    def lower_text(self, a, text, mode, prefix, st):
+        out = []
+        pos = 0
+        while True:
+            m = TOKEN_RE.search(text, pos)
+            if not m:
+                out.append(text[pos:])
+                break
+            out.append(text[pos:m.start()])
+            tok = m.group(0)
+            pos = m.end()
+            if m.group(1) is not None:                  # ST(i)
+                i = int(m.group(1))
+                if mode == 'static':
+                    out.append(self.fslot(st['d'] - i))
+                else:
+                    out.append('c->st[(fp_top + %du) & 7u]' % i)
+            elif tok.startswith('fpush'):
+                depth, j = 1, pos
+                while depth:
+                    if text[j] == '(':
+                        depth += 1
+                    elif text[j] == ')':
+                        depth -= 1
+                    j += 1
+                expr = self.lower_text(a, text[pos:j - 1], mode, prefix, st)
+                pos = j
+                if pos < len(text) and text[pos] == ';':
+                    pos += 1
+                if mode == 'static':
+                    st['d'] += 1
+                    out.append('%s = %s;' % (self.fslot(st['d']), expr))
+                else:
+                    out.append('{ double fv = %s; fp_top = (fp_top - 1u) & 7u; c->st[fp_top] = fv; }' % expr)
+            elif tok.startswith('fpop'):
+                if mode == 'static':
+                    st['d'] -= 1
+                else:
+                    out.append('fp_top = (fp_top + 1u) & 7u;')
+            elif tok == 'FTOP':
+                out.append('((fp_top0 + %du) & 7u)' % ((-st['d']) & 7) if mode == 'static' else 'fp_top')
+            elif tok.startswith('goto'):
+                out.append('goto %s_' % prefix)
+            elif m.group(2) is not None:                # register write
+                st['dirty'].add(m.group(2))
+                out.append(tok)
+            elif tok in ('SPILL;', 'ISPILL;'):
+                s = self.int_spill(st['dirty'])
+                if tok == 'SPILL;':
+                    s += self.fpu_flush(mode, st['d'])
+                    st['dspill'] = st['d']
+                out.append(s.rstrip())
+            elif tok in ('RELOAD;', 'IRELOAD;'):
+                s = ('eax = c->r[0]; ecx = c->r[1]; edx = c->r[2]; ebx = c->r[3]; '
+                     'esp = c->r[4]; ebp = c->r[5]; esi = c->r[6]; edi = c->r[7];')
+                st['dirty'] = set()
+                if tok == 'RELOAD;':
+                    s += self.fpu_reload(a, mode, st)
+                out.append(s)
+            elif tok == 'XSPILL;':
+                assert mode == 'dynamic'
+                out.append('c->ftop = fp_top; c->fsw = fp_sw;')
+            elif tok == 'XRELOAD;':
+                assert mode == 'dynamic'
+                out.append('fp_top = c->ftop; fp_sw = c->fsw;')
+            else:
+                raise AssertionError(tok)
+        return ''.join(out)
+
+    def fpu_reload(self, a, mode, st):
+        if mode == 'none':
+            return ''
+        if mode == 'dynamic':
+            return ' fp_top = c->ftop; fp_sw = c->fsw;'
+        delta, ok = self.fcalls[a]
+        s = ' fp_sw = c->fsw;'
+        if delta is None:
+            # The analysis says the callee never returns: continue in the dynamic copy.
+            st['trans'] = True
+            return s + ' fp_top = c->ftop; ' + self.dyn_continue(a)
+        d2 = st['dspill'] + delta
+        expect = '(fp_top0 + %du) & 7u' % ((-d2) & 7)
+        if ok:
+            s += ' X87_CHECK(%s, %s);' % (expect, h(a))
+        else:
+            st['trans'] = True
+            s += ' if (__builtin_expect(c->ftop != (%s), 0)) { fp_top = c->ftop; %s }' % (
+                expect, self.dyn_continue(a))
+        for k in range(1, min(d2, 8) + 1):
+            s += ' fr%d = c->st[(fp_top0 + %du) & 7u];' % (k, (-k) & 7)
+            self.fregs_used.add(k)
+        st['d'] = d2
+        return s
+
+    def dyn_continue(self, a):
+        """Jump from the static copy into the dynamic copy after the call at `a`."""
+        self.need_dyn = True
+        ins = self.fn.insns[a]
+        nxt = a + ins.size
+        if nxt in self.fn.insns:
+            return 'goto D_%08X;' % nxt
+        code = [self.tail_call(nxt)]
+        return self.lower(a, code, 'dynamic', 'D', 0, ())[0][0]
+
     # --------------------------------------------------------------- emit
     def emit(self):
         self.compute_liveness()
         fn = self.fn
-        body = []
+        items = []
         for idx, a in enumerate(self.order):
             ins = fn.insns[a]
             if a in self.fused:
@@ -315,27 +676,47 @@ class FuncGen:
                 code = ['SPILL; rt_unimplemented(c, %s, "%s"); return;' % (h(a), str(e).replace('"', "'"))]
             nxt = a + ins.size
             falls = self.falls_through(ins)
-            last = ins
             if a in self.fused_pairs:
                 last = fn.insns[self.fused_pairs[a]]
                 nxt = last.addr + last.size
                 falls = self.falls_through(last)
-            following = self.order[idx + 1] if idx + 1 < len(self.order) else None
-            if following is not None and following in self.fused:
-                following = self.order[idx + 2] if idx + 2 < len(self.order) else None
+            items.append((a, ins.text, code, falls, nxt))
+        self.compute_dirty({a: code for a, _, code, _, _ in items})
+        self.fregs_used = set()
+        self.need_dyn = False
+        if not self.has_x87():
+            self.fmode = 'none'
+        else:
+            _, _, _, conflict = self.fpu_flow(self.g.fsumm, self.g.fproven)
+            self.fmode = 'dynamic' if conflict or self.g.x87_force_dynamic else 'static'
+        out = self.emit_copy(items, self.fmode, 'L')
+        if self.need_dyn:
+            out += self.emit_copy(items, 'dynamic', 'D')
+        # Emit only the labels some goto refers to.
+        text = '\n'.join(out)
+        used = set(re.findall(r'goto ([LD]_[0-9A-F]{8});', text))
+        return [line for line in out if not (line.endswith(':;') and line[:-2] not in used)]
+
+    def emit_copy(self, items, mode, prefix):
+        fn = self.fn
+        if mode == 'static':
+            items = [it for it in items if it[0] in self.fdepth]
+        out = []
+        if prefix == 'L' and items and items[0][0] != fn.entry:
+            # Blocks below the entry address (backward jumps) are emitted first.
+            out.append('    goto L_%08X;' % fn.entry)
+        for n, (a, text, code, falls, nxt) in enumerate(items):
+            d = self.fdepth.get(a, 0) if mode == 'static' else 0
+            code = list(code)
+            following = items[n + 1][0] if n + 1 < len(items) else None
+            if mode == 'static' and self.fcalls.get(a, (0,))[0] is None:
+                falls = False                   # continues in the dynamic copy
             if falls and following != nxt:
                 code.append(self.goto(nxt))
-            body.append((a, ins.text, code))
-        out = []
-        if self.order and self.order[0] != fn.entry:
-            # Blocks below the entry address (backward jumps) are emitted first.
-            self.labels_used.add(fn.entry)
-            out.append('    goto L_%08X;' % fn.entry)
-        for a, text, code in body:
-            if a in self.labels_used:
-                out.append('L_%08X:;' % a)
+            lines, d2, trans = self.lower(a, code, mode, prefix, d, self.dirty.get(a, frozenset(REGS32)))
+            out.append('%s_%08X:;' % (prefix, a))
             out.append('    /* %08X: %s */' % (a, text))
-            for line in code:
+            for line in lines:
                 out.append('    ' + line)
         return out
 
@@ -378,8 +759,8 @@ class FuncGen:
         out = ['{']
         av = None
         if d_op.type == X.X86_OP_MEM:
-            out.append('uint32_t ea = %s;' % self.addr(d_op))
-            av = 'ea'
+            out.append('uint8_t *ep = %s;' % self.mptr(d_op))
+            av = 'ep'
         out.append('uint32_t d = %s;' % self.rd(d_op, size, av))
         out.append('uint32_t s = %s;' % self.rd(s_op, size))
         if cin:
@@ -508,8 +889,8 @@ class FuncGen:
         out = ['{']
         av = None
         if o.type == X.X86_OP_MEM:
-            out.append('uint32_t ea = %s;' % self.addr(o))
-            av = 'ea'
+            out.append('uint8_t *ep = %s;' % self.mptr(o))
+            av = 'ep'
         r = '%s %s 1u' % (self.rd(o, size, av), opch)
         if size != 4:
             r = '(%s) & %s' % (r, MASK[size])
@@ -525,8 +906,8 @@ class FuncGen:
         out = ['{']
         av = None
         if o.type == X.X86_OP_MEM:
-            out.append('uint32_t ea = %s;' % self.addr(o))
-            av = 'ea'
+            out.append('uint8_t *ep = %s;' % self.mptr(o))
+            av = 'ep'
         out.append('uint32_t d = %s;' % self.rd(o, size, av))
         out.append('uint32_t r = %s;' % ('0u - d' if size == 4 else '(0u - d) & %s' % MASK[size]))
         out += self.set_flags(ins.addr, 'neg', size, 'r', 'd', 'd')
@@ -538,7 +919,7 @@ class FuncGen:
         o = ins.ops[0]
         size = o.size
         if o.type == X.X86_OP_MEM:
-            return ['{ uint32_t ea = %s; %s }' % (self.addr(o), self.wr(o, '~%s' % self.rd(o, size, 'ea'), size, 'ea'))]
+            return ['{ uint8_t *ep = %s; %s }' % (self.mptr(o), self.wr(o, '~%s' % self.rd(o, size, 'ep'), size, 'ep'))]
         return [self.wr(o, '~%s' % self.rd(o, size), size)]
 
     def shift(self, ins, kind):
@@ -550,8 +931,8 @@ class FuncGen:
         out = ['{']
         av = None
         if d_op.type == X.X86_OP_MEM:
-            out.append('uint32_t ea = %s;' % self.addr(d_op))
-            av = 'ea'
+            out.append('uint8_t *ep = %s;' % self.mptr(d_op))
+            av = 'ep'
         const = c_op.type == X.X86_OP_IMM
         if const:
             n = c_op.imm & 31
@@ -633,8 +1014,8 @@ class FuncGen:
         av = None
         out = ['{']
         if d_op.type == X.X86_OP_MEM:
-            out.append('uint32_t ea = %s;' % self.addr(d_op))
-            av = 'ea'
+            out.append('uint8_t *ep = %s;' % self.mptr(d_op))
+            av = 'ep'
         out.append('uint32_t n = %s & 31u;' % self.rd(c_op, 1))
         out.append('uint32_t d = %s;' % self.rd(d_op, size, av))
         fn = 'rt_rcl' if left else 'rt_rcr'
@@ -813,8 +1194,8 @@ class FuncGen:
         if a_.type == X.X86_OP_MEM:
             a_, b_ = b_, a_
         if b_.type == X.X86_OP_MEM:
-            return ['{ uint32_t ea = %s; uint32_t t = %s; %s %s }' % (
-                self.addr(b_), self.rd(a_), self.wr(a_, self.rd(b_, None, 'ea')), self.wr(b_, 't', None, 'ea'))]
+            return ['{ uint8_t *ep = %s; uint32_t t = %s; %s %s }' % (
+                self.mptr(b_), self.rd(a_), self.wr(a_, self.rd(b_, None, 'ep')), self.wr(b_, 't', None, 'ep'))]
         return ['{ uint32_t t = %s; %s %s }' % (self.rd(a_), self.wr(a_, self.rd(b_)), self.wr(b_, 't'))]
 
     def i_cdq(self, ins):
@@ -824,7 +1205,7 @@ class FuncGen:
         return ['eax = (uint32_t)(int32_t)(int16_t)(eax & 0xFFFFu);']
 
     def i_xlatb(self, ins):
-        return [self.reg_write('al', 'RD8((uint32_t)(ebx + (eax & 0xFFu)))')]
+        return [self.reg_write('al', 'GRD8((uint32_t)(ebx + (eax & 0xFFu)))')]
 
     def i_nop(self, ins):
         return []
@@ -862,10 +1243,10 @@ class FuncGen:
         return [' '.join(out)]
 
     def i_pushfd(self, ins):
-        return ['esp -= 4u; WR32(esp, (uint32_t)(cf | (pf << 2) | (zf << 6) | (sf << 7) | (of << 11)) | (c->df << 10) | 0x202u | c->eflags_extra);']
+        return ['esp -= 4u; GWR32(esp, (uint32_t)(cf | (pf << 2) | (zf << 6) | (sf << 7) | (of << 11)) | (c->df << 10) | 0x202u | c->eflags_extra);']
 
     def i_popfd(self, ins):
-        return ['{ uint32_t f = RD32(esp); esp += 4u; cf = f & 1u; pf = (f >> 2) & 1u; zf = (f >> 6) & 1u; '
+        return ['{ uint32_t f = GRD32(esp); esp += 4u; cf = f & 1u; pf = (f >> 2) & 1u; zf = (f >> 6) & 1u; '
                 'sf = (f >> 7) & 1u; of = (f >> 11) & 1u; c->df = (f >> 10) & 1u; c->eflags_extra = f & 0x00240000u; }']
 
     def i_setcc(self, ins, cc):
@@ -877,8 +1258,8 @@ class FuncGen:
         if o.type == X.X86_OP_REG and self.rname(o.reg) not in REGS32:
             raise Unsupported('push %s' % self.rname(o.reg))
         if o.type == X.X86_OP_IMM:
-            return ['esp -= 4u; WR32(esp, %s);' % h(o.imm)]
-        return ['{ uint32_t v = %s; esp -= 4u; WR32(esp, v); }' % self.rd(o, 4)]
+            return ['esp -= 4u; GWR32(esp, %s);' % h(o.imm)]
+        return ['{ uint32_t v = %s; esp -= 4u; GWR32(esp, v); }' % self.rd(o, 4)]
 
     def i_pop(self, ins):
         o = ins.ops[0]
@@ -886,12 +1267,12 @@ class FuncGen:
             if self.rname(o.reg) not in REGS32:
                 raise Unsupported('pop %s' % self.rname(o.reg))
             if self.rname(o.reg) == 'esp':
-                return ['esp = RD32(esp);']
-            return ['%s = RD32(esp); esp += 4u;' % self.rname(o.reg)]
-        return ['{ uint32_t v = RD32(esp); esp += 4u; %s }' % self.wr(o, 'v', 4)]
+                return ['esp = GRD32(esp);']
+            return ['%s = GRD32(esp); esp += 4u;' % self.rname(o.reg)]
+        return ['{ uint32_t v = GRD32(esp); esp += 4u; %s }' % self.wr(o, 'v', 4)]
 
     def i_leave(self, ins):
-        return ['esp = ebp; ebp = RD32(esp); esp += 4u;']
+        return ['esp = ebp; ebp = GRD32(esp); esp += 4u;']
 
     # ---------------------------------------------------------- control
     def i_jmp(self, ins):
@@ -935,19 +1316,19 @@ class FuncGen:
         ret = h(ins.addr + ins.size)
         t = self.an.direct_target(ins)
         if t == SETJMP_FUNC:
-            return ['esp -= 4u; WR32(esp, %s); SPILL;' % ret,
-                    'if (setjmp(*rt_jmpbuf(RD32(esp + 4u)))) { RELOAD; } else { f_%08X(c); RELOAD; }' % t]
+            return ['esp -= 4u; GWR32(esp, %s); SPILL;' % ret,
+                    'if (setjmp(*rt_jmpbuf(GRD32(esp + 4u)))) { RELOAD; } else { f_%08X(c); RELOAD; }' % t]
         if t is not None:
             if t in self.g.func_set:
-                return ['esp -= 4u; WR32(esp, %s); SPILL; f_%08X(c); RELOAD;' % (ret, t)]
-            return ['esp -= 4u; WR32(esp, %s); SPILL; rt_dispatch(c, %s); RELOAD;' % (ret, h(t))]
+                return ['esp -= 4u; GWR32(esp, %s); SPILL; f_%08X(c); RELOAD;' % (ret, t)]
+            return ['esp -= 4u; GWR32(esp, %s); SPILL; rt_dispatch(c, %s); RELOAD;' % (ret, h(t))]
         imp = self.an.import_of(ins)
         if imp:
-            call = 'esp -= 4u; WR32(esp, %s); SPILL; %s(c);' % (ret, self.g.import_fn(imp))
+            call = 'esp -= 4u; GWR32(esp, %s); SPILL; %s(c);' % (ret, self.g.import_fn(imp))
             if imp[1] in NORETURN_IMPORTS:
                 return [call + ' rt_noreturn(c, %s); return;' % h(ins.addr)]
             return [call + ' RELOAD;']
-        return ['{ uint32_t t = %s; esp -= 4u; WR32(esp, %s); SPILL; rt_dispatch(c, t); RELOAD; }' % (
+        return ['{ uint32_t t = %s; esp -= 4u; GWR32(esp, %s); SPILL; rt_dispatch(c, t); RELOAD; }' % (
             self.rd(ins.ops[0], 4), ret)]
 
     def i_ret(self, ins):
@@ -969,12 +1350,12 @@ class FuncGen:
         live = self.live_out[ins.addr]
         if kind == 'movs':
             if rep:
-                return ['SPILL; rt_rep_movs(c, %d); RELOAD;' % size]
+                return ['ISPILL; rt_rep_movs(c, %d); IRELOAD;' % size]
             return ['%s(edi, %s(esi)); esi += %s; edi += %s;' % (WR[size], RD[size], step, step)]
         if kind == 'stos':
             val = {1: '(eax & 0xFFu)', 2: '(eax & 0xFFFFu)', 4: 'eax'}[size]
             if rep:
-                return ['SPILL; rt_rep_stos(c, %d); RELOAD;' % size]
+                return ['ISPILL; rt_rep_stos(c, %d); IRELOAD;' % size]
             return ['%s(edi, %s); edi += %s;' % (WR[size], val, step)]
         if kind == 'lods':
             val = {1: 'al', 2: 'ax', 4: 'eax'}[size]
@@ -1015,6 +1396,7 @@ class FuncGen:
         if mem:
             mop = next(o for o in ins.ops if o.type == X.X86_OP_MEM)
             ea = self.addr(mop)
+            ep = self.mptr(mop)
         arith = ['+', '*', None, None, '-', 'R-', '/', 'R/']
 
         def arith_expr(k, x, y):
@@ -1024,21 +1406,21 @@ class FuncGen:
             return '%s %s %s' % (x, o, y)
 
         if op in (0xD8, 0xDC, 0xDA, 0xDE) and mem:
-            load = {0xD8: 'RDF32(%s)', 0xDC: 'RDF64(%s)', 0xDA: '(double)(int32_t)RD32(%s)',
-                    0xDE: '(double)(int16_t)RD16(%s)'}[op] % ea
+            load = {0xD8: 'PRDF32(%s)', 0xDC: 'PRDF64(%s)', 0xDA: '(double)(int32_t)PRD32(%s)',
+                    0xDE: '(double)(int16_t)PRD16(%s)'}[op] % ep
             if reg in (2, 3):
                 pop = ' fpop(c);' if reg == 3 else ''
-                return ['fcompare(c, ST(0), %s);%s' % (load, pop)]
+                return ['FCOM(ST(0), %s);%s' % (load, pop)]
             return ['{ double m = %s; ST(0) = %s; }' % (load, arith_expr(reg, 'ST(0)', 'm'))]
         if op == 0xD8 and not mem:
             if reg in (2, 3):
-                return ['fcompare(c, ST(0), ST(%d));%s' % (rm, ' fpop(c);' if reg == 3 else '')]
+                return ['FCOM(ST(0), ST(%d));%s' % (rm, ' fpop(c);' if reg == 3 else '')]
             return ['ST(0) = %s;' % arith_expr(reg, 'ST(0)', 'ST(%d)' % rm)]
         if op in (0xDC, 0xDE) and not mem:
             if op == 0xDE and modrm == 0xD9:
-                return ['fcompare(c, ST(0), ST(1)); fpop(c); fpop(c);']
+                return ['FCOM(ST(0), ST(1)); fpop(c); fpop(c);']
             if reg in (2, 3):
-                return ['fcompare(c, ST(0), ST(%d));%s' % (rm, ' fpop(c);' if reg == 3 else '')]
+                return ['FCOM(ST(0), ST(%d));%s' % (rm, ' fpop(c);' if reg == 3 else '')]
             # DC/DE register forms: ST(i) = ST(i) op ST(0), with sub/div directions swapped
             # relative to D8: /4 is FSUBR (st0 - sti), /5 FSUB, /6 FDIVR, /7 FDIV.
             swap = {4: 5, 5: 4, 6: 7, 7: 6}.get(reg, reg)
@@ -1049,19 +1431,19 @@ class FuncGen:
         if op == 0xD9:
             if mem:
                 if reg == 0:
-                    return ['fpush(c, RDF32(%s));' % ea]
+                    return ['fpush(c, PRDF32(%s));' % ep]
                 if reg == 2:
-                    return ['WRF32(%s, ST(0));' % ea]
+                    return ['PWRF32(%s, ST(0));' % ep]
                 if reg == 3:
-                    return ['WRF32(%s, ST(0)); fpop(c);' % ea]
+                    return ['PWRF32(%s, ST(0)); fpop(c);' % ep]
                 if reg == 4:
-                    return ['rt_fldenv(c, %s);' % ea]
+                    return ['XSPILL; rt_fldenv(c, %s); XRELOAD;' % ea]
                 if reg == 5:
-                    return ['c->fcw = RD16(%s);' % ea]
+                    return ['c->fcw = PRD16(%s);' % ep]
                 if reg == 6:
-                    return ['rt_fnstenv(c, %s);' % ea]
+                    return ['XSPILL; rt_fnstenv(c, %s); XRELOAD;' % ea]
                 if reg == 7:
-                    return ['WR16(%s, c->fcw);' % ea]
+                    return ['PWR16(%s, c->fcw);' % ep]
                 raise Unsupported('D9 /%d' % reg)
             if reg == 0:
                 return ['{ double v = ST(%d); fpush(c, v); }' % rm]
@@ -1070,23 +1452,23 @@ class FuncGen:
             simple = {
                 0xD0: '',
                 0xE0: 'ST(0) = -ST(0);', 0xE1: 'ST(0) = fabs(ST(0));',
-                0xE4: 'fcompare(c, ST(0), 0.0);', 0xE5: 'rt_fxam(c);',
+                0xE4: 'FCOM(ST(0), 0.0);', 0xE5: 'fp_sw = rt_fxam(fp_sw, ST(0));',
                 0xE8: 'fpush(c, 1.0);', 0xE9: 'fpush(c, 3.321928094887362);',
                 0xEA: 'fpush(c, 1.4426950408889634);', 0xEB: 'fpush(c, 3.141592653589793);',
                 0xEC: 'fpush(c, 0.30102999566398120);', 0xED: 'fpush(c, 0.6931471805599453);',
                 0xEE: 'fpush(c, 0.0);',
                 0xF0: 'ST(0) = exp2(ST(0)) - 1.0;',
                 0xF1: 'ST(1) = ST(1) * log2(ST(0)); fpop(c);',
-                0xF2: 'ST(0) = tan(ST(0)); fpush(c, 1.0); c->fsw &= ~0x400u;',
+                0xF2: 'ST(0) = tan(ST(0)); fpush(c, 1.0); fp_sw &= ~0x400u;',
                 0xF3: 'ST(1) = atan2(ST(1), ST(0)); fpop(c);',
-                0xF5: 'ST(0) = remainder(ST(0), ST(1)); c->fsw &= ~0x400u;',
-                0xF8: 'ST(0) = fmod(ST(0), ST(1)); c->fsw &= ~0x400u;',
+                0xF5: 'ST(0) = remainder(ST(0), ST(1)); fp_sw &= ~0x400u;',
+                0xF8: 'ST(0) = fmod(ST(0), ST(1)); fp_sw &= ~0x400u;',
                 0xFA: 'ST(0) = sqrt(ST(0));',
-                0xFB: '{ double v = ST(0); ST(0) = sin(v); fpush(c, cos(v)); c->fsw &= ~0x400u; }',
+                0xFB: '{ double v = ST(0); ST(0) = sin(v); fpush(c, cos(v)); fp_sw &= ~0x400u; }',
                 0xFC: 'ST(0) = rt_fround(c, ST(0));',
                 0xFD: 'ST(0) = ldexp(ST(0), (int)trunc(ST(1)));',
-                0xFE: 'ST(0) = sin(ST(0)); c->fsw &= ~0x400u;',
-                0xFF: 'ST(0) = cos(ST(0)); c->fsw &= ~0x400u;',
+                0xFE: 'ST(0) = sin(ST(0)); fp_sw &= ~0x400u;',
+                0xFF: 'ST(0) = cos(ST(0)); fp_sw &= ~0x400u;',
             }
             if modrm in simple:
                 return [simple[modrm]] if simple[modrm] else []
@@ -1094,17 +1476,17 @@ class FuncGen:
         if op == 0xDD:
             if mem:
                 if reg == 0:
-                    return ['fpush(c, RDF64(%s));' % ea]
+                    return ['fpush(c, PRDF64(%s));' % ep]
                 if reg == 2:
-                    return ['WRF64(%s, ST(0));' % ea]
+                    return ['PWRF64(%s, ST(0));' % ep]
                 if reg == 3:
-                    return ['WRF64(%s, ST(0)); fpop(c);' % ea]
+                    return ['PWRF64(%s, ST(0)); fpop(c);' % ep]
                 if reg == 4:
-                    return ['rt_frstor(c, %s);' % ea]
+                    return ['XSPILL; rt_frstor(c, %s); XRELOAD;' % ea]
                 if reg == 6:
-                    return ['rt_fnsave(c, %s);' % ea]
+                    return ['XSPILL; rt_fnsave(c, %s); XRELOAD;' % ea]
                 if reg == 7:
-                    return ['WR16(%s, rt_fstsw(c));' % ea]
+                    return ['PWR16(%s, rt_fstsw(fp_sw, FTOP));' % ep]
                 raise Unsupported('DD /%d' % reg)
             if reg == 0:
                 return []                               # ffree
@@ -1113,40 +1495,40 @@ class FuncGen:
             if reg == 3:
                 return ['ST(%d) = ST(0); fpop(c);' % rm]
             if reg in (4, 5):
-                return ['fcompare(c, ST(0), ST(%d));%s' % (rm, ' fpop(c);' if reg == 5 else '')]
+                return ['FCOM(ST(0), ST(%d));%s' % (rm, ' fpop(c);' if reg == 5 else '')]
             raise Unsupported('DD %02X' % modrm)
         if op == 0xDB:
             if mem:
                 if reg == 0:
-                    return ['fpush(c, (double)(int32_t)RD32(%s));' % ea]
+                    return ['fpush(c, (double)(int32_t)PRD32(%s));' % ep]
                 if reg in (2, 3):
-                    return ['WR32(%s, (uint32_t)rt_fist32(c, ST(0)));%s' % (ea, ' fpop(c);' if reg == 3 else '')]
+                    return ['PWR32(%s, (uint32_t)rt_fist32(c, ST(0)));%s' % (ep, ' fpop(c);' if reg == 3 else '')]
                 if reg == 5:
                     return ['fpush(c, rt_ld80(%s));' % ea]
                 if reg == 7:
                     return ['rt_st80(%s, ST(0)); fpop(c);' % ea]
                 raise Unsupported('DB /%d' % reg)
             if modrm == 0xE2:
-                return ['c->fsw &= 0x7F00u;']
+                return ['fp_sw &= 0x7F00u;']
             if modrm == 0xE3:
-                return ['rt_fninit(c);']
+                return ['XSPILL; rt_fninit(c); XRELOAD;']
             raise Unsupported('DB %02X' % modrm)
         if op == 0xDF:
             if mem:
                 if reg == 0:
-                    return ['fpush(c, (double)(int16_t)RD16(%s));' % ea]
+                    return ['fpush(c, (double)(int16_t)PRD16(%s));' % ep]
                 if reg in (2, 3):
-                    return ['WR16(%s, (uint16_t)rt_fist16(c, ST(0)));%s' % (ea, ' fpop(c);' if reg == 3 else '')]
+                    return ['PWR16(%s, (uint16_t)rt_fist16(c, ST(0)));%s' % (ep, ' fpop(c);' if reg == 3 else '')]
                 if reg == 5:
-                    return ['fpush(c, (double)(int64_t)RD64(%s));' % ea]
+                    return ['fpush(c, (double)(int64_t)PRD64(%s));' % ep]
                 if reg == 7:
-                    return ['WR64(%s, (uint64_t)rt_fist64(c, ST(0))); fpop(c);' % ea]
+                    return ['PWR64(%s, (uint64_t)rt_fist64(c, ST(0))); fpop(c);' % ep]
                 raise Unsupported('DF /%d' % reg)
             if modrm == 0xE0:
-                return [self.reg_write('ax', 'rt_fstsw(c)')]
+                return [self.reg_write('ax', 'rt_fstsw(fp_sw, FTOP)')]
             raise Unsupported('DF %02X' % modrm)
         if op == 0xDA and modrm == 0xE9:
-            return ['fcompare(c, ST(0), ST(1)); fpop(c); fpop(c);']
+            return ['FCOM(ST(0), ST(1)); fpop(c); fpop(c);']
         raise Unsupported('x87 %02X %02X' % (op, modrm))
 
 
@@ -1161,6 +1543,67 @@ class Generator:
         # Entry hooks: game-specific fixes (runtime/src/igi_fixes.c) plus diagnostic probes.
         self.probes = set(GAME_HOOKS) | {int(x, 16) for x in os.environ.get('IGI_PROBES', '').replace(',', ' ').split()}
         self.imports_used = {}
+        self._x87 = {}
+        self._x87_gen = None
+        # IGI_X87_DYNAMIC=1 disables the static x87 stack allocation (for A/B checks).
+        self.x87_force_dynamic = os.environ.get('IGI_X87_DYNAMIC') == '1'
+        self.fsumm = {}
+        self.fproven = {}
+
+    def x87_info(self, ins):
+        """(stack delta, needs dynamic mode) for an x87 instruction, None otherwise."""
+        a = ins.addr
+        if a in self._x87:
+            return self._x87[a]
+        raw = bytes(ins.raw.bytes)
+        res = None
+        if raw[0] in (0xD8, 0xD9, 0xDA, 0xDB, 0xDC, 0xDD, 0xDE, 0xDF):
+            if self._x87_gen is None:
+                self._x87_gen = FuncGen(self, Function(a))
+            try:
+                code = ' '.join(self._x87_gen.emit_x87(ins, raw))
+                res = (code.count('fpush(c, ') - code.count('fpop(c);'), 'XSPILL' in code)
+            except Unsupported:
+                res = (0, True)
+        self._x87[a] = res
+        return res
+
+    def fpu_summaries(self):
+        """Interprocedural x87 stack effect of every function (least fixpoint).
+
+        fsumm[f] is the stack depth change from entry to return (None: never returns,
+        TOP: unknown). fproven[f] is true when that effect does not rest on any
+        assumption about indirect or unknown calls, so callers may rely on it without
+        a run-time check."""
+        gens = {e: FuncGen(self, f) for e, f in self.funcs.items()}
+        summ = {}
+        callers = {}
+        info = {}
+        work = sorted(self.funcs, reverse=True)
+        queued = set(work)
+        while work:
+            e = work.pop()
+            queued.discard(e)
+            s, unproven, callees, _ = gens[e].fpu_flow(summ)
+            info[e] = (unproven, callees)
+            for t in callees:
+                callers.setdefault(t, set()).add(e)
+            if e not in summ or s is not summ[e] and s != summ[e]:
+                summ[e] = s
+                for p in sorted(callers.get(e, ()), reverse=True):
+                    if p not in queued:
+                        queued.add(p)
+                        work.append(p)
+        proven = {e: not info[e][0] and summ[e] is not TOP for e in self.funcs}
+        changed = True
+        while changed:
+            changed = False
+            for e in sorted(self.funcs):
+                if proven[e] and any(not proven.get(t, False) for t in info[e][1]):
+                    proven[e] = False
+                    changed = True
+        self.fsumm = summ
+        self.fproven = proven
 
     def import_fn(self, imp):
         dll, name = imp
@@ -1170,6 +1613,8 @@ class Generator:
 
     def run(self, out_dir):
         os.makedirs(out_dir, exist_ok=True)
+        self.fpu_summaries()
+        self.stats = {}
         entries = sorted(self.funcs)
         unsupported = {}
         chunks = [entries[i:i + self.FUNCS_PER_FILE] for i in range(0, len(entries), self.FUNCS_PER_FILE)]
@@ -1182,33 +1627,57 @@ class Generator:
                 for e in chunk:
                     fg = FuncGen(self, self.funcs[e])
                     body = fg.emit()
+                    mode = fg.fmode + ('+dyn' if fg.need_dyn else '')
+                    self.stats[mode] = self.stats.get(mode, 0) + 1
                     for line in body:
                         if 'rt_unimplemented' in line:
                             k = line.split('"')[1]
                             unsupported[k] = unsupported.get(k, 0) + 1
-                    f.write(self.wrap(e, body))
+                    f.write(self.wrap(e, body, fg))
         self.write_header(out_dir)
         self.write_table(out_dir, entries)
         with open(os.path.join(out_dir, 'files.txt'), 'w') as f:
             f.write('\n'.join(files + ['dispatch_table.c', 'import_stubs.c']) + '\n')
         print('functions: %d, files: %d' % (len(entries), len(files)))
+        print('x87 modes: %s' % ', '.join('%s %d' % kv for kv in sorted(self.stats.items())))
         for k, v in sorted(unsupported.items(), key=lambda x: -x[1]):
             print('  unsupported %-30s %d' % (k, v))
 
-    def wrap(self, entry, body):
+    def wrap(self, entry, body, fg):
         if entry in self.probes:
             # Diagnostic probe requested at configure time (IGI_PROBES).
             body = ['    rt_probe(c, 0x%08Xu);' % entry] + body
         text = '\n'.join(body)
+        out = ['void f_%08X(Ctx *c)' % entry, '{'] + self.prologue(text, fg) + [text, '}\n\n']
+        return '\n'.join(out)
+
+    @staticmethod
+    def prologue(text, fg):
+        """Local declarations of a generated function: guest registers, the guest memory
+        base, used flags and the x87 state for the function's x87 mode."""
+        out = ['    uint32_t eax = c->r[0], ecx = c->r[1], edx = c->r[2], ebx = c->r[3];',
+               '    uint32_t esp = c->r[4], ebp = c->r[5], esi = c->r[6], edi = c->r[7];',
+               '    uint8_t *const gm = g_mem;']
         used_flags = [n for _, n in FLAG_NAMES if re.search(r'\b%s\b' % n, text)]
-        out = ['void f_%08X(Ctx *c)' % entry, '{',
-               '    uint32_t eax = c->r[0], ecx = c->r[1], edx = c->r[2], ebx = c->r[3];',
-               '    uint32_t esp = c->r[4], ebp = c->r[5], esi = c->r[6], edi = c->r[7];']
         if used_flags:
             out.append('    int %s;' % ', '.join('%s = 0' % n for n in used_flags))
-        out.append(text)
-        out.append('}\n\n')
-        return '\n'.join(out)
+        # Registers are stored back only when modified, so some are never read.
+        voids = REGS32 + ['gm']
+        if fg.fmode == 'static':
+            out.append('    const uint32_t fp_top0 = c->ftop;')
+            voids.append('fp_top0')
+        if fg.fmode == 'dynamic' or fg.need_dyn:
+            out.append('    uint32_t fp_top = c->ftop;')
+            voids.append('fp_top')
+        if fg.fmode != 'none':
+            out.append('    uint32_t fp_sw = c->fsw;')
+            voids.append('fp_sw')
+        regs = sorted(fg.fregs_used)
+        if regs:
+            out.append('    double %s;' % ', '.join('fr%d = 0.0' % k for k in regs))
+            voids += ['fr%d' % k for k in regs]
+        out.append('    %s' % ' '.join('(void)%s;' % v for v in voids))
+        return out
 
     def write_header(self, out_dir):
         with open(os.path.join(out_dir, 'recomp_gen.h'), 'w') as f:
@@ -1233,6 +1702,20 @@ class Generator:
             for e in entries:
                 f.write('    { 0x%08Xu, f_%08X },\n' % (e, e))
             f.write('};\nconst uint32_t g_guest_func_count = %d;\n\n' % len(entries))
+            # rt_dispatch hash table (GUEST_FUNC_HASH in recomp.h, linear probing, <= 50% load).
+            size = 1
+            while size < 2 * len(entries):
+                size *= 2
+            slots = [None] * size
+            for e in entries:
+                i = (((e * 0x9E3779B1) & 0xFFFFFFFF) >> 16) & (size - 1)
+                while slots[i] is not None:
+                    i = (i + 1) & (size - 1)
+                slots[i] = e
+            f.write('const GuestFunc g_guest_func_hash[] = {\n')
+            for e in slots:
+                f.write('    { 0x%08Xu, f_%08X },\n' % (e, e) if e is not None else '    { 0u, 0 },\n')
+            f.write('};\nconst uint32_t g_guest_func_hash_mask = 0x%Xu;\n\n' % (size - 1))
             # Every IAT slot, so the loader can point it at a host thunk.
             f.write('const GuestImport g_guest_imports[] = {\n')
             for slot, imp in sorted(an.pe.imports.items()):
