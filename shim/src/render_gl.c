@@ -131,6 +131,7 @@ static void maybe_screenshot(void)
 
 void render_present(void)
 {
+    maybe_screenshot();   /* before the trace state advances: saves the traced frame */
     if (g_trace_next_frame == 2) {
         g_trace_next_frame = 0;
         rt_log("---- frame trace end ----");
@@ -138,7 +139,6 @@ void render_present(void)
         g_trace_next_frame = 2;
         rt_log("---- frame trace begin ----");
     }
-    maybe_screenshot();
     platform_swap();
     platform_pump();
     render_begin_frame();
