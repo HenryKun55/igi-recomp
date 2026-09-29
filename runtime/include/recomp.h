@@ -151,6 +151,8 @@ void rt_rep_stos(Ctx *c, int size);
 void rt_dispatch(Ctx *c, uint32_t target);
 
 void rt_unimplemented(Ctx *c, uint32_t addr, const char *what);
+/* Diagnostic hook inserted at the entry of functions listed in IGI_PROBES. */
+void rt_probe(Ctx *c, uint32_t func);
 void rt_divide_error(Ctx *c, uint32_t addr);
 void rt_noreturn(Ctx *c, uint32_t addr);
 

@@ -250,3 +250,19 @@ void rt_noreturn(Ctx *c, uint32_t addr)
 {
     rt_fatal(c, "returned from a no-return call at %08X", addr);
 }
+
+void rt_probe(Ctx *c, uint32_t func)
+{
+    static uint32_t funcs[64], counts[64];
+    uint32_t i = 0;
+    while (i < 64u && funcs[i] && funcs[i] != func)
+        i++;
+    if (i == 64u)
+        return;
+    funcs[i] = func;
+    if (counts[i]++ >= 400u)
+        return;
+    uint32_t sp = c->r[4];
+    rt_log("probe %08X from %08X args %08X %08X %08X %08X ecx %08X", func, RD32(sp), RD32(sp + 4u), RD32(sp + 8u),
+           RD32(sp + 12u), RD32(sp + 16u), c->r[1]);
+}

@@ -1140,6 +1140,7 @@ class Generator:
         self.funcs, self.entries = self.an.run()
         self.funcs = {e: f for e, f in self.funcs.items() if not f.bad}
         self.func_set = set(self.funcs)
+        self.probes = {int(x, 16) for x in os.environ.get('IGI_PROBES', '').replace(',', ' ').split()}
         self.imports_used = {}
 
     def import_fn(self, imp):
@@ -1176,6 +1177,9 @@ class Generator:
             print('  unsupported %-30s %d' % (k, v))
 
     def wrap(self, entry, body):
+        if entry in self.probes:
+            # Diagnostic probe requested at configure time (IGI_PROBES).
+            body = ['    rt_probe(c, 0x%08Xu);' % entry] + body
         text = '\n'.join(body)
         used_flags = [n for _, n in FLAG_NAMES if re.search(r'\b%s\b' % n, text)]
         out = ['void f_%08X(Ctx *c)' % entry, '{',

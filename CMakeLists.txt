@@ -29,10 +29,13 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter)
 set(GEN_DIR "${CMAKE_BINARY_DIR}/gen")
 file(GLOB RECOMP_TOOLS "${CMAKE_SOURCE_DIR}/tools/recomp/*.py")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${RECOMP_TOOLS} "${IGI_EXE}")
+# Diagnostic entry probes (hex guest addresses), e.g. -DIGI_PROBES="497620 4E7960".
+set(IGI_PROBES "" CACHE STRING "Guest functions to instrument with rt_probe")
 
 message(STATUS "Recompiling ${IGI_EXE}")
 execute_process(
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/recomp/gen.py" "${IGI_EXE}" "${GEN_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E env "IGI_PROBES=${IGI_PROBES}"
+            "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/recomp/gen.py" "${IGI_EXE}" "${GEN_DIR}"
     RESULT_VARIABLE GEN_RESULT
     OUTPUT_VARIABLE GEN_OUTPUT)
 if(NOT GEN_RESULT EQUAL 0)
