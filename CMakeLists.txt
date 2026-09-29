@@ -22,7 +22,7 @@ if(DEFINED VITA_ELF_CREATE)
     add_compile_definitions(__vita__)
     add_compile_options(-mcpu=cortex-a9 -mfpu=neon -mfloat-abi=hard -fno-short-enums
                         -ffunction-sections -fdata-sections -fno-pic -fno-pie)
-    add_link_options(-Wl,-q -Wl,--gc-sections -static -fno-short-enums -Wl,--no-warn-mismatch)
+    add_link_options(-Wl,-q -Wl,--gc-sections -static -fno-short-enums -Wl,--no-warn-mismatch -Wl,-z,noexecstack)
 endif()
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
@@ -59,6 +59,15 @@ target_compile_options(igi PRIVATE -Wall -Wextra)
 
 if(VITA)
     target_include_directories(igi PRIVATE "$ENV{VITASDK}/arm-vita-eabi/include/SDL2")
+    # Cutscene video: minimal FFmpeg from tools/build_ffmpeg_vita.sh, when built.
+    if(EXISTS "${CMAKE_SOURCE_DIR}/deps/vita/lib/libavcodec.a")
+        target_include_directories(igi PRIVATE "${CMAKE_SOURCE_DIR}/deps/vita/include")
+        target_compile_definitions(igi PRIVATE IGI_HAVE_FFMPEG)
+        target_link_libraries(igi PRIVATE "${CMAKE_SOURCE_DIR}/deps/vita/lib/libavcodec.a"
+                                          "${CMAKE_SOURCE_DIR}/deps/vita/lib/libavutil.a")
+    else()
+        message(STATUS "deps/vita FFmpeg not built: AVI cutscenes will be skipped (tools/build_ffmpeg_vita.sh)")
+    endif()
     target_link_libraries(igi PRIVATE igi_recomp
         SDL2 vitaGL vitashark SceShaccCgExt mathneon taihen_stub
         SceShaccCg_stub SceKernelDmacMgr_stub SceCtrl_stub SceTouch_stub SceHid_stub SceMotion_stub
