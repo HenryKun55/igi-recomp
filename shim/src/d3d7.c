@@ -149,6 +149,7 @@ static void d3d_EnumZBufferFormats(Ctx *c)
 typedef struct VertexBuffer {
     uint32_t fvf, count, stride, mem;
     uint32_t gen;              /* bumped by every writable Lock */
+    uint32_t lock_frame;       /* g_frame_serial at the last writable Lock */
     uint32_t cache_gen;        /* gen the decoded copy matches (0 = none) */
     struct RVertex *cache;     /* whole buffer decoded (static geometry is drawn every frame) */
 } VertexBuffer;
@@ -764,7 +765,9 @@ static void dev_DrawIndexedPrimitive(Ctx *c)
 /* Decoded copy of the whole buffer, refreshed after a writable Lock. */
 static RVertex *vb_cache(VertexBuffer *vb, Decoded *d)
 {
-    if (render_diag_no_vb_cache() || !vb->count)
+    /* Only buffers left untouched since an earlier frame: dynamic buffers
+     * (refilled every frame) are decoded per draw, just the part drawn. */
+    if (render_diag_no_vb_cache() || !vb->count || vb->lock_frame == g_frame_serial)
         return NULL;
     if (vb->cache_gen != vb->gen || !vb->cache) {
         if (!vb->cache)
@@ -920,8 +923,10 @@ static void vb_Release(Ctx *c)
 static void vb_Lock(Ctx *c)
 {
     VertexBuffer *vb = com_host(THIS);
-    if (!(ARG(1) & 0x10u))   /* DDLOCK_READONLY */
+    if (!(ARG(1) & 0x10u)) {   /* DDLOCK_READONLY */
         vb->gen++;
+        vb->lock_frame = g_frame_serial;
+    }
     WR32(ARG(2), vb->mem);
     if (ARG(3))
         WR32(ARG(3), vb->stride * vb->count);

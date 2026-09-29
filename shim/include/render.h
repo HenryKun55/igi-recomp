@@ -45,6 +45,8 @@ typedef struct RenderState {
 extern RenderState g_rs;
 /* Bumped whenever g_rs actually changes (draw batching compares it instead of the whole state). */
 extern uint32_t g_rs_serial;
+/* Presented frames so far. */
+extern uint32_t g_frame_serial;
 
 enum {
     PRIM_POINTS = 1, PRIM_LINES, PRIM_LINE_STRIP, PRIM_TRIANGLES, PRIM_TRIANGLE_STRIP, PRIM_TRIANGLE_FAN

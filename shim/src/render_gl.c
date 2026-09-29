@@ -17,6 +17,7 @@
 
 RenderState g_rs;
 uint32_t g_rs_serial;
+uint32_t g_frame_serial;
 static uint32_t perf_gpu_draws;   /* draws actually submitted to GL this frame */
 static void perf_frame_begin_swap(void);
 static void perf_swap(void);
@@ -587,6 +588,7 @@ static void maybe_screenshot(void)
 void render_present(void)
 {
     render_flush();
+    g_frame_serial++;
     /* IGI_TRACE_EVERY=N: trace (log every draw + save the image of) every Nth frame. */
     static int trace_every = -1;
     static unsigned present_count;
