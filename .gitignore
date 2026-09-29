@@ -1,0 +1,6 @@
+# Retail game data and anything derived from it never goes into the repo.
+/gamedata/
+/build*/
+*.log
+__pycache__/
+.DS_Store
