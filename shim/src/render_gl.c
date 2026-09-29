@@ -1767,6 +1767,14 @@ static void trace_draw(int prim, const RVertex *v, uint32_t nv, uint32_t ni, int
            g_rs.rs[23], (double)zmin, (double)zmax, pretransformed ? "rhw" : "w", (double)wmin, (double)wmax,
            (double)g_rs.vp_minz, (double)g_rs.vp_maxz, g_rs.rs[34], (double)g_rs.world[12], (double)g_rs.world[13],
            (double)g_rs.world[14], g_rs.stage[0].texture ? g_rs.stage[0].texture->mem : 0u);
+    if (!pretransformed && nv <= 16) {
+        for (uint32_t i = 0; i < nv; i++) {
+            float cz = v[i].x * m[2] + v[i].y * m[6] + v[i].z * m[10] + m[14];
+            float cw = v[i].x * m[3] + v[i].y * m[7] + v[i].z * m[11] + m[15];
+            rt_log("    o%u: %.2f %.2f %.2f clip z %.4f w %.4f", i, (double)v[i].x, (double)v[i].y, (double)v[i].z,
+                   (double)cz, (double)cw);
+        }
+    }
     if (pretransformed && nv <= 8) {
         for (uint32_t i = 0; i < nv; i++)
             rt_log("    v%u: %.1f %.1f z %.4f rhw %.4f col %08X spec %08X uv %.3f %.3f", i, (double)v[i].x,
