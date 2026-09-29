@@ -1103,6 +1103,9 @@ static GLenum gl_prim(int prim)
 
 static float *pos_buf;
 static float *fog_buf;
+static uint32_t *col_buf;
+static float *nrm_buf;
+static float *uv_buf[MAX_STAGES];
 static size_t pos_cap;
 
 void render_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, uint32_t ni,
@@ -1161,13 +1164,21 @@ void render_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, u
     int stages = apply_stages(ntex);
     apply_transforms(pretransformed);
 
+    /* Tightly packed, per-attribute arrays holding only what the draw uses:
+     * vitaGL copies count * stride bytes for every enabled client array. */
     if (nv > pos_cap) {
-        pos_cap = nv;
-        pos_buf = realloc(pos_buf, nv * 16u);
-        fog_buf = realloc(fog_buf, nv * 4u);
+        pos_cap = nv + 256u;
+        pos_buf = realloc(pos_buf, pos_cap * 16u);
+        fog_buf = realloc(fog_buf, pos_cap * 4u);
+        col_buf = realloc(col_buf, pos_cap * 4u);
+        nrm_buf = realloc(nrm_buf, pos_cap * 12u);
+        for (int s = 0; s < MAX_STAGES; s++)
+            uv_buf[s] = realloc(uv_buf[s], pos_cap * 8u);
     }
+    int use_color = has_color || pretransformed;
+    int pos_size = pretransformed ? 4 : 3;
     for (uint32_t i = 0; i < nv; i++) {
-        float *p = pos_buf + i * 4u;
+        float *p = pos_buf + i * (uint32_t)pos_size;
         if (pretransformed) {
             float w = v[i].w != 0.0f ? 1.0f / v[i].w : 1.0f;
             p[0] = v[i].x * w;
@@ -1178,27 +1189,34 @@ void render_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, u
             p[0] = v[i].x;
             p[1] = v[i].y;
             p[2] = v[i].z;
-            p[3] = 1.0f;
         }
-        fog_buf[i] = (float)(v[i].spec >> 24) / 255.0f;
     }
     glEnableClientState(GL_VERTEX_ARRAY);
-    glVertexPointer(4, GL_FLOAT, 0, pos_buf);
-    if (has_color || pretransformed) {
+    glVertexPointer(pos_size, GL_FLOAT, 0, pos_buf);
+    if (use_color) {
+        for (uint32_t i = 0; i < nv; i++)
+            col_buf[i] = v[i].color;
         glEnableClientState(GL_COLOR_ARRAY);
-        glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(RVertex), &v[0].color);
+        glColorPointer(4, GL_UNSIGNED_BYTE, 0, col_buf);
     } else {
         glDisableClientState(GL_COLOR_ARRAY);
         glColor4f(1, 1, 1, 1);
     }
     if (has_normal) {
+        for (uint32_t i = 0; i < nv; i++) {
+            nrm_buf[i * 3u] = v[i].nx;
+            nrm_buf[i * 3u + 1u] = v[i].ny;
+            nrm_buf[i * 3u + 2u] = v[i].nz;
+        }
         glEnableClientState(GL_NORMAL_ARRAY);
-        glNormalPointer(GL_FLOAT, sizeof(RVertex), &v[0].nx);
+        glNormalPointer(GL_FLOAT, 0, nrm_buf);
     } else {
         glDisableClientState(GL_NORMAL_ARRAY);
     }
 #if !defined(__vita__)
     if (g_rs.rs[28] && (pretransformed || (!g_rs.rs[35] && !g_rs.rs[140])) && has_spec) {
+        for (uint32_t i = 0; i < nv; i++)
+            fog_buf[i] = (float)(v[i].spec >> 24) * (1.0f / 255.0f);
         glEnableClientState(GL_FOG_COORDINATE_ARRAY);
         glFogCoordPointer(GL_FLOAT, 0, fog_buf);
     } else {
@@ -1210,8 +1228,14 @@ void render_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, u
         glClientActiveTexture(GL_TEXTURE0 + (GLenum)s);
         uint32_t ci = g_rs.stage[s].texcoordindex & 0xFFFFu;
         if ((int)ci < ntex) {
+            uint32_t k = ci < MAX_STAGES ? ci : 0u;
+            float *uv = uv_buf[s];
+            for (uint32_t i = 0; i < nv; i++) {
+                uv[i * 2u] = v[i].uv[k][0];
+                uv[i * 2u + 1u] = v[i].uv[k][1];
+            }
             glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-            glTexCoordPointer(2, GL_FLOAT, sizeof(RVertex), &v[0].uv[ci < MAX_STAGES ? ci : 0]);
+            glTexCoordPointer(2, GL_FLOAT, 0, uv);
         } else {
             glDisableClientState(GL_TEXTURE_COORD_ARRAY);
             glMultiTexCoord2f(GL_TEXTURE0 + (GLenum)s, 0, 0);
