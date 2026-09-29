@@ -36,6 +36,8 @@ typedef struct AviFile {
 } AviFile;
 
 static AviFile *files[16];
+/* Size of the last frame handed to the game, so ICDecompress gets the exact length. */
+static uint32_t last_read_buf, last_read_size;
 
 static uint32_t rd32le(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
 
@@ -108,15 +110,22 @@ static int parse_avi(AviFile *f)
         return -1;
     uint32_t entries = idx1_size / 16u;
     f->index = calloc(entries ? entries : 1u, sizeof(AviIndex));
+    /* idx1 offsets are relative to the 'movi' fourcc unless the first one points
+     * straight at a chunk from the file start. Decide once for the whole index. */
+    size_t base = movi;
+    if (entries) {
+        uint32_t first = rd32le(idx1 + 8);
+        if (first >= movi && first + 4 <= n && !memcmp(d + first, idx1, 4))
+            base = 0;
+    }
     for (uint32_t i = 0; i < entries; i++) {
         const uint8_t *e = idx1 + i * 16u;
         if (e[0] != '0' || e[1] != '0' || (e[2] != 'd' && e[2] != 'D'))   /* stream 00 video chunks */
             continue;
-        uint32_t o = rd32le(e + 8), s = rd32le(e + 12);
-        /* Offsets are usually relative to 'movi'; some writers use absolute offsets. */
-        size_t abs = (o > movi) ? o : movi + o;
+        size_t abs = base + rd32le(e + 8);
+        uint32_t s = rd32le(e + 12);
         if (abs + 8 + s > n)
-            abs = movi + o;
+            continue;
         f->index[f->index_count].offset = (uint32_t)(abs + 8);
         f->index[f->index_count].size = s;
         f->index_count++;
@@ -259,6 +268,8 @@ SHIM(avifil32, AVIStreamRead)
     if (buf) {
         uint32_t n = e->size < cb ? e->size : cb;
         memcpy(gptr(buf), f->data + e->offset, n);
+        last_read_buf = buf;
+        last_read_size = n;
     }
     if (pbytes)
         WR32(pbytes, e->size);
@@ -366,7 +377,7 @@ SHIM(msvfw32, ICDecompress)
     uint32_t data = ARG(3), bi_out = ARG(4), bits = ARG(5), bi_fmt = ARG(2);
     uint32_t r = ICERR_BADFORMAT;
     if (k && data && bits && bi_out) {
-        uint32_t size = RD32(bi_fmt + 20u);    /* biSizeImage of the compressed frame */
+        uint32_t size = data == last_read_buf ? last_read_size : RD32(bi_fmt + 20u);
         /* Empty / undecodable packets (drop frames) repeat the previous picture. */
         if (size == 0u || video_decode(k->dec, gptr(data), size, k->rgba) != 0)
             k->bad_frames++;
