@@ -190,6 +190,40 @@ uint32_t rt_rcr(uint32_t d, uint32_t n, int bits, int *cf, int *of)
     return d;
 }
 
+/* Stops at the first match, reading aligned words, which never touch a page the
+ * byte loop would not have read. */
+RtScas rt_scasb_fwd(const uint8_t *gm, uint32_t n, uint32_t di, uint32_t al)
+{
+    const uint8_t *p = gm + di;
+    uint32_t i = 0;
+    RtScas r = { 1, 0, 0, al };
+    while (i < n && ((uintptr_t)(p + i) & 3u)) {
+        if (p[i] == al)
+            goto found;
+        i++;
+    }
+    const uint32_t pat = al * 0x01010101u;
+    while (n - i >= 4u) {
+        uint32_t w;
+        memcpy(&w, p + i, 4);
+        w ^= pat;
+        if ((w - 0x01010101u) & ~w & 0x80808080u)
+            break;
+        i += 4u;
+    }
+    for (; i < n; i++)
+        if (p[i] == al)
+            goto found;
+    r.cx = 0;
+    r.di = di + n;
+    r.last = p[n - 1u];
+    return r;
+found:
+    r.cx = n - i - 1u;
+    r.di = di + i + 1u;
+    return r;
+}
+
 /* Element by element, as the CPU does: needed for backward copies and for a
  * destination overlapping ahead of the source (pattern replication). */
 RtStr rt_rep_movs_slow(uint8_t *gm, uint32_t df, uint32_t n, uint32_t si, uint32_t di, uint32_t size)
@@ -279,6 +313,24 @@ void rt_dispatch(Ctx *c, uint32_t target)
 void rt_x87_mismatch(Ctx *c, uint32_t addr, uint32_t expect)
 {
     rt_fatal(c, "x87 stack top %u after the call at %08X, expected %u", c->ftop, addr, expect);
+}
+
+uint64_t rt_call_indirect_ic(Ctx *c, uint32_t target, uint32_t esp, uint32_t ecx, uint32_t eax,
+                             const GuestFunc **ic)
+{
+    uint32_t mask = g_guest_func_hash_mask;
+    uint32_t i = GUEST_FUNC_HASH(target) & mask;
+    for (;;) {
+        const GuestFunc *e = &g_guest_func_hash[i];
+        if (e->addr == target && e->fast) {
+            *ic = e;
+            return e->fast(c, esp, ecx, eax);
+        }
+        if (!e->addr)
+            break;
+        i = (i + 1u) & mask;
+    }
+    return rt_call_indirect(c, target, esp, ecx, eax);
 }
 
 uint64_t rt_call_indirect(Ctx *c, uint32_t target, uint32_t esp, uint32_t ecx, uint32_t eax)

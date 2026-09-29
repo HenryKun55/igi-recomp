@@ -105,7 +105,7 @@ def build(exe, gen_dir, out, list_file=None):
     incs = ['-I' + os.path.join(ROOT, 'runtime/include'), '-I' + gen_dir]
     srcs = sorted(glob.glob(os.path.join(gen_dir, 'funcs_*.c'))) + [
         os.path.join(gen_dir, 'import_stubs.c'), os.path.join(gen_dir, 'dispatch_table.c'),
-        os.path.join(ROOT, 'runtime/src/cpu.c'), os.path.join(work, 'stub.c')]
+        os.path.join(ROOT, 'runtime/src/cpu.c'), os.path.join(ROOT, 'runtime/src/crt_hle.c'), os.path.join(work, 'stub.c')]
     objs = [os.path.join(work, os.path.basename(s)[:-2] + '.o') for s in srcs]
     with multiprocessing.Pool() as pool:
         pool.map(compile_one, [(s, o, incs) for s, o in zip(srcs, objs)])

@@ -243,6 +243,13 @@ typedef struct RtStr {
     uint32_t cx, si, di;
 } RtStr;
 
+/* repne scasb forward (ecx != 0): final ecx and edi and the last byte compared. */
+typedef struct RtScas {
+    uint32_t ok, cx, di, last;
+} RtScas;
+
+RtScas rt_scasb_fwd(const uint8_t *gm, uint32_t n, uint32_t di, uint32_t al);
+
 RtStr rt_rep_movs_slow(uint8_t *gm, uint32_t df, uint32_t n, uint32_t si, uint32_t di, uint32_t size);
 RtStr rt_rep_stos_slow(uint8_t *gm, uint32_t df, uint32_t n, uint32_t di, uint32_t v, uint32_t size);
 
@@ -277,6 +284,10 @@ static inline RtStr rt_rep_stos(uint8_t *gm, uint32_t df, uint32_t n, uint32_t d
     RtStr r = { 0, 0, di + b };
     return r;
 }
+
+/* Native C runtime routines (runtime/src/crt_hle.c); 0: run the guest code. */
+int rt_hle_stricmp(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
+int rt_hle_memset(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
 
 /* ---- profiler ------------------------------------------------------------
  * With IGI_PROFILE, generated functions keep a shadow call stack and the id of
@@ -323,6 +334,10 @@ void rt_dispatch(Ctx *c, uint32_t target);
 /* Indirect call or jump from generated code, with the GuestFastFn convention (the
  * caller has stored every other modified register in the context). */
 uint64_t rt_call_indirect(Ctx *c, uint32_t target, uint32_t esp, uint32_t ecx, uint32_t eax);
+/* Same, also storing the target's g_guest_func_hash entry in the call site's cache
+ * (a single pointer, so a concurrent reader always sees a consistent entry). */
+uint64_t rt_call_indirect_ic(Ctx *c, uint32_t target, uint32_t esp, uint32_t ecx, uint32_t eax,
+                             const GuestFunc **ic);
 
 void rt_unimplemented(Ctx *c, uint32_t addr, const char *what);
 /* Diagnostic hook inserted at the entry of functions listed in IGI_PROBES. */

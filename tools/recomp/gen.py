@@ -9,6 +9,7 @@ opcode bytes and run against the FPU stack kept in the context.
 
 Usage: gen.py IGI.exe OUT_DIR
 """
+import hashlib
 import os
 import re
 import sys
@@ -59,6 +60,14 @@ LONGJMP_JUMP = 0x004A50F1
 
 NORETURN_IMPORTS = {'ExitProcess', 'TerminateProcess', 'RaiseException'}
 
+# Static C runtime routines with native versions (runtime/src/crt_hle.c): entry ->
+# (host function, code size, SHA-1 of the code). The native version is used only
+# when the bytes match; it may decline (return 0) and run the guest code.
+HLE = {
+    0x004A5980: ('rt_hle_stricmp', 140, 'b74eac9d136f17e68cc33c831146d506c0eb41ef'),
+    0x004ACD10: ('rt_hle_memset', 88, '4fd4d112065490f5cdd92c83810b685d8c896ca8'),
+}
+
 # Instruction emitters produce C with a few tokens that are expanded per code copy
 # (FuncGen.lower): ST(i), fpush(c, v), fpop(c) and FTOP address the x87 stack;
 # SPILL/RELOAD synchronise registers and x87 state with the context around calls,
@@ -85,6 +94,11 @@ TOP = _Top()
 # register is exchanged through the context. Dispatch goes through wrappers with
 # the plain GuestFn signature (see Generator.write_table).
 ARG_REGS = frozenset(('eax', 'ecx', 'esp'))
+# Indirect call of `t` through a per-site cache of its dispatch hash entry (sites are
+# mostly monomorphic); misses go through rt_call_indirect_ic, which refills it.
+INDIRECT_CACHE = 'static const GuestFunc *ic = g_guest_func_hash; const GuestFunc *ge = ic;'
+INDIRECT_CALL = ('(ge->addr == t && ge->fast ? ge->fast(c, esp, ecx, eax) '
+                 ': rt_call_indirect_ic(c, t, esp, ecx, eax, &ic))')
 FUNC_PROTO = 'uint64_t f_%08X(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax)'
 RET_REGS = frozenset(('eax', 'esp'))
 
@@ -1394,7 +1408,7 @@ class FuncGen:
             cases = ' '.join('case %s: %s' % (h(x), self.goto(x)) for x in fn.jump_tables[a])
             return ['{ uint32_t t = %s; switch (t) { %s default: SPILL; rt_dispatch(c, t); return RETC; } }' % (
                 self.rd(o, 4), cases)]
-        return ['{ uint32_t t = %s; CSPILL; return rt_call_indirect(c, t, esp, ecx, eax); }' % self.rd(o, 4)]
+        return ['{ uint32_t t = %s; CSPILL; %s return %s; }' % (self.rd(o, 4), INDIRECT_CACHE, INDIRECT_CALL)]
 
     def i_jcc(self, ins, cc):
         t = self.an.direct_target(ins)
@@ -1431,8 +1445,8 @@ class FuncGen:
             return [call + ' RELOAD;']
         # Indirect call: rt_call_indirect calls generated targets with the register
         # convention and host thunks through rt_dispatch.
-        return ['{ uint32_t t = %s; esp -= 4u; GWR32(esp, %s); CSPILL; '
-                'uint64_t rv = rt_call_indirect(c, t, esp, ecx, eax); CRELOAD; }' % (self.rd(ins.ops[0], 4), ret)]
+        return ['{ uint32_t t = %s; esp -= 4u; GWR32(esp, %s); CSPILL; %s uint64_t rv = %s; CRELOAD; }' % (
+            self.rd(ins.ops[0], 4), ret, INDIRECT_CACHE, INDIRECT_CALL)]
 
     def import_call(self, ins, imp):
         """Call of a host import; under IGI_PROFILE the profiler attributes the time to
@@ -1485,8 +1499,15 @@ class FuncGen:
             if not rep:
                 return ['{ uint32_t d = %s; uint32_t s = %s; uint32_t r = %s; %s (void)r; %s }' % (d, s, r, fl, adv)]
             stop = 'r == 0' if rep == 'repne' else 'r != 0'
-            return ['while (ecx != 0) { uint32_t d = %s; uint32_t s = %s; uint32_t r = %s; ecx -= 1u; %s %s '
-                    'if (%s) break; }' % (d, s, r, adv, fl + ' (void)r;', stop)]
+            loop = ('while (ecx != 0) { uint32_t d = %s; uint32_t s = %s; uint32_t r = %s; ecx -= 1u; %s %s '
+                    'if (%s) break; }' % (d, s, r, adv, fl + ' (void)r;', stop))
+            if rep == 'repne' and kind == 'scas' and size == 1:
+                # Inline strlen idiom: search forward with a word-at-a-time scan; the
+                # flags come from the last comparison, as in the byte loop.
+                return ['{ RtScas m = { 0, 0, 0, 0 }; if (ecx != 0 && !c->df && (m = rt_scasb_fwd(gm, ecx, edi, '
+                        'eax & 0xFFu)).ok) { ecx = m.cx; edi = m.di; { uint32_t d = eax & 0xFFu; uint32_t s = m.last; '
+                        'uint32_t r = (d - s) & 0xFFu; %s (void)r; } } else { %s } }' % (fl, loop)]
+            return [loop]
         raise Unsupported(ins.mnem)
 
     # ------------------------------------------------------------- x87
@@ -1658,6 +1679,13 @@ class Generator:
         self.x87_force_dynamic = os.environ.get('IGI_X87_DYNAMIC') == '1'
         self.fsumm = {}
         self.fproven = {}
+        self.hle = {}
+        # IGI_HLE=0 keeps the guest code for every C runtime routine (for A/B checks).
+        for a, (name, size, digest) in (HLE.items() if os.environ.get('IGI_HLE') != '0' else ()):
+            if a in self.funcs and hashlib.sha1(self.an.pe.read(a, size)).hexdigest() == digest:
+                self.hle[a] = name
+            else:
+                print('warning: %08X does not match %s; running the guest code' % (a, name))
 
     def x87_info(self, ins):
         """(stack delta, needs dynamic mode) for an x87 instruction, None otherwise."""
@@ -1756,6 +1784,9 @@ class Generator:
         if entry in self.probes:
             # Diagnostic probe requested at configure time (IGI_PROBES).
             body = ['    c->r[0] = eax; c->r[1] = ecx; c->r[4] = esp; rt_probe(c, 0x%08Xu);' % entry] + body
+        hle = self.hle.get(entry)
+        if hle:
+            body = ['    { uint64_t hr; if (%s(c, esp, ecx, eax, &hr)) return hr; }' % hle] + body
         # Profiler hooks (empty unless IGI_PROFILE): every exit restores the caller.
         body = [re.sub(r'\breturn\b', 'PROF_EXIT; return', line) for line in body]
         text = '\n'.join(body)
