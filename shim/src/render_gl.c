@@ -121,6 +121,13 @@ static void c_cullface(GLenum m)
         (glCullFace)(m);
 }
 
+static void c_frontface(GLenum m)
+{
+    float v = (float)m;
+    if (cache_set(0x30000006u, &v, 1))
+        (glFrontFace)(m);
+}
+
 static void c_shademodel(GLenum m)
 {
     float v = (float)m;
@@ -202,6 +209,7 @@ static void c_fogfv(GLenum pname, const GLfloat *value)
 #define glDepthMask c_depthmask
 #define glAlphaFunc c_alphafunc
 #define glCullFace c_cullface
+#define glFrontFace c_frontface
 #define glShadeModel c_shademodel
 #define glPolygonMode c_polygonmode
 #define glActiveTexture c_activetexture
@@ -908,11 +916,9 @@ static void apply_states(int pretransformed, int has_normal)
     if (rs[22] == 1u || pretransformed) {
         glDisable(GL_CULL_FACE);
     } else {
-        /* D3DCULL_CCW removes counter-clockwise triangles = GL front faces with the
-         * default CCW winding. Only glCullFace is used: vitaGL does not honour
-         * glFrontFace, which inverted culling (building interiors showed through). */
         glEnable(GL_CULL_FACE);
-        glCullFace(rs[22] == 3u ? GL_FRONT : GL_BACK);
+        glCullFace(GL_BACK);
+        glFrontFace(rs[22] == 3u ? GL_CW : GL_CCW);
     }
     glShadeModel(rs[9] == 1u ? GL_FLAT : GL_SMOOTH);
     glPolygonMode(GL_FRONT_AND_BACK, rs[8] == 2u ? GL_LINE : rs[8] == 1u ? GL_POINT : GL_FILL);
