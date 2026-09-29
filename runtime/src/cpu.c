@@ -260,7 +260,9 @@ void rt_probe(Ctx *c, uint32_t func)
     if (i == 64u)
         return;
     funcs[i] = func;
-    if (counts[i]++ >= 400u)
+    /* During traced frames every call is logged; otherwise only the first few. */
+    extern int g_trace_next_frame;
+    if (g_trace_next_frame != 2 && counts[i]++ >= 400u)
         return;
     uint32_t sp = c->r[4];
     rt_log("probe %08X from %08X args %08X %08X %08X %08X ecx %08X", func, RD32(sp), RD32(sp + 4u), RD32(sp + 8u),
