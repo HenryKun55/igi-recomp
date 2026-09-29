@@ -173,8 +173,11 @@ static void c_texenvf(GLenum target, GLenum pname, GLfloat value)
 
 static void c_texenvfv(GLenum target, GLenum pname, const GLfloat *value)
 {
-    if (cache_set(0x40000000u ^ ((uint32_t)(cur_unit - GL_TEXTURE0) << 20) ^ pname, value, 4))
-        (glTexEnvfv)(target, pname, value);
+    if (cache_set(0x40000000u ^ ((uint32_t)(cur_unit - GL_TEXTURE0) << 20) ^ pname, value, 4)) {
+        GLfloat v[4];   /* vitaGL takes a non-const pointer */
+        memcpy(v, value, sizeof(v));
+        (glTexEnvfv)(target, pname, v);
+    }
 }
 
 static void c_fogi(GLenum pname, GLint value)
