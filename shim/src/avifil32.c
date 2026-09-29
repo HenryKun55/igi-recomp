@@ -5,6 +5,7 @@
  * compressed frames with AVIStreamRead, decompresses them with ICDecompress
  * into a DIB and plays the matching .wav through DirectSound.
  */
+#include "ddraw_priv.h"
 #include "shim.h"
 #include "video.h"
 
@@ -363,6 +364,7 @@ SHIM(msvfw32, ICClose)
 {
     Codec *k = codec_by_handle(ARG(0));
     if (k) {
+        surface_forget_video(k->rgba);
         video_decoder_close(k->dec);
         free(k->rgba);
         memset(k, 0, sizeof(*k));
@@ -399,6 +401,19 @@ SHIM(msvfw32, ICDecompress)
                 rm = RD32(bi_out + 40u);
                 gm = RD32(bi_out + 44u);
                 bmask = RD32(bi_out + 48u);
+            }
+            Surface *target = surface_by_client_mem(bits);
+            if (target) {
+                /* Fast path: the renderer uploads the decoded frame and lets the GPU
+                 * scale it; nothing is converted into the 16-bit DIB. */
+                target->video_rgba = k->rgba;
+                target->video_w = k->width;
+                target->video_h = k->height;
+                target->dirty = 1;
+                r = ICERR_OK;
+                c->r[0] = r;
+                c->r[4] += 4u;
+                return;
             }
             uint32_t pitch = (((uint32_t)w * bpp / 8u) + 3u) & ~3u;
             /* No divisions per pixel: the Vita's Cortex-A9 has no hardware divide. */

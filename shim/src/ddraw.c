@@ -96,6 +96,37 @@ uint32_t rgba_to_pixel(const PixFmt *pf, uint32_t c)
 
 static uint32_t surface_vtbl[8];
 
+/* Surfaces created on game-supplied memory (few: the video frame target). */
+#define MAX_CLIENT_SURFACES 8
+static Surface *client_surfaces[MAX_CLIENT_SURFACES];
+
+static void client_surface_track(Surface *s, int add)
+{
+    for (int i = 0; i < MAX_CLIENT_SURFACES; i++) {
+        if (add && !client_surfaces[i]) {
+            client_surfaces[i] = s;
+            return;
+        }
+        if (!add && client_surfaces[i] == s)
+            client_surfaces[i] = NULL;
+    }
+}
+
+void surface_forget_video(const uint32_t *rgba)
+{
+    for (int i = 0; i < MAX_CLIENT_SURFACES; i++)
+        if (client_surfaces[i] && client_surfaces[i]->video_rgba == rgba)
+            client_surfaces[i]->video_rgba = NULL;
+}
+
+Surface *surface_by_client_mem(uint32_t mem)
+{
+    for (int i = 0; i < MAX_CLIENT_SURFACES; i++)
+        if (client_surfaces[i] && client_surfaces[i]->mem == mem)
+            return client_surfaces[i];
+    return NULL;
+}
+
 uint32_t surface_obj(Surface *s, int version)
 {
     if (!s->objs[version]) {
@@ -135,6 +166,8 @@ static void surface_destroy(Surface *s)
     }
     if (s->mem && !s->client_mem)
         heap_free(s->mem);
+    if (s->client_mem)
+        client_surface_track(s, 0);
     if (s == g_primary)
         g_primary = NULL;
     if (s == g_backbuffer)
@@ -479,6 +512,7 @@ static void surf_Lock(Ctx *c)
     }
     uint32_t rect = ARG(1), desc = ARG(2);
     surface_alloc_mem(s);
+    s->video_rgba = NULL;
     if (is_render_target(s)) {
         render_readback(s);
         s->lock_readback = 1;
@@ -522,6 +556,8 @@ static void surf_SetSurfaceDesc(Ctx *c)
     if ((flags & DDSD_LPSURFACE) && RD32(d + 36u)) {
         if (s->mem && !s->client_mem)
             heap_free(s->mem);
+        if (!s->client_mem)
+            client_surface_track(s, 1);
         s->mem = RD32(d + 36u);
         s->client_mem = 1;
         if (flags & DDSD_PITCH)
@@ -740,6 +776,7 @@ static void dd_CreateSurface(Ctx *c)
         /* The game supplies the pixel memory (used for video frames). */
         s->mem = RD32(d + 36u);
         s->client_mem = 1;
+        client_surface_track(s, 1);
         if (flags & DDSD_PITCH)
             s->pitch = RD32(d + 16u);
     }

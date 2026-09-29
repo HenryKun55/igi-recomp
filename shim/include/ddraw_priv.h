@@ -78,6 +78,10 @@ struct Surface {
     int dirty;             /* guest pixels changed since the last upload */
     int mip_levels;
     int client_mem;        /* mem belongs to the game (DDSD_LPSURFACE): never freed */
+    /* Video fast path: the decoder hands its RGBA frame straight to the renderer
+     * instead of converting it into the surface's pixel format. */
+    const uint32_t *video_rgba;
+    int video_w, video_h;
     uint32_t priv[8];      /* renderer scratch */
 };
 
@@ -92,6 +96,10 @@ void surface_alloc_mem(Surface *s);
 void pixfmt_write(uint32_t addr, const PixFmt *pf);
 void pixfmt_read(uint32_t addr, PixFmt *pf);
 PixFmt pixfmt_rgb(int bits);
+/* Surface whose pixel memory is the game-supplied buffer at `mem`, if any. */
+Surface *surface_by_client_mem(uint32_t mem);
+/* Drop video fast-path references to a decoder buffer that is going away. */
+void surface_forget_video(const uint32_t *rgba);
 
 /* Convert one pixel of `pf` at `p` to RGBA8 (R in the low byte). */
 uint32_t pixel_to_rgba(const PixFmt *pf, const uint8_t *p);
