@@ -331,6 +331,45 @@ static void soft_blit(Surface *dst, const Rect *dr, Surface *src, const Rect *sr
     int32_t sw = sr->r - sr->l, sh = sr->b - sr->t;
     if (dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0)
         return;
+    const int ck = use_ck && src->has_ck;
+    if (dw == sw && dh == sh && bpp == src->pf.bits / 8u) {
+        /* Unscaled (texture loads): whole rows at a time. */
+        int32_t x0 = 0, x1 = dw;
+        if (dr->l + x0 < 0) x0 = -dr->l;
+        if (sr->l + x0 < 0) x0 = -sr->l;
+        if (dr->l + x1 > (int32_t)dst->w) x1 = (int32_t)dst->w - dr->l;
+        if (sr->l + x1 > (int32_t)src->w) x1 = (int32_t)src->w - sr->l;
+        if (x1 > x0) {
+            for (int32_t y = 0; y < dh; y++) {
+                int32_t dy = dr->t + y, sy = sr->t + y;
+                if (dy < 0 || dy >= (int32_t)dst->h || sy < 0 || sy >= (int32_t)src->h)
+                    continue;
+                const uint8_t *sp = g_mem + src->mem + (uint32_t)sy * src->pitch + (uint32_t)(sr->l + x0) * bpp;
+                uint8_t *dp = g_mem + dst->mem + (uint32_t)dy * dst->pitch + (uint32_t)(dr->l + x0) * bpp;
+                if (!ck) {
+                    memcpy(dp, sp, (size_t)(x1 - x0) * bpp);
+                } else if (bpp == 2u) {
+                    const uint32_t lo = src->ck_lo, hi = src->ck_hi;
+                    for (int32_t x = 0; x < x1 - x0; x++) {
+                        uint16_t v;
+                        memcpy(&v, sp + x * 2, 2);
+                        if (v < lo || v > hi)
+                            memcpy(dp + x * 2, &v, 2);
+                    }
+                } else {
+                    const uint32_t lo = src->ck_lo, hi = src->ck_hi;
+                    for (int32_t x = 0; x < x1 - x0; x++) {
+                        uint32_t v = 0;
+                        memcpy(&v, sp + (uint32_t)x * bpp, bpp);
+                        if (v < lo || v > hi)
+                            memcpy(dp + (uint32_t)x * bpp, &v, bpp);
+                    }
+                }
+            }
+        }
+        dst->dirty = 1;
+        return;
+    }
     /* Source column per destination column, computed once per blit rather than
      * per pixel (integer division is a library call on the Vita's CPU). -1 = clipped. */
     static int32_t *col_src;
@@ -343,7 +382,6 @@ static void soft_blit(Surface *dst, const Rect *dr, Surface *src, const Rect *sr
         int32_t dx = dr->l + x, sx = sr->l + x * sw / dw;
         col_src[x] = (dx < 0 || dx >= (int32_t)dst->w || sx < 0 || sx >= (int32_t)src->w) ? -1 : sx;
     }
-    const int ck = use_ck && src->has_ck;
     const uint32_t ck_lo = src->ck_lo, ck_hi = src->ck_hi;
     for (int32_t y = 0; y < dh; y++) {
         int32_t dy = dr->t + y, sy = sr->t + y * sh / dh;
