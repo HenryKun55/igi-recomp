@@ -203,7 +203,8 @@ void platform_set_video_mode(int w, int h)
         gl = SDL_GL_CreateContext(window);
         if (!gl)
             rt_fatal(NULL, "SDL_GL_CreateContext: %s", SDL_GetError());
-        SDL_GL_SetSwapInterval(1);
+        const char *vs = getenv("IGI_VSYNC");
+        SDL_GL_SetSwapInterval(vs && vs[0] == '0' ? 0 : 1);
     }
     platform_show_window(1);
 }
@@ -221,6 +222,23 @@ void platform_get_drawable_size(int *w, int *h)
 
 void platform_swap(void)
 {
+    /* Frame rate and average frame time in the title, refreshed once a second. */
+    static Uint64 last, freq;
+    static unsigned frames;
+    if (!freq) {
+        freq = SDL_GetPerformanceFrequency();
+        last = SDL_GetPerformanceCounter();
+    }
+    frames++;
+    Uint64 now = SDL_GetPerformanceCounter();
+    if (now - last >= freq) {
+        double secs = (double)(now - last) / (double)freq;
+        char title[96];
+        snprintf(title, sizeof(title), "Project IGI - %.1f fps (%.1f ms)", frames / secs, secs * 1000.0 / frames);
+        SDL_SetWindowTitle(window, title);
+        frames = 0;
+        last = now;
+    }
     SDL_GL_SwapWindow(window);
 }
 
@@ -417,6 +435,12 @@ static void scripted_input(void)
 
 void platform_pump(void)
 {
+    /* Pumping Cocoa events is expensive; the game asks many times per frame. */
+    static Uint64 last_pump;
+    Uint64 now = SDL_GetPerformanceCounter();
+    if (last_pump && now - last_pump < SDL_GetPerformanceFrequency() / 1000u)
+        return;
+    last_pump = now;
     scripted_input();
     SDL_Event e;
     while (SDL_PollEvent(&e))
