@@ -2,7 +2,6 @@
 #include "com.h"
 #include "platform.h"
 
-#include <SDL.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -193,8 +192,8 @@ static void d_GetDeviceInfo(Ctx *c)
     memset(gptr(p), 0, size);
     WR32(p, size);
     WR32(p + 36u, d->kind == KIND_MOUSE ? 0x112u : 0x113u);
-    snprintf(gstr(p + 40u), 260, "%s", d->kind == KIND_MOUSE ? "Mouse" : "Keyboard");
-    snprintf(gstr(p + 300u), 260, "%s", d->kind == KIND_MOUSE ? "Mouse" : "Keyboard");
+    snprintf(gbuf(p + 40u), 260, "%s", d->kind == KIND_MOUSE ? "Mouse" : "Keyboard");
+    snprintf(gbuf(p + 300u), 260, "%s", d->kind == KIND_MOUSE ? "Mouse" : "Keyboard");
     stdcall_ret(c, DI_OK, 2);
 }
 
@@ -306,8 +305,8 @@ static void di_EnumDevices(Ctx *c)
                 WR8(g + 8u + j, b[j]);
         }
         WR32(inst + 36u, devs[i].type);
-        snprintf(gstr(inst + 40u), 260, "%s", devs[i].name);
-        snprintf(gstr(inst + 300u), 260, "%s", devs[i].name);
+        snprintf(gbuf(inst + 40u), 260, "%s", devs[i].name);
+        snprintf(gbuf(inst + 300u), 260, "%s", devs[i].name);
         uint32_t args[2] = { inst, ctx };
         if (!guest_call(c, cb, 2, args))
             break;

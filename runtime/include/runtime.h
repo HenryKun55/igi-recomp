@@ -51,6 +51,8 @@ uint32_t guest_call(Ctx *c, uint32_t fn, int nargs, const uint32_t *args);
 /* Host pointer for a guest address. */
 static inline void *gptr(uint32_t a) { return a ? (void *)(g_mem + a) : NULL; }
 static inline char *gstr(uint32_t a) { return a ? (char *)(g_mem + a) : NULL; }
+/* Guest buffer the host writes into (never NULL, unlike gstr). */
+static inline char *gbuf(uint32_t a) { return (char *)(g_mem + a); }
 
 /* Stack arguments of a stdcall import: ARG(0) is the first parameter. */
 #define ARG(n) RD32(c->r[4] + 4u + 4u * (uint32_t)(n))

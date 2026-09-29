@@ -597,7 +597,7 @@ static int find_next(FindState *f, uint32_t data)
         unix_to_filetime(st.st_mtime, data + 20u);
         WR32(data + 28u, (uint32_t)((uint64_t)st.st_size >> 32));
         WR32(data + 32u, (uint32_t)st.st_size);
-        snprintf(gstr(data + 44u), 260, "%s", e->d_name);
+        snprintf(gbuf(data + 44u), 260, "%s", e->d_name);
         return 1;
     }
     return 0;
@@ -848,5 +848,6 @@ void kernel32_init(void)
     for (int i = 0; i < 3; i++)
         std_handles[i] = handle_new(H_STD);
     if (!g_cd_dir[0])
-        snprintf(g_cd_dir, sizeof(g_cd_dir), "%s/..", g_game_dir);
+        if (snprintf(g_cd_dir, sizeof(g_cd_dir), "%.1000s/..", g_game_dir) >= (int)sizeof(g_cd_dir))
+            g_cd_dir[0] = 0;
 }

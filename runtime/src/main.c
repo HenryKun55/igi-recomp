@@ -209,10 +209,16 @@ int main(int argc, char **argv)
     const char *dir = getenv("IGI_DIR");
     if (argc > 1)
         dir = argv[1];
+#if defined(__vita__)
+    if (!dir)
+        dir = "ux0:data/igi/pc";
+    log_file = fopen("ux0:data/igi/igi.log", "w");
+#else
     if (!dir)
         dir = ".";
-    snprintf(g_game_dir, sizeof(g_game_dir), "%s", dir);
     log_file = fopen("igi.log", "w");
+#endif
+    snprintf(g_game_dir, sizeof(g_game_dir), "%s", dir);
 
     mem_init();
     char exe[1100];

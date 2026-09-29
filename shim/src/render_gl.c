@@ -18,6 +18,21 @@ RenderState g_rs;
 
 static int rt_w = 640, rt_h = 480;       /* game resolution */
 static int fb_w = 640, fb_h = 480;       /* drawable size in pixels */
+static int vp_x, vp_y, vp_w = 640, vp_h = 480;   /* game image inside the drawable (aspect kept) */
+
+static void update_letterbox(void)
+{
+    platform_get_drawable_size(&fb_w, &fb_h);
+    if ((int64_t)fb_w * rt_h > (int64_t)fb_h * rt_w) {
+        vp_h = fb_h;
+        vp_w = (int)((int64_t)fb_h * rt_w / rt_h);
+    } else {
+        vp_w = fb_w;
+        vp_h = (int)((int64_t)fb_w * rt_h / rt_w);
+    }
+    vp_x = (fb_w - vp_w) / 2;
+    vp_y = (fb_h - vp_h) / 2;
+}
 static GLuint white_tex;
 static GLuint blit_tex;
 static int blit_tex_w, blit_tex_h;
@@ -37,7 +52,7 @@ void render_init(int w, int h)
 {
     rt_w = w;
     rt_h = h;
-    platform_get_drawable_size(&fb_w, &fb_h);
+    update_letterbox();
     if (!white_tex) {
         uint32_t white = 0xFFFFFFFFu;
         glGenTextures(1, &white_tex);
@@ -89,7 +104,15 @@ void render_init(int w, int h)
 
 void render_begin_frame(void)
 {
-    platform_get_drawable_size(&fb_w, &fb_h);
+    update_letterbox();
+    if (vp_w != fb_w || vp_h != fb_h) {
+        /* Keep the bars around the 4:3 image black. */
+        glDisable(GL_SCISSOR_TEST);
+        glViewport(0, 0, fb_w, fb_h);
+        glClearColor(0, 0, 0, 1);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glClear(GL_COLOR_BUFFER_BIT);
+    }
 }
 
 /* IGI_SHOT=N: save every Nth presented frame as shot_<frame>.bmp (debugging aid). */
@@ -147,12 +170,12 @@ void render_present(void)
 /* Game pixel rectangle -> GL window rectangle (y up). */
 static void to_fb(int32_t x, int32_t y, int32_t w, int32_t h, GLint *ox, GLint *oy, GLsizei *ow, GLsizei *oh)
 {
-    int32_t x0 = (int32_t)((int64_t)x * fb_w / rt_w);
-    int32_t x1 = (int32_t)((int64_t)(x + w) * fb_w / rt_w);
-    int32_t y0 = (int32_t)((int64_t)y * fb_h / rt_h);
-    int32_t y1 = (int32_t)((int64_t)(y + h) * fb_h / rt_h);
-    *ox = x0;
-    *oy = fb_h - y1;
+    int32_t x0 = (int32_t)((int64_t)x * vp_w / rt_w);
+    int32_t x1 = (int32_t)((int64_t)(x + w) * vp_w / rt_w);
+    int32_t y0 = (int32_t)((int64_t)y * vp_h / rt_h);
+    int32_t y1 = (int32_t)((int64_t)(y + h) * vp_h / rt_h);
+    *ox = vp_x + x0;
+    *oy = vp_y + vp_h - y1;
     *ow = x1 - x0;
     *oh = y1 - y0;
 }
@@ -160,7 +183,7 @@ static void to_fb(int32_t x, int32_t y, int32_t w, int32_t h, GLint *ox, GLint *
 /* Orthographic projection over the whole render target in D3D pixel coordinates. */
 static void load_screen_ortho(void)
 {
-    glViewport(0, 0, fb_w, fb_h);
+    glViewport(vp_x, vp_y, vp_w, vp_h);
     glDepthRange(0.0, 1.0);
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
@@ -339,15 +362,15 @@ void render_blit(Surface *src, const Rect *sr, const Rect *dr, int use_ck)
 void render_readback(Surface *s)
 {
     surface_alloc_mem(s);
-    uint32_t *px = malloc((size_t)fb_w * (size_t)fb_h * 4u);
+    uint32_t *px = malloc((size_t)vp_w * (size_t)vp_h * 4u);
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
-    glReadPixels(0, 0, fb_w, fb_h, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    glReadPixels(vp_x, vp_y, vp_w, vp_h, GL_RGBA, GL_UNSIGNED_BYTE, px);
     uint32_t bpp = s->pf.bits / 8u;
     for (uint32_t y = 0; y < s->h; y++) {
-        uint32_t fy = (uint32_t)fb_h - 1u - (uint32_t)((uint64_t)y * (uint32_t)fb_h / s->h);
+        uint32_t fy = (uint32_t)vp_h - 1u - (uint32_t)((uint64_t)y * (uint32_t)vp_h / s->h);
         for (uint32_t x = 0; x < s->w; x++) {
-            uint32_t fx = (uint32_t)((uint64_t)x * (uint32_t)fb_w / s->w);
-            uint32_t v = rgba_to_pixel(&s->pf, px[fy * (uint32_t)fb_w + fx]);
+            uint32_t fx = (uint32_t)((uint64_t)x * (uint32_t)vp_w / s->w);
+            uint32_t v = rgba_to_pixel(&s->pf, px[fy * (uint32_t)vp_w + fx]);
             memcpy(g_mem + s->mem + y * s->pitch + x * bpp, &v, bpp);
         }
     }
@@ -428,8 +451,8 @@ static void ta_to_gl(uint32_t ta, int alpha, GLenum *src, GLenum *op)
 static void setup_combiner(int alpha, uint32_t op, uint32_t a1, uint32_t a2)
 {
     GLenum combine = alpha ? GL_COMBINE_ALPHA : GL_COMBINE_RGB;
-    GLenum src0 = alpha ? GL_SOURCE0_ALPHA : GL_SOURCE0_RGB, src1 = alpha ? GL_SOURCE1_ALPHA : GL_SOURCE1_RGB;
-    GLenum src2 = alpha ? GL_SOURCE2_ALPHA : GL_SOURCE2_RGB;
+    GLenum src0 = alpha ? GL_SRC0_ALPHA : GL_SRC0_RGB, src1 = alpha ? GL_SRC1_ALPHA : GL_SRC1_RGB;
+    GLenum src2 = alpha ? GL_SRC2_ALPHA : GL_SRC2_RGB;
     GLenum op0 = alpha ? GL_OPERAND0_ALPHA : GL_OPERAND0_RGB, op1 = alpha ? GL_OPERAND1_ALPHA : GL_OPERAND1_RGB;
     GLenum op2 = alpha ? GL_OPERAND2_ALPHA : GL_OPERAND2_RGB;
     GLenum scale = alpha ? GL_ALPHA_SCALE : GL_RGB_SCALE;
@@ -502,7 +525,9 @@ static int apply_stages(int ntex)
                                              : (mip ? GL_NEAREST_MIPMAP_NEAREST : GL_NEAREST);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, minf);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, st->magfilter >= 2u ? GL_LINEAR : GL_NEAREST);
+#if !defined(__vita__)
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, (GLint)st->texture->priv[0] - 1);
+#endif
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap_mode(st->addressu));
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap_mode(st->addressv));
         }
@@ -573,13 +598,20 @@ static void apply_states(int pretransformed, int has_normal)
         memcpy(&end, &rs[37], 4);
         memcpy(&dens, &rs[38], 4);
         if (pretransformed || !mode) {
+#if defined(__vita__)
+            /* No fog coordinates in vitaGL: game-computed vertex fog is not drawn yet. */
+            glDisable(GL_FOG);
+#else
             /* Vertex fog computed by the game: the factor is in the specular alpha. */
             glFogi(GL_FOG_COORDINATE_SOURCE, GL_FOG_COORDINATE);
             glFogi(GL_FOG_MODE, GL_LINEAR);
             glFogf(GL_FOG_START, 1.0f);
             glFogf(GL_FOG_END, 0.0f);
+#endif
         } else {
+#if !defined(__vita__)
             glFogi(GL_FOG_COORDINATE_SOURCE, GL_FRAGMENT_DEPTH);
+#endif
             glFogi(GL_FOG_MODE, mode == 1u ? GL_EXP : mode == 2u ? GL_EXP2 : GL_LINEAR);
             glFogf(GL_FOG_START, start);
             glFogf(GL_FOG_END, end);
@@ -635,6 +667,7 @@ static void apply_states(int pretransformed, int has_normal)
                 p[3] = 1.0f;
             }
             glLightfv(gl, GL_POSITION, p);
+#if !defined(__vita__)
             glLightf(gl, GL_CONSTANT_ATTENUATION, l->att0);
             glLightf(gl, GL_LINEAR_ATTENUATION, l->att1);
             glLightf(gl, GL_QUADRATIC_ATTENUATION, l->att2);
@@ -645,6 +678,7 @@ static void apply_states(int pretransformed, int has_normal)
             } else {
                 glLightf(gl, GL_SPOT_CUTOFF, 180.0f);
             }
+#endif
         }
     } else {
         glDisable(GL_LIGHTING);
@@ -766,13 +800,15 @@ void render_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, u
     } else {
         glDisableClientState(GL_NORMAL_ARRAY);
     }
+#if !defined(__vita__)
     if (g_rs.rs[28] && (pretransformed || (!g_rs.rs[35] && !g_rs.rs[140])) && has_spec) {
         glEnableClientState(GL_FOG_COORDINATE_ARRAY);
         glFogCoordPointer(GL_FLOAT, 0, fog_buf);
     } else {
         glDisableClientState(GL_FOG_COORDINATE_ARRAY);
-        glFogCoordf(0.0f);
+        glFogCoordf(1.0f);
     }
+#endif
     for (int s = 0; s < stages; s++) {
         glClientActiveTexture(GL_TEXTURE0 + (GLenum)s);
         uint32_t ci = g_rs.stage[s].texcoordindex & 0xFFFFu;

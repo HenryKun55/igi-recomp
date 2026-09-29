@@ -36,6 +36,9 @@ typedef struct KeyEvent {
     uint32_t time;
 } KeyEvent;
 int platform_pop_key_event(KeyEvent *out);
+void platform_push_key(uint8_t dik, int down);
+/* Feed IGI_INPUT scripted events (testing aid); called from platform_pump. */
+void platform_scripted_input(void);
 
 /* Mouse: accumulated relative motion since the last read, absolute position, buttons. */
 typedef struct MouseState {

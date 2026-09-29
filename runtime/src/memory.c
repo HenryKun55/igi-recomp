@@ -6,6 +6,8 @@
 
 #if defined(__vita__)
 #include <malloc.h>
+/* newlib heap: guest address space plus host allocations (textures live in vitaGL pools). */
+int _newlib_heap_size_user = 224 * 1024 * 1024;
 #else
 #include <sys/mman.h>
 #endif
@@ -15,7 +17,7 @@ uint32_t g_guest_mem_size;
 void mem_init(void)
 {
 #if defined(__vita__)
-    g_guest_mem_size = 0x10000000u;   /* 256 MiB */
+    g_guest_mem_size = 0x0A000000u;   /* 160 MiB: image + 128 MiB guest heap */
     g_mem = memalign(4096, g_guest_mem_size);
     if (!g_mem) {
         fprintf(stderr, "cannot allocate guest memory\n");
