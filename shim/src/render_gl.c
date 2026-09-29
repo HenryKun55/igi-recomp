@@ -16,6 +16,7 @@
 #endif
 
 RenderState g_rs;
+static uint32_t stat_game_draws, stat_gpu_draws, stat_frames;   /* per-5s draw statistics */
 
 /* ---- GL state cache ------------------------------------------------------
  * D3D state is re-applied before every draw. Forwarding redundant calls is
@@ -437,8 +438,25 @@ static void maybe_screenshot(void)
     free(px);
 }
 
+static void draw_stats(void)
+{
+    static uint32_t last_ms;
+    extern uint32_t win32_tick_count(void);
+    uint32_t now = win32_tick_count();
+    stat_frames++;
+    if (now - last_ms < 5000u)
+        return;
+    if (stat_frames)
+        rt_log("render: %.1f fps, %u game draws/frame -> %u GPU draws/frame", stat_frames * 1000.0 / (now - last_ms),
+               stat_game_draws / stat_frames, stat_gpu_draws / stat_frames);
+    last_ms = now;
+    stat_frames = stat_game_draws = stat_gpu_draws = 0;
+}
+
 void render_present(void)
 {
+    render_flush();
+    draw_stats();
     /* IGI_TRACE_EVERY=N: trace (log every draw + save the image of) every Nth frame. */
     static int trace_every = -1;
     static unsigned present_count;
@@ -492,6 +510,7 @@ static void load_screen_ortho(void)
 
 void render_clear(uint32_t nrects, const Rect *rects, uint32_t flags, uint32_t color, float z)
 {
+    render_flush();
     GLbitfield mask = 0;
     if (flags & 1u) {
         mask |= GL_COLOR_BUFFER_BIT;
@@ -709,6 +728,7 @@ static void draw_rgba_quad(const uint32_t *px, int w, int h, const Rect *sr, con
 
 void render_blit(Surface *src, const Rect *sr, const Rect *dr, int use_ck)
 {
+    render_flush();
     VideoFrameSource *vs = src->client_mem ? video_source_for(src->mem) : NULL;
     if (vs) {
         /* Movie frame: convert it once, upload at native size, let the GPU scale. */
@@ -730,6 +750,7 @@ void render_blit(Surface *src, const Rect *sr, const Rect *dr, int use_ck)
 
 void render_readback(Surface *s)
 {
+    render_flush();
     surface_alloc_mem(s);
     uint32_t *px = malloc((size_t)vp_w * (size_t)vp_h * 4u);
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
@@ -748,6 +769,7 @@ void render_readback(Surface *s)
 
 void render_writeback(Surface *s)
 {
+    render_flush();
     int ck = s->has_ck;
     s->has_ck = 0;
     uint32_t *px = surface_rgba(s);
@@ -1108,31 +1130,12 @@ static float *nrm_buf;
 static float *uv_buf[MAX_STAGES];
 static size_t pos_cap;
 
-void render_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, uint32_t ni,
-                 int pretransformed, int has_normal, int has_color, int has_spec, int ntex)
+static void draw_now(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, uint32_t ni,
+                     int pretransformed, int has_normal, int has_color, int has_spec, int ntex)
 {
     if (!nv)
         return;
-    if (pretransformed) {
-        /* A (near) zero rhw makes w effectively infinite. Hardware of the era interpolates
-         * colors perspective-correctly (attribute * rhw), so such primitives come out fully
-         * transparent. IGI's cutscenes submit an overlay with rhw left as garbage/zero;
-         * drawing it paints a green band over the scene. */
-        float min_rhw = 1e30f, max_rhw = 0.0f;
-        for (uint32_t i = 0; i < nv; i++) {
-            min_rhw = v[i].w < min_rhw ? v[i].w : min_rhw;
-            max_rhw = v[i].w > max_rhw ? v[i].w : max_rhw;
-        }
-        if (max_rhw < 1e-6f) {
-            static int reported;
-            if (reported < 8) {
-                reported++;
-                rt_log("dropping pre-transformed prim %d (%u verts): rhw %g..%g, color %08X", prim, nv,
-                       (double)min_rhw, (double)max_rhw, v[0].color);
-            }
-            return;
-        }
-    }
+    stat_gpu_draws++;
     if (g_trace_next_frame == 2) {
         float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
         for (uint32_t i = 0; i < nv; i++) {
@@ -1246,4 +1249,117 @@ void render_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, u
         glDrawElements(gl_prim(prim), (GLsizei)ni, GL_UNSIGNED_SHORT, idx);
     else
         glDrawArrays(gl_prim(prim), 0, (GLsizei)nv);
+}
+
+/* ---- draw batching --------------------------------------------------------
+ * IGI issues thousands of tiny draws per frame (every glyph, every terrain
+ * strip). Consecutive triangle draws with identical render state are merged
+ * into one indexed triangle list: on the Vita each draw costs a round of GXM
+ * state setup and a vertex copy.
+ */
+#define BATCH_MAX_V 16384u
+#define BATCH_MAX_I 49152u
+
+static RVertex batch_v[BATCH_MAX_V];
+static uint16_t batch_i[BATCH_MAX_I];
+static uint32_t batch_nv, batch_ni;
+static RenderState batch_rs;
+static int batch_key[5];
+static int batch_active;
+
+/* A (near) zero rhw makes w effectively infinite. Hardware of the era interpolates
+ * colors perspective-correctly (attribute * rhw), so such primitives come out fully
+ * transparent. IGI's cutscenes submit an overlay with rhw left as garbage/zero. */
+static int rhw_invisible(int prim, const RVertex *v, uint32_t nv)
+{
+    float min_rhw = 1e30f, max_rhw = 0.0f;
+    for (uint32_t i = 0; i < nv; i++) {
+        min_rhw = v[i].w < min_rhw ? v[i].w : min_rhw;
+        max_rhw = v[i].w > max_rhw ? v[i].w : max_rhw;
+    }
+    if (max_rhw >= 1e-6f)
+        return 0;
+    static int reported;
+    if (reported < 8) {
+        reported++;
+        rt_log("dropping pre-transformed prim %d (%u verts): rhw %g..%g, color %08X", prim, nv, (double)min_rhw,
+               (double)max_rhw, v[0].color);
+    }
+    return 1;
+}
+
+void render_flush(void)
+{
+    if (!batch_active)
+        return;
+    batch_active = 0;
+    if (!batch_ni)
+        return;
+    static RenderState saved;
+    saved = g_rs;
+    g_rs = batch_rs;
+    draw_now(PRIM_TRIANGLES, batch_v, batch_nv, batch_i, batch_ni, batch_key[0], batch_key[1], batch_key[2],
+             batch_key[3], batch_key[4]);
+    g_rs = saved;
+    batch_nv = batch_ni = 0;
+}
+
+static uint32_t tri_count(int prim, uint32_t n)
+{
+    if (prim == PRIM_TRIANGLES)
+        return n / 3u;
+    return n >= 3u ? n - 2u : 0u;
+}
+
+void render_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, uint32_t ni,
+                 int pretransformed, int has_normal, int has_color, int has_spec, int ntex)
+{
+    if (!nv)
+        return;
+    stat_game_draws++;
+    if (pretransformed && rhw_invisible(prim, v, nv))
+        return;
+    uint32_t n = idx ? ni : nv;
+    int batchable = prim == PRIM_TRIANGLES || prim == PRIM_TRIANGLE_STRIP || prim == PRIM_TRIANGLE_FAN;
+    uint32_t tris = batchable ? tri_count(prim, n) : 0u;
+    if (!batchable || nv > BATCH_MAX_V || tris * 3u > BATCH_MAX_I || g_trace_next_frame == 2) {
+        render_flush();
+        draw_now(prim, v, nv, idx, ni, pretransformed, has_normal, has_color, has_spec, ntex);
+        return;
+    }
+    if (!tris)
+        return;
+    int key[5] = { pretransformed, has_normal, has_color, has_spec, ntex };
+    if (batch_active && (batch_nv + nv > BATCH_MAX_V || batch_ni + tris * 3u > BATCH_MAX_I ||
+                         memcmp(key, batch_key, sizeof(key)) != 0 || memcmp(&g_rs, &batch_rs, sizeof(g_rs)) != 0))
+        render_flush();
+    if (!batch_active) {
+        batch_active = 1;
+        batch_rs = g_rs;
+        memcpy(batch_key, key, sizeof(key));
+        batch_nv = batch_ni = 0;
+    }
+    uint32_t base = batch_nv;
+    memcpy(&batch_v[base], v, nv * sizeof(RVertex));
+    batch_nv += nv;
+    uint16_t *out = &batch_i[batch_ni];
+    for (uint32_t t = 0; t < tris; t++) {
+        uint32_t a, b, c;
+        if (prim == PRIM_TRIANGLES) {
+            a = t * 3u; b = a + 1u; c = a + 2u;
+        } else if (prim == PRIM_TRIANGLE_STRIP) {
+            /* Alternate winding so every triangle keeps the strip's orientation. */
+            if (t & 1u) { a = t + 1u; b = t; } else { a = t; b = t + 1u; }
+            c = t + 2u;
+        } else {
+            a = 0u; b = t + 1u; c = t + 2u;
+        }
+        if (idx) {
+            a = idx[a]; b = idx[b]; c = idx[c];
+        }
+        *out++ = (uint16_t)(base + a);
+        *out++ = (uint16_t)(base + b);
+        *out++ = (uint16_t)(base + c);
+    }
+    batch_ni += tris * 3u;
 }
