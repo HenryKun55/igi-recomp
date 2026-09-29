@@ -578,9 +578,30 @@ static void dev_ValidateDevice(Ctx *c)
     stdcall_ret(c, D3D_OK, 2);
 }
 
+static Ctx *draw_ctx;   /* guest context of the Draw* call being executed (diagnostics) */
+
 static void draw(uint32_t prim, uint32_t fvf, uint32_t verts, uint32_t stride, uint32_t nv,
                  uint32_t indices, uint32_t ni)
 {
+    /* Diagnostic: report who submits large untextured pre-transformed triangles
+     * (the cutscene overlay), with the guest call chain from the frame pointers. */
+    static int reported;
+    if (reported < 6 && draw_ctx && (fvf & 0x0Eu) == 0x4u && !g_rs.stage[0].texture && nv >= 3u) {
+        float y0, y1;
+        memcpy(&y0, gptr(verts + 4u), 4);
+        memcpy(&y1, gptr(verts + stride * 2u + 4u), 4);
+        if (y1 - y0 > 100.0f || y0 - y1 > 100.0f) {
+            Ctx *c = draw_ctx;
+            reported++;
+            uint32_t ebp = c->r[5], chain[6] = { RD32(c->r[4]), 0, 0, 0, 0, 0 };
+            for (int i = 1; i < 6 && ebp >= GUEST_STACK_BASE && ebp < GUEST_STACK_BASE + GUEST_STACK_SIZE; i++) {
+                chain[i] = RD32(ebp + 4u);
+                ebp = RD32(ebp);
+            }
+            rt_log("overlay draw fvf %03X nv %u from %08X <- %08X <- %08X <- %08X <- %08X <- %08X", fvf, nv,
+                   chain[0], chain[1], chain[2], chain[3], chain[4], chain[5]);
+        }
+    }
     if (getenv("IGI_TRACE_DRAW")) {
         float fs, fe;
         memcpy(&fs, &g_rs.rs[36], 4);
@@ -624,6 +645,7 @@ static void draw(uint32_t prim, uint32_t fvf, uint32_t verts, uint32_t stride, u
 
 static void dev_DrawPrimitive(Ctx *c)
 {
+    draw_ctx = c;
     uint32_t prim = ARG(1), fvf = ARG(2), verts = ARG(3), n = ARG(4);
     draw(prim, fvf, verts, fvf_stride(fvf), prim_vertex_count(prim, n), 0, 0);
     stdcall_ret(c, D3D_OK, 6);
@@ -631,6 +653,7 @@ static void dev_DrawPrimitive(Ctx *c)
 
 static void dev_DrawIndexedPrimitive(Ctx *c)
 {
+    draw_ctx = c;
     uint32_t prim = ARG(1), fvf = ARG(2), verts = ARG(3), nv = ARG(4), idx = ARG(5), ni = ARG(6);
     draw(prim, fvf, verts, fvf_stride(fvf), nv, idx, ni);
     stdcall_ret(c, D3D_OK, 8);
@@ -638,6 +661,7 @@ static void dev_DrawIndexedPrimitive(Ctx *c)
 
 static void dev_DrawPrimitiveVB(Ctx *c)
 {
+    draw_ctx = c;
     uint32_t prim = ARG(1), start = ARG(3), n = ARG(4);
     VertexBuffer *vb = com_host(ARG(2));
     draw(prim, vb->fvf, vb->mem + start * vb->stride, vb->stride, n, 0, 0);
@@ -646,6 +670,7 @@ static void dev_DrawPrimitiveVB(Ctx *c)
 
 static void dev_DrawIndexedPrimitiveVB(Ctx *c)
 {
+    draw_ctx = c;
     uint32_t prim = ARG(1), start = ARG(3), nv = ARG(4), idx = ARG(5), ni = ARG(6);
     VertexBuffer *vb = com_host(ARG(2));
     draw(prim, vb->fvf, vb->mem + start * vb->stride, vb->stride, nv, idx, ni);
