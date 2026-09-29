@@ -132,6 +132,8 @@ static void c_depthmask(GLboolean m)
         (glDepthMask)(m);
 }
 
+static int diag_mode;
+
 static void c_alphafunc(GLenum f, GLfloat ref)
 {
     float v[2] = { (float)f, ref };
@@ -140,7 +142,8 @@ static void c_alphafunc(GLenum f, GLfloat ref)
 #if defined(__vita__)
         /* vitaGL re-uploads the alpha reference only on a shader change;
          * glUseProgram(0) marks all fragment uniforms dirty. */
-        glUseProgram(0);
+        if (diag_mode != 8)
+            glUseProgram(0);
 #endif
     }
 }
@@ -204,7 +207,8 @@ static void c_texenvfv(GLenum target, GLenum pname, const GLfloat *value)
         memcpy(v, value, sizeof(v));
         (glTexEnvfv)(target, pname, v);
 #if defined(__vita__)
-        glUseProgram(0);   /* refresh fragment uniforms (combiner scale/color) */
+        if (diag_mode != 8)
+            glUseProgram(0);   /* refresh fragment uniforms (combiner scale/color) */
 #endif
     }
 }
@@ -340,13 +344,12 @@ static int aspect_fill = -1;
 
 /* Culling override for diagnosis: 0 normal, 1 off, 2 flipped (cull=off|flip). */
 static int cull_override;
-/* Live diagnostic mode (Vita: L+R+SELECT cycles it), shown on the overlay. */
+/* Live diagnostic mode (Vita: L+R+SELECT cycles it), shown on the overlay; diag_mode is declared above. */
 enum { DIAG_NONE, DIAG_NO_BATCH, DIAG_NO_CULL, DIAG_FLIP_ZREMAP, DIAG_NO_SCREEN, DIAG_NO_3D, DIAG_DEPTH_LEQUAL,
-       DIAG_NO_COMPACT, DIAG_COUNT };
+       DIAG_NO_COMPACT, DIAG_NO_USEPROGRAM, DIAG_NO_ZERO_UV, DIAG_ALL_MIPS, DIAG_COUNT };
 static const char *const diag_names[DIAG_COUNT] = { "NORMAL", "NO BATCH", "NO CULL", "FLIP ZREMAP",
-                                                     "NO 2D VERTS", "NO 3D VERTS", "DEPTH LEQUAL", "NO COMPACT" };
-static int diag_mode;
-
+                                                     "NO 2D VERTS", "NO 3D VERTS", "DEPTH LEQUAL", "NO COMPACT",
+                                                     "NO USEPROGRAM", "NO ZERO UV", "ALL MIPS" };
 int render_diag_no_compact(void)
 {
     return diag_mode == DIAG_NO_COMPACT;
@@ -867,7 +870,7 @@ uint32_t render_texture_get(Surface *s)
     int levels_dirty = 0;
     for (Surface *m = s; m; m = next_mip(m))
         levels_dirty |= m->dirty;
-    if (s->gl_tex && !levels_dirty)
+    if (s->gl_tex && !levels_dirty && !(diag_mode == DIAG_ALL_MIPS && s->priv[0] == 0 && next_mip(s)))
         return s->gl_tex;
     uint64_t t0 = win32_perf_counter();
 
@@ -888,9 +891,11 @@ uint32_t render_texture_get(Surface *s)
 #if defined(__vita__)
     /* vitaGL rebuilds mip levels with a GPU transfer that came out empty/zero-alpha
      * (distant walls vanished under the color-key alpha test): level 0 only. */
-    for (int i = 1; i < n; i++)
-        lv[i]->dirty = 0;
-    n = 1;
+    if (diag_mode != DIAG_ALL_MIPS) {
+        for (int i = 1; i < n; i++)
+            lv[i]->dirty = 0;
+        n = 1;
+    }
 #endif
     if (s->priv[0] != (uint32_t)(n - 1))
         changed = 1;
@@ -1683,9 +1688,15 @@ static void submit(int prim, const Layout *L, uint32_t nv, const uint16_t *idx, 
         } else {
 #if defined(__vita__)
             /* vitaGL only counts a texture unit whose texcoord array is enabled. */
-            memset(uv_buf[s], 0, nv * 8u);
-            glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-            glTexCoordPointer(2, GL_FLOAT, 0, uv_buf[s]);
+            if (diag_mode == DIAG_NO_ZERO_UV) {
+                glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+                ptr_cache[PTR_TEX0 + s] = NULL;
+            } else {
+                memset(uv_buf[s], 0, nv * 8u);
+                glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+                glTexCoordPointer(2, GL_FLOAT, 0, uv_buf[s]);
+                ptr_cache[PTR_TEX0 + s] = uv_buf[s];
+            }
 #else
             glDisableClientState(GL_TEXTURE_COORD_ARRAY);
             glMultiTexCoord2f(GL_TEXTURE0 + (GLenum)s, 0, 0);
