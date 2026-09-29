@@ -43,6 +43,13 @@ COND = {
 STRING_OPS = {'movsb', 'movsw', 'movsd', 'stosb', 'stosw', 'stosd', 'lodsb', 'lodsw', 'lodsd',
               'scasb', 'scasw', 'scasd', 'cmpsb', 'cmpsw', 'cmpsd'}
 
+# Guest functions whose entry calls rt_probe (see runtime/src/igi_fixes.c).
+GAME_HOOKS = [
+    0x00418970,   # UI window render (cutscene window state)
+    0x00497700,   # 2D render queue flush (start)
+    0x00497860,   # 2D render queue: per-node state setup
+]
+
 NORETURN_IMPORTS = {'ExitProcess', 'TerminateProcess', 'RaiseException'}
 
 
@@ -1140,7 +1147,8 @@ class Generator:
         self.funcs, self.entries = self.an.run()
         self.funcs = {e: f for e, f in self.funcs.items() if not f.bad}
         self.func_set = set(self.funcs)
-        self.probes = {int(x, 16) for x in os.environ.get('IGI_PROBES', '').replace(',', ' ').split()}
+        # Entry hooks: game-specific fixes (runtime/src/igi_fixes.c) plus diagnostic probes.
+        self.probes = set(GAME_HOOKS) | {int(x, 16) for x in os.environ.get('IGI_PROBES', '').replace(',', ' ').split()}
         self.imports_used = {}
 
     def import_fn(self, imp):

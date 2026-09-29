@@ -1,5 +1,6 @@
 /* Fixed-function OpenGL backend for the DirectDraw / Direct3D 7 shims. */
 #include "platform.h"
+#include "igi_fixes.h"
 #include "render.h"
 
 #include <stdio.h>
@@ -428,6 +429,7 @@ void render_present(void)
     if (trace_every > 0 && ++present_count % (unsigned)trace_every == 0 && !g_trace_next_frame)
         g_trace_next_frame = 1;
     platform_scripted_input();   /* cutscenes present frames without pumping messages */
+    igi_end_frame();
     draw_bars();
     maybe_screenshot();   /* before the trace state advances: saves the traced frame */
     if (g_trace_next_frame == 2) {

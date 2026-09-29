@@ -1,4 +1,5 @@
 /* Direct3D 7: IDirect3D7, IDirect3DDevice7 and IDirect3DVertexBuffer7. */
+#include "igi_fixes.h"
 #include "render.h"
 
 #include <stdio.h>
@@ -578,50 +579,11 @@ static void dev_ValidateDevice(Ctx *c)
     stdcall_ret(c, D3D_OK, 2);
 }
 
-static Ctx *draw_ctx;   /* guest context of the Draw* call being executed (diagnostics) */
-
 static void draw(uint32_t prim, uint32_t fvf, uint32_t verts, uint32_t stride, uint32_t nv,
                  uint32_t indices, uint32_t ni)
 {
-    /* Diagnostic: report who submits large untextured pre-transformed triangles
-     * (the cutscene overlay), with the guest call chain from the frame pointers. */
-    static int reported;
-    if (reported < 3 && draw_ctx && (fvf & 0x0Eu) == 0x4u && !g_rs.stage[0].texture && nv == 3u) {
-        float y0, y1;
-        memcpy(&y0, gptr(verts + 4u), 4);
-        memcpy(&y1, gptr(verts + stride * 2u + 4u), 4);
-        if (y1 - y0 > 100.0f || y0 - y1 > 100.0f) {
-            Ctx *c = draw_ctx;
-            reported++;
-            /* Trace the next frames automatically so the queue probes show the culprit. */
-            extern int g_trace_next_frame;
-            if (!g_trace_next_frame)
-                g_trace_next_frame = 1;
-            /* No frame pointers in IGI: scan the stack for words that are return
-             * addresses (point just after a call instruction in .text). */
-            char buf[512];
-            int len = snprintf(buf, sizeof(buf), "overlay draw fvf %03X nv %u, return addresses:", fvf, nv);
-            uint32_t sp = c->r[4];
-            for (uint32_t i = 0, found = 0; i < 256u && found < 12u && len < (int)sizeof(buf) - 12; i++) {
-                uint32_t a = RD32(sp + i * 4u);
-                if (a < 0x401005u || a >= 0x533000u)
-                    continue;
-                if (RD8(a - 5u) == 0xE8u || (RD8(a - 6u) == 0xFFu && (RD8(a - 5u) & 0x38u) == 0x10u) ||
-                    (RD8(a - 3u) == 0xFFu && (RD8(a - 2u) & 0x38u) == 0x10u) || (RD8(a - 2u) == 0xFFu && (RD8(a - 1u) & 0x38u) == 0x10u)) {
-                    len += snprintf(buf + len, sizeof(buf) - (size_t)len, " %08X", a);
-                    found++;
-                }
-            }
-            rt_log("%s", buf);
-        }
-    }
-    if (getenv("IGI_TRACE_DRAW")) {
-        float fs, fe;
-        memcpy(&fs, &g_rs.rs[36], 4);
-        memcpy(&fe, &g_rs.rs[37], 4);
-        rt_log("draw prim %u fvf %03X nv %u ni %u fog %u table %u vertex %u range %g..%g color %08X light %u",
-               prim, fvf, nv, ni, g_rs.rs[28], g_rs.rs[35], g_rs.rs[140], fs, fe, g_rs.rs[34], g_rs.rs[137]);
-    }
+    if ((fvf & 0x0Eu) == 0x4u && !g_rs.stage[0].texture && igi_skip_untextured_2d())
+        return;
     Decoded d;
     if (indices && ni) {
         /* D3D passes the whole vertex buffer size; decode only the range the
@@ -658,7 +620,6 @@ static void draw(uint32_t prim, uint32_t fvf, uint32_t verts, uint32_t stride, u
 
 static void dev_DrawPrimitive(Ctx *c)
 {
-    draw_ctx = c;
     uint32_t prim = ARG(1), fvf = ARG(2), verts = ARG(3), n = ARG(4);
     draw(prim, fvf, verts, fvf_stride(fvf), prim_vertex_count(prim, n), 0, 0);
     stdcall_ret(c, D3D_OK, 6);
@@ -666,7 +627,6 @@ static void dev_DrawPrimitive(Ctx *c)
 
 static void dev_DrawIndexedPrimitive(Ctx *c)
 {
-    draw_ctx = c;
     uint32_t prim = ARG(1), fvf = ARG(2), verts = ARG(3), nv = ARG(4), idx = ARG(5), ni = ARG(6);
     draw(prim, fvf, verts, fvf_stride(fvf), nv, idx, ni);
     stdcall_ret(c, D3D_OK, 8);
@@ -674,7 +634,6 @@ static void dev_DrawIndexedPrimitive(Ctx *c)
 
 static void dev_DrawPrimitiveVB(Ctx *c)
 {
-    draw_ctx = c;
     uint32_t prim = ARG(1), start = ARG(3), n = ARG(4);
     VertexBuffer *vb = com_host(ARG(2));
     draw(prim, vb->fvf, vb->mem + start * vb->stride, vb->stride, n, 0, 0);
@@ -683,7 +642,6 @@ static void dev_DrawPrimitiveVB(Ctx *c)
 
 static void dev_DrawIndexedPrimitiveVB(Ctx *c)
 {
-    draw_ctx = c;
     uint32_t prim = ARG(1), start = ARG(3), nv = ARG(4), idx = ARG(5), ni = ARG(6);
     VertexBuffer *vb = com_host(ARG(2));
     draw(prim, vb->fvf, vb->mem + start * vb->stride, vb->stride, nv, idx, ni);

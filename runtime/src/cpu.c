@@ -251,31 +251,3 @@ void rt_noreturn(Ctx *c, uint32_t addr)
     rt_fatal(c, "returned from a no-return call at %08X", addr);
 }
 
-void rt_probe(Ctx *c, uint32_t func)
-{
-    if (func == 0x00418970u) {
-        /* Camera view render: log its mode field whenever it changes. */
-        static uint32_t last_mode = 0xFFFFFFFFu;
-        uint32_t obj = RD32(c->r[4] + 4u);
-        uint32_t mode = RD32(obj + 0x28u);
-        if (mode != last_mode) {
-            rt_log("camera %08X mode %u -> %u", obj, last_mode, mode);
-            last_mode = mode;
-        }
-        return;
-    }
-    static uint32_t funcs[64], counts[64];
-    uint32_t i = 0;
-    while (i < 64u && funcs[i] && funcs[i] != func)
-        i++;
-    if (i == 64u)
-        return;
-    funcs[i] = func;
-    /* During traced frames every call is logged; otherwise only the first few. */
-    extern int g_trace_next_frame;
-    if (g_trace_next_frame != 2 && counts[i]++ >= 400u)
-        return;
-    uint32_t sp = c->r[4];
-    rt_log("probe %08X from %08X args %08X %08X %08X %08X ecx %08X", func, RD32(sp), RD32(sp + 4u), RD32(sp + 8u),
-           RD32(sp + 12u), RD32(sp + 16u), c->r[1]);
-}
