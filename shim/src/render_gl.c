@@ -418,6 +418,7 @@ static void maybe_screenshot(void)
 
 void render_present(void)
 {
+    platform_scripted_input();   /* cutscenes present frames without pumping messages */
     draw_bars();
     maybe_screenshot();   /* before the trace state advances: saves the traced frame */
     if (g_trace_next_frame == 2) {

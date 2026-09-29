@@ -62,6 +62,12 @@ void platform_scripted_input(void)
     static int release_lmb;
     static Uint32 release_at;
     Uint32 now = SDL_GetTicks() - t0;
+    static Uint32 dbg;
+    if (getenv("IGI_INPUT_DEBUG") && now / 2000u != dbg) {
+        dbg = now / 2000u;
+        rt_log("[input-debug] now %u rel %u/%d at %u next '%.12s'", now, release_dik, release_lmb, release_at,
+               script ? script : "(end)");
+    }
     if ((release_dik || release_lmb) && now >= release_at) {
         if (release_dik) {
             g_key_state[release_dik] = 0;
@@ -87,6 +93,11 @@ void platform_scripted_input(void)
         char buf[32];
         snprintf(buf, sizeof(buf), "%.*s", (int)n, act);
         rt_log("[input] t=%lu %s", at, buf);
+        if (strcmp(buf, "trace") == 0) {
+            g_trace_next_frame = 1;   /* log the next frame's draws and save it */
+            script = end ? end + 1 : NULL;
+            continue;
+        }
         if (strcmp(buf, "lmb") == 0) {
             g_mouse.buttons[0] = 0x80;
             user32_post_message(0x0201, 0, ((uint32_t)g_mouse.y << 16) | ((uint32_t)g_mouse.x & 0xFFFFu));
