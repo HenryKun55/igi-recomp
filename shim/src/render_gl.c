@@ -347,10 +347,11 @@ static int aspect_fill = -1;
 static int cull_override;
 /* Live diagnostic mode (Vita: L+R+SELECT cycles it), shown on the overlay; diag_mode is declared above. */
 enum { DIAG_NONE, DIAG_NO_BATCH, DIAG_NO_CULL, DIAG_FLIP_ZREMAP, DIAG_NO_SCREEN, DIAG_NO_3D, DIAG_DEPTH_LEQUAL,
-       DIAG_NO_COMPACT, DIAG_USEPROGRAM, DIAG_ZERO_UV, DIAG_LEVEL0, DIAG_COUNT };
+       DIAG_NO_COMPACT, DIAG_USEPROGRAM, DIAG_ZERO_UV, DIAG_LEVEL0, DIAG_NO_NEARCLIP, DIAG_COUNT };
 static const char *const diag_names[DIAG_COUNT] = { "NORMAL", "NO BATCH", "NO CULL", "FLIP ZREMAP",
                                                      "NO 2D VERTS", "NO 3D VERTS", "DEPTH LEQUAL", "NO COMPACT",
-                                                     "USEPROGRAM", "ZERO UV", "LEVEL0" };
+                                                     "USEPROGRAM", "ZERO UV", "LEVEL0",
+                                                     "NO NEARCLIP" };
 int render_diag_no_compact(void)
 {
     return diag_mode == DIAG_NO_COMPACT;
@@ -1892,6 +1893,102 @@ void render_flush(void)
     perf.draw_us += win32_perf_counter() - t0;
 }
 
+/* ---- near-plane clipping ---------------------------------------------------
+ * Vita3K clamps negative depth to 0 instead of clipping at the near plane, so
+ * triangles that pass between the camera and the near plane came out in front
+ * of everything (room interiors through walls, floors over floors). Triangles
+ * crossing the D3D near plane (clip z = 0) are clipped here on the CPU; draws
+ * entirely in front of it pass through untouched.
+ */
+#if defined(__vita__)
+static RVertex nc_lerp(const RVertex *a, const RVertex *b, float t)
+{
+    RVertex r;
+    const float *fa = &a->x, *fb = &b->x;
+    float *fr = &r.x;
+    for (int i = 0; i < 7; i++)   /* x y z w nx ny nz */
+        fr[i] = fa[i] + (fb[i] - fa[i]) * t;
+    for (int s = 0; s < MAX_STAGES; s++)
+        for (int k = 0; k < 2; k++)
+            r.uv[s][k] = a->uv[s][k] + (b->uv[s][k] - a->uv[s][k]) * t;
+    uint32_t c = 0, sp = 0;
+    for (int sh = 0; sh < 32; sh += 8) {
+        float ca = (float)((a->color >> sh) & 0xFFu), cb = (float)((b->color >> sh) & 0xFFu);
+        float sa = (float)((a->spec >> sh) & 0xFFu), sb = (float)((b->spec >> sh) & 0xFFu);
+        c |= (uint32_t)(ca + (cb - ca) * t + 0.5f) << sh;
+        sp |= (uint32_t)(sa + (sb - sa) * t + 0.5f) << sh;
+    }
+    r.color = c;
+    r.spec = sp;
+    return r;
+}
+
+/* Returns 1 and a clipped triangle list in out/nout when some triangle crosses the near plane. */
+static int near_clip(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, uint32_t ni, RVertex **out,
+                     uint32_t *nout)
+{
+    static float *d;
+    static uint32_t d_cap;
+    static RVertex *ob;
+    static uint32_t ob_cap;
+    if (nv > d_cap) {
+        d_cap = nv + 1024u;
+        d = realloc(d, d_cap * sizeof(float));
+    }
+    float m[16];
+    mat_mul(g_rs.world, g_rs.view, m);
+    mat_mul(m, g_rs.proj, m);
+    int any = 0;
+    for (uint32_t i = 0; i < nv; i++) {
+        d[i] = v[i].x * m[2] + v[i].y * m[6] + v[i].z * m[10] + m[14];
+        any |= d[i] < 0.0f;
+    }
+    if (!any)
+        return 0;
+    uint32_t n = idx ? ni : nv;
+    uint32_t tris = prim == PRIM_TRIANGLES ? n / 3u : (n >= 3u ? n - 2u : 0u);
+    if (tris * 6u > ob_cap) {   /* a clipped triangle yields at most 2 */
+        ob_cap = tris * 6u + 1024u;
+        ob = realloc(ob, ob_cap * sizeof(RVertex));
+    }
+    uint32_t no = 0;
+    for (uint32_t t = 0; t < tris; t++) {
+        uint32_t k[3];
+        if (prim == PRIM_TRIANGLES) {
+            k[0] = t * 3u; k[1] = t * 3u + 1u; k[2] = t * 3u + 2u;
+        } else if (prim == PRIM_TRIANGLE_STRIP) {
+            k[0] = t; k[1] = (t & 1u) ? t + 2u : t + 1u; k[2] = (t & 1u) ? t + 1u : t + 2u;
+        } else {
+            k[0] = 0; k[1] = t + 1u; k[2] = t + 2u;
+        }
+        uint32_t vi[3];
+        for (int j = 0; j < 3; j++) {
+            vi[j] = idx ? idx[k[j]] : k[j];
+            if (vi[j] >= nv)
+                vi[j] = nv - 1u;
+        }
+        RVertex poly[4];
+        int np = 0;
+        for (int j = 0; j < 3; j++) {
+            uint32_t a = vi[j], b = vi[(j + 1) % 3];
+            float da = d[a], db = d[b];
+            if (da >= 0.0f)
+                poly[np++] = v[a];
+            if ((da >= 0.0f) != (db >= 0.0f))
+                poly[np++] = nc_lerp(&v[a], &v[b], da / (da - db));
+        }
+        for (int j = 1; j + 1 < np; j++) {
+            ob[no++] = poly[0];
+            ob[no++] = poly[j];
+            ob[no++] = poly[j + 1];
+        }
+    }
+    *out = ob;
+    *nout = no;
+    return 1;
+}
+#endif
+
 static void batch_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, uint32_t ni,
                        int pretransformed, int has_normal, int has_color, int has_spec, int ntex)
 {
@@ -1901,6 +1998,22 @@ static void batch_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *
         return;
     if ((diag_mode == DIAG_NO_SCREEN && pretransformed) || (diag_mode == DIAG_NO_3D && !pretransformed))
         return;
+#if defined(__vita__)
+    if (!pretransformed && diag_mode != DIAG_NO_NEARCLIP &&
+        (prim == PRIM_TRIANGLES || prim == PRIM_TRIANGLE_STRIP || prim == PRIM_TRIANGLE_FAN)) {
+        RVertex *cv;
+        uint32_t cn;
+        if (near_clip(prim, v, nv, idx, ni, &cv, &cn)) {
+            if (!cn)
+                return;
+            prim = PRIM_TRIANGLES;
+            v = cv;
+            nv = cn;
+            idx = NULL;
+            ni = 0;
+        }
+    }
+#endif
     if (batch_enabled < 0) {
         const char *e = getenv("IGI_BATCH");
         batch_enabled = !(e && e[0] == '0');
