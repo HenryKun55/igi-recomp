@@ -8,7 +8,8 @@ branches and the rest. Given two ELFs, it also cross-checks the final guest
 state (registers, x87 top, condition codes and pushed values, argument memory
 and stack) so a code generator change can be validated on real functions.
 
-Functions that fault on the synthetic inputs (wild pointers, dispatch to host
+Indirect calls between generated functions work (the dispatch table is linked);
+functions that fault on the synthetic inputs (wild pointers, calls into host
 code) or run longer than the instruction limit are skipped.
 
 Usage:
@@ -53,12 +54,6 @@ GuestFn thunk_lookup(uint32_t a) { (void)a; return NULL; }
 void rt_fatal(Ctx *c, const char *fmt, ...) { (void)c; (void)fmt; for (;;) __asm__ volatile("udf #1"); }
 void rt_probe(Ctx *c, uint32_t f) { (void)c; (void)f; }
 void rt_missing_import(Ctx *c, const char *n) { (void)c; (void)n; __asm__ volatile("udf #2"); }
-const GuestFunc g_guest_funcs[1];
-const uint32_t g_guest_func_count = 0;
-const GuestFunc g_guest_func_hash[1];
-const uint32_t g_guest_func_hash_mask = 0;
-const GuestImport g_guest_imports[1];
-const uint32_t g_guest_import_count = 0;
 int *__errno(void) { static int e; return &e; }
 void *memmove(void *d, const void *s, size_t n)
 {
@@ -109,13 +104,14 @@ def build(exe, gen_dir, out, list_file=None):
         f.write(STUB)
     incs = ['-I' + os.path.join(ROOT, 'runtime/include'), '-I' + gen_dir]
     srcs = sorted(glob.glob(os.path.join(gen_dir, 'funcs_*.c'))) + [
-        os.path.join(gen_dir, 'import_stubs.c'), os.path.join(ROOT, 'runtime/src/cpu.c'), os.path.join(work, 'stub.c')]
+        os.path.join(gen_dir, 'import_stubs.c'), os.path.join(gen_dir, 'dispatch_table.c'),
+        os.path.join(ROOT, 'runtime/src/cpu.c'), os.path.join(work, 'stub.c')]
     objs = [os.path.join(work, os.path.basename(s)[:-2] + '.o') for s in srcs]
     with multiprocessing.Pool() as pool:
         pool.map(compile_one, [(s, o, incs) for s, o in zip(srcs, objs)])
     libgcc = subprocess.check_output([TOOL + 'gcc'] + CFLAGS + ['-print-libgcc-file-name'], text=True).strip()
     lib = os.path.join(SDK, 'arm-vita-eabi', 'lib')
-    roots = ['-Wl,--undefined=f_' + f for f in funcs]
+    roots = ['-Wl,--undefined=f_' + f for f in funcs] + ['-Wl,--undefined=rt_dispatch', '-Wl,--undefined=rt_call_indirect']
     subprocess.check_call([TOOL + 'gcc'] + CFLAGS + [
         '-nostdlib', '-nostartfiles', '-static', '-Wl,--gc-sections', '-Wl,--no-enum-size-warning',
         '-Wl,-e,f_' + funcs[0], '-Wl,-Ttext=0x100000'] + roots + ['-o', out] + objs +

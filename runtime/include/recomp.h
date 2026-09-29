@@ -26,9 +26,14 @@ typedef struct Ctx {
 
 typedef void (*GuestFn)(Ctx *c);
 
+/* Calling convention between generated functions: eax, ecx and esp in registers,
+ * eax and esp returned (low and high half); everything else through the context. */
+typedef uint64_t (*GuestFastFn)(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax);
+
 typedef struct GuestFunc {
     uint32_t addr;
-    GuestFn fn;
+    GuestFn fn;             /* context-only entry (wrapper) */
+    GuestFastFn fast;       /* generated function */
 } GuestFunc;
 
 typedef struct GuestImport {
@@ -283,6 +288,9 @@ void rt_longjmp(Ctx *c, uint32_t guest_buf) __attribute__((noreturn));
 
 /* Call the guest code at `target` (a recompiled function or a host thunk). */
 void rt_dispatch(Ctx *c, uint32_t target);
+/* Indirect call or jump from generated code, with the GuestFastFn convention (the
+ * caller has stored every other modified register in the context). */
+uint64_t rt_call_indirect(Ctx *c, uint32_t target, uint32_t esp, uint32_t ecx, uint32_t eax);
 
 void rt_unimplemented(Ctx *c, uint32_t addr, const char *what);
 /* Diagnostic hook inserted at the entry of functions listed in IGI_PROBES. */

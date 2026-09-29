@@ -1394,7 +1394,7 @@ class FuncGen:
             cases = ' '.join('case %s: %s' % (h(x), self.goto(x)) for x in fn.jump_tables[a])
             return ['{ uint32_t t = %s; switch (t) { %s default: SPILL; rt_dispatch(c, t); return RETC; } }' % (
                 self.rd(o, 4), cases)]
-        return ['{ uint32_t t = %s; SPILL; rt_dispatch(c, t); return RETC; }' % self.rd(o, 4)]
+        return ['{ uint32_t t = %s; CSPILL; return rt_call_indirect(c, t, esp, ecx, eax); }' % self.rd(o, 4)]
 
     def i_jcc(self, ins, cc):
         t = self.an.direct_target(ins)
@@ -1429,8 +1429,10 @@ class FuncGen:
             if imp[1] in NORETURN_IMPORTS:
                 return [call + ' rt_noreturn(c, %s); return RETC;' % h(ins.addr)]
             return [call + ' RELOAD;']
-        return ['{ uint32_t t = %s; esp -= 4u; GWR32(esp, %s); SPILL; rt_dispatch(c, t); RELOAD; }' % (
-            self.rd(ins.ops[0], 4), ret)]
+        # Indirect call: rt_call_indirect calls generated targets with the register
+        # convention and host thunks through rt_dispatch.
+        return ['{ uint32_t t = %s; esp -= 4u; GWR32(esp, %s); CSPILL; '
+                'uint64_t rv = rt_call_indirect(c, t, esp, ecx, eax); CRELOAD; }' % (self.rd(ins.ops[0], 4), ret)]
 
     def i_ret(self, ins):
         n = 4 + (ins.ops[0].imm if ins.ops else 0)
@@ -1808,7 +1810,7 @@ class Generator:
                 f.write('GUEST_WRAPPER(%08X)\n' % e)
             f.write('\nconst GuestFunc g_guest_funcs[] = {\n')
             for e in entries:
-                f.write('    { 0x%08Xu, w_%08X },\n' % (e, e))
+                f.write('    { 0x%08Xu, w_%08X, f_%08X },\n' % (e, e, e))
             f.write('};\nconst uint32_t g_guest_func_count = %d;\n\n' % len(entries))
             # rt_dispatch hash table (GUEST_FUNC_HASH in recomp.h, linear probing, <= 50% load).
             size = 1
@@ -1822,7 +1824,7 @@ class Generator:
                 slots[i] = e
             f.write('const GuestFunc g_guest_func_hash[] = {\n')
             for e in slots:
-                f.write('    { 0x%08Xu, w_%08X },\n' % (e, e) if e is not None else '    { 0u, 0 },\n')
+                f.write('    { 0x%08Xu, w_%08X, f_%08X },\n' % (e, e, e) if e is not None else '    { 0u, 0, 0 },\n')
             f.write('};\nconst uint32_t g_guest_func_hash_mask = 0x%Xu;\n\n' % (size - 1))
             # Every IAT slot, so the loader can point it at a host thunk.
             f.write('const GuestImport g_guest_imports[] = {\n')

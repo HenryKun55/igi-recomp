@@ -274,6 +274,26 @@ void rt_x87_mismatch(Ctx *c, uint32_t addr, uint32_t expect)
     rt_fatal(c, "x87 stack top %u after the call at %08X, expected %u", c->ftop, addr, expect);
 }
 
+uint64_t rt_call_indirect(Ctx *c, uint32_t target, uint32_t esp, uint32_t ecx, uint32_t eax)
+{
+    uint32_t mask = g_guest_func_hash_mask;
+    uint32_t i = GUEST_FUNC_HASH(target) & mask;
+    for (;;) {
+        const GuestFunc *e = &g_guest_func_hash[i];
+        if (e->addr == target && e->fast)
+            return e->fast(c, esp, ecx, eax);
+        if (!e->addr)
+            break;
+        i = (i + 1u) & mask;
+    }
+    /* Host thunk (or an unknown address, which rt_dispatch reports). */
+    c->r[0] = eax;
+    c->r[1] = ecx;
+    c->r[4] = esp;
+    rt_dispatch(c, target);
+    return ((uint64_t)c->r[4] << 32) | c->r[0];
+}
+
 void rt_unimplemented(Ctx *c, uint32_t addr, const char *what)
 {
     rt_fatal(c, "unimplemented instruction at %08X: %s", addr, what);
