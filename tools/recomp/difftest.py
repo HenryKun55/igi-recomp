@@ -138,6 +138,11 @@ int main(void)
             uint64_t bits = strtoull(p, &p, 16);
             memcpy(&c.st[(c.ftop + (uint32_t)i) & 7u], &bits, 8);
         }
+        /* String operations read past the initialised bytes: clear what earlier
+         * tests left around esi/edi (Unicorn starts from zeroed memory). */
+        for (int k = 6; k < 8; k++)
+            if (c.r[k] >= 0x02000100u && c.r[k] < 0x02E00000u)
+                memset(g_mem + c.r[k] - 0x100u, 0, 0x300);
         int nmem = (int)strtol(p, &p, 10);
         uint32_t addrs[8];
         for (int m = 0; m < nmem; m++) {
@@ -207,9 +212,11 @@ def random_state(ins, rnd):
                         regs[i] = SCRATCH + 0x100000 + rnd.randrange(0, 0x1000) * 4 if r == o.mem.base else rnd.randrange(0, 64)
     regs[4] = STACK_TOP - rnd.randrange(0, 64) * 4
     if ins.mnem.startswith('rep') or ins.mnem in ('movsb', 'movsd', 'stosb', 'stosd', 'cmpsb', 'cmpsd', 'scasb'):
-        regs[1] = rnd.randrange(0, 8)
+        regs[1] = rnd.choice([rnd.randrange(0, 8), rnd.randrange(8, 40)])
         regs[6] = SCRATCH + 0x200000 + rnd.randrange(0, 256)
         regs[7] = SCRATCH + 0x300000 + rnd.randrange(0, 256)
+        if rnd.random() < 0.3:
+            regs[7] = regs[6] + rnd.randrange(-8, 9)   # overlapping source and destination
     flags = sum(rnd.getrandbits(1) << b for b in FLAG_BITS.values())
     vals = [rnd.choice([rnd.uniform(-1e6, 1e6), rnd.uniform(-2, 2), float(rnd.randrange(-100, 100)), 0.5, -0.5, 1e-7,
                         123456789.75]) for _ in range(8)]
@@ -300,9 +307,9 @@ def main():
             regs, flags, fcw, vals = random_state(ins, rnd)
             addrs = mem_addrs(ins, regs) + [regs[4]]
             if ins.mnem.startswith('rep') or ins.mnem.split()[-1] in ('movsb', 'movsd', 'stosb', 'stosd'):
-                addrs += [regs[6], regs[7]]
+                addrs += [regs[6], regs[7], regs[7] + 16, regs[7] + 32]
             mem = []
-            for a in addrs[:6]:
+            for a in addrs[:8]:
                 if not (SCRATCH <= a < SCRATCH + SCRATCH_SIZE - 16 or 0x536000 <= a < CODE_END - 16):
                     continue
                 mem.append((a, bytes(rnd.getrandbits(8) for _ in range(16))))

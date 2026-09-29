@@ -1133,7 +1133,9 @@ class FuncGen:
         if o.size == 4:
             return ['{ uint32_t v = %s; uint64_t n = ((uint64_t)edx << 32) | eax; '
                     'if (!v) { SPILL; rt_divide_error(c, %s); return; } '
-                    'eax = (uint32_t)(n / v); edx = (uint32_t)(n %% v); }' % (self.rd(o), h(ins.addr))]
+                    # 32-bit division when the dividend fits (no 64-bit libgcc call on ARM).
+                    'if (edx == 0) { uint32_t q = eax / v; edx = eax %% v; eax = q; } '
+                    'else { eax = (uint32_t)(n / v); edx = (uint32_t)(n %% v); } }' % (self.rd(o), h(ins.addr))]
         if o.size == 1:
             return ['{ uint32_t v = %s; uint32_t n = eax & 0xFFFFu; '
                     'if (!v) { SPILL; rt_divide_error(c, %s); return; } '
@@ -1146,7 +1148,10 @@ class FuncGen:
             raise Unsupported('idiv8/16')
         return ['{ int32_t v = (int32_t)%s; int64_t n = (int64_t)(((uint64_t)edx << 32) | eax); '
                 'if (!v) { SPILL; rt_divide_error(c, %s); return; } '
-                'eax = (uint32_t)(int32_t)(n / v); edx = (uint32_t)(int32_t)(n %% v); }' % (self.rd(o), h(ins.addr))]
+                # 32-bit division when edx is the sign extension of eax (cdq; idiv).
+                'if (edx == (uint32_t)((int32_t)eax >> 31) && v != -1) { int32_t a = (int32_t)eax; '
+                'eax = (uint32_t)(a / v); edx = (uint32_t)(a %% v); } '
+                'else { eax = (uint32_t)(int32_t)(n / v); edx = (uint32_t)(int32_t)(n %% v); } }' % (self.rd(o), h(ins.addr))]
 
     def i_bsf(self, ins):
         return self.bitscan(ins, '(uint32_t)__builtin_ctz(s)')
@@ -1350,12 +1355,12 @@ class FuncGen:
         live = self.live_out[ins.addr]
         if kind == 'movs':
             if rep:
-                return ['ISPILL; rt_rep_movs(c, %d); IRELOAD;' % size]
+                return ['{ RtStr m = rt_rep_movs(gm, c->df, ecx, esi, edi, %du); ecx = m.cx; esi = m.si; edi = m.di; }' % size]
             return ['%s(edi, %s(esi)); esi += %s; edi += %s;' % (WR[size], RD[size], step, step)]
         if kind == 'stos':
             val = {1: '(eax & 0xFFu)', 2: '(eax & 0xFFFFu)', 4: 'eax'}[size]
             if rep:
-                return ['ISPILL; rt_rep_stos(c, %d); IRELOAD;' % size]
+                return ['{ RtStr m = rt_rep_stos(gm, c->df, ecx, edi, eax, %du); ecx = m.cx; edi = m.di; }' % size]
             return ['%s(edi, %s); edi += %s;' % (WR[size], val, step)]
         if kind == 'lods':
             val = {1: 'al', 2: 'ax', 4: 'eax'}[size]

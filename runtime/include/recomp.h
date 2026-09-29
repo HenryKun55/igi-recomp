@@ -160,7 +160,7 @@ void rt_x87_mismatch(Ctx *c, uint32_t addr, uint32_t expect);
 #endif
 
 /* Round according to the rounding-control field of the control word. */
-static inline double rt_fround(Ctx *c, double v)
+static inline double rt_fround(const Ctx *c, double v)
 {
     switch ((c->fcw >> 10) & 3u) {
     case 1: return floor(v);
@@ -170,58 +170,34 @@ static inline double rt_fround(Ctx *c, double v)
     }
 }
 
-/* fist fast path: |v| < 2^31 - 1 rounds exactly with a truncating conversion (one
- * VCVT on ARM) and the exact fraction v - trunc(v), instead of libm rounding calls
- * and, for 64-bit results, a libgcc conversion. */
-#define RT_FIST_FAST(v) ((v) > -2147483647.0 && (v) < 2147483647.0)
+/* fist: the common case (round to nearest, |v| < 2^31 - 1) is inline: adding and
+ * subtracting 1.5 * 2^52 rounds to nearest-even in the host's default rounding
+ * mode, and the conversion is then exact (one VCVT on ARM). Everything else goes
+ * out of line (no libm rounding calls or __aeabi_d2lz for in-range values). */
+#define RT_FIST_NEAREST(c, v) (((c)->fcw & 0x0C00u) == 0 && fabs(v) < 2147483647.0)
+#define RT_ROUND_MAGIC 6755399441055744.0
 
-static inline int32_t rt_fround_small(const Ctx *c, double v)
-{
-    int32_t t = (int32_t)v;
-    double f = v - (double)t;
-    switch ((c->fcw >> 10) & 3u) {
-    case 1: return t - (f < 0.0);
-    case 2: return t + (f > 0.0);
-    case 3: return t;
-    default:
-        if (f > 0.5 || (f == 0.5 && (t & 1)))
-            return t + 1;
-        if (f < -0.5 || (f == -0.5 && (t & 1)))
-            return t - 1;
-        return t;
-    }
-}
+int64_t rt_fist64_slow(const Ctx *c, double v);
+int32_t rt_fist32_slow(const Ctx *c, double v);
+int16_t rt_fist16_slow(const Ctx *c, double v);
 
 static inline int64_t rt_fist64(Ctx *c, double v)
 {
-    if (RT_FIST_FAST(v))
-        return rt_fround_small(c, v);
-    double r = rt_fround(c, v);
-    if (!(r >= -9223372036854775808.0 && r < 9223372036854775808.0))
-        return INT64_MIN;
-    return (int64_t)r;
+    if (RT_FIST_NEAREST(c, v))
+        return (int32_t)((v + RT_ROUND_MAGIC) - RT_ROUND_MAGIC);
+    return rt_fist64_slow(c, v);
 }
 
 static inline int32_t rt_fist32(Ctx *c, double v)
 {
-    if (RT_FIST_FAST(v))
-        return rt_fround_small(c, v);
-    double r = rt_fround(c, v);
-    if (!(r >= -2147483648.0 && r < 2147483648.0))
-        return INT32_MIN;
-    return (int32_t)r;
+    if (RT_FIST_NEAREST(c, v))
+        return (int32_t)((v + RT_ROUND_MAGIC) - RT_ROUND_MAGIC);
+    return rt_fist32_slow(c, v);
 }
 
 static inline int16_t rt_fist16(Ctx *c, double v)
 {
-    if (RT_FIST_FAST(v)) {
-        int32_t r = rt_fround_small(c, v);
-        return r >= -32768 && r < 32768 ? (int16_t)r : INT16_MIN;
-    }
-    double r = rt_fround(c, v);
-    if (!(r >= -32768.0 && r < 32768.0))
-        return INT16_MIN;
-    return (int16_t)r;
+    return rt_fist16_slow(c, v);
 }
 
 double rt_ld80(uint32_t a);
@@ -236,8 +212,46 @@ void rt_frstor(Ctx *c, uint32_t a);
 
 uint32_t rt_rcl(uint32_t d, uint32_t n, int bits, int *cf, int *of);
 uint32_t rt_rcr(uint32_t d, uint32_t n, int bits, int *cf, int *of);
-void rt_rep_movs(Ctx *c, int size);
-void rt_rep_stos(Ctx *c, int size);
+/* rep movs / rep stos on register values (no context round trip). Results are the
+ * final ecx, esi and edi. The inline part handles the common forward cases. */
+typedef struct RtStr {
+    uint32_t cx, si, di;
+} RtStr;
+
+RtStr rt_rep_movs_slow(uint8_t *gm, uint32_t df, uint32_t n, uint32_t si, uint32_t di, uint32_t size);
+RtStr rt_rep_stos_slow(uint8_t *gm, uint32_t df, uint32_t n, uint32_t di, uint32_t v, uint32_t size);
+
+static inline RtStr rt_rep_movs(uint8_t *gm, uint32_t df, uint32_t n, uint32_t si, uint32_t di, uint32_t size)
+{
+    uint32_t b = n * size;
+    /* Backward, empty, or the destination overlaps ahead of the source (element
+     * order is observable): out of line. Otherwise a forward copy equals memmove. */
+    if (df || n == 0 || di - si < b)
+        return rt_rep_movs_slow(gm, df, n, si, di, size);
+    if (size == 4 && n <= 8) {
+        for (uint32_t i = 0; i < b; i += 4u)
+            rt_st32(gm + di + i, rt_ld32(gm + si + i));
+    } else {
+        memmove(gm + di, gm + si, b);
+    }
+    RtStr r = { 0, si + b, di + b };
+    return r;
+}
+
+static inline RtStr rt_rep_stos(uint8_t *gm, uint32_t df, uint32_t n, uint32_t di, uint32_t v, uint32_t size)
+{
+    if (df || n == 0 || size == 2)
+        return rt_rep_stos_slow(gm, df, n, di, v, size);
+    uint32_t b = n * size;
+    if (size == 1 || v == 0) {
+        memset(gm + di, (int)(v & 0xFFu), b);
+    } else {
+        for (uint32_t i = 0; i < b; i += 4u)
+            rt_st32(gm + di + i, v);
+    }
+    RtStr r = { 0, 0, di + b };
+    return r;
+}
 
 /* ---- control transfer -------------------------------------------------- */
 

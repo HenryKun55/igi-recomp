@@ -107,6 +107,59 @@ void rt_frstor(Ctx *c, uint32_t a)
         ST(i) = rt_ld80(a + 28u + i * 10u);
 }
 
+/* fist outside the inline fast path. For |v| < 2^31 - 1 the rounding is exact
+ * with a truncating conversion and the exact fraction v - trunc(v). */
+#define FIST_SMALL(v) ((v) > -2147483647.0 && (v) < 2147483647.0)
+
+static int32_t fround_small(const Ctx *c, double v)
+{
+    int32_t t = (int32_t)v;
+    double f = v - (double)t;
+    switch ((c->fcw >> 10) & 3u) {
+    case 1: return t - (f < 0.0);
+    case 2: return t + (f > 0.0);
+    case 3: return t;
+    default:
+        if (f > 0.5 || (f == 0.5 && (t & 1)))
+            return t + 1;
+        if (f < -0.5 || (f == -0.5 && (t & 1)))
+            return t - 1;
+        return t;
+    }
+}
+
+int64_t rt_fist64_slow(const Ctx *c, double v)
+{
+    if (FIST_SMALL(v))
+        return fround_small(c, v);
+    double r = rt_fround(c, v);
+    if (!(r >= -9223372036854775808.0 && r < 9223372036854775808.0))
+        return INT64_MIN;
+    return (int64_t)r;
+}
+
+int32_t rt_fist32_slow(const Ctx *c, double v)
+{
+    if (FIST_SMALL(v))
+        return fround_small(c, v);
+    double r = rt_fround(c, v);
+    if (!(r >= -2147483648.0 && r < 2147483648.0))
+        return INT32_MIN;
+    return (int32_t)r;
+}
+
+int16_t rt_fist16_slow(const Ctx *c, double v)
+{
+    if (FIST_SMALL(v)) {
+        int32_t r = fround_small(c, v);
+        return r >= -32768 && r < 32768 ? (int16_t)r : INT16_MIN;
+    }
+    double r = rt_fround(c, v);
+    if (!(r >= -32768.0 && r < 32768.0))
+        return INT16_MIN;
+    return (int16_t)r;
+}
+
 /* ---- integer ----------------------------------------------------------- */
 
 uint32_t rt_rcl(uint32_t d, uint32_t n, int bits, int *cf, int *of)
@@ -137,60 +190,39 @@ uint32_t rt_rcr(uint32_t d, uint32_t n, int bits, int *cf, int *of)
     return d;
 }
 
-void rt_rep_movs(Ctx *c, int size)
+/* Element by element, as the CPU does: needed for backward copies and for a
+ * destination overlapping ahead of the source (pattern replication). */
+RtStr rt_rep_movs_slow(uint8_t *gm, uint32_t df, uint32_t n, uint32_t si, uint32_t di, uint32_t size)
 {
-    uint32_t n = c->r[1];
-    uint32_t src = c->r[6], dst = c->r[7];
-    uint32_t bytes = n * (uint32_t)size;
-    if (n == 0)
-        return;
-    if (!c->df) {
-        /* Byte-wise forward semantics matter only when dst overlaps ahead of src. */
-        if (dst <= src || dst >= src + bytes) {
-            memmove(g_mem + dst, g_mem + src, bytes);
-        } else {
-            for (uint32_t i = 0; i < bytes; i++)
-                g_mem[dst + i] = g_mem[src + i];
-        }
-        c->r[6] = src + bytes;
-        c->r[7] = dst + bytes;
-    } else {
-        for (uint32_t i = 0; i < n; i++) {
-            memmove(g_mem + dst, g_mem + src, (size_t)size);
-            src -= (uint32_t)size;
-            dst -= (uint32_t)size;
-        }
-        c->r[6] = src;
-        c->r[7] = dst;
+    uint32_t step = df ? 0u - size : size;
+    for (; n; n--) {
+        if (size == 1)
+            gm[di] = gm[si];
+        else if (size == 2)
+            rt_st16(gm + di, rt_ld16(gm + si));
+        else
+            rt_st32(gm + di, rt_ld32(gm + si));
+        si += step;
+        di += step;
     }
-    c->r[1] = 0;
+    RtStr r = { 0, si, di };
+    return r;
 }
 
-void rt_rep_stos(Ctx *c, int size)
+RtStr rt_rep_stos_slow(uint8_t *gm, uint32_t df, uint32_t n, uint32_t di, uint32_t v, uint32_t size)
 {
-    uint32_t n = c->r[1];
-    uint32_t dst = c->r[7];
-    uint32_t v = c->r[0];
-    int32_t step = c->df ? -size : size;
-    if (!c->df && size == 1) {
-        memset(g_mem + dst, (int)(v & 0xFFu), n);
-        dst += n;
-    } else if (!c->df && size == 4 && v == 0) {
-        memset(g_mem + dst, 0, (size_t)n * 4u);
-        dst += n * 4u;
-    } else {
-        for (uint32_t i = 0; i < n; i++) {
-            if (size == 1)
-                WR8(dst, v);
-            else if (size == 2)
-                WR16(dst, v);
-            else
-                WR32(dst, v);
-            dst += (uint32_t)step;
-        }
+    uint32_t step = df ? 0u - size : size;
+    for (; n; n--) {
+        if (size == 1)
+            gm[di] = (uint8_t)v;
+        else if (size == 2)
+            rt_st16(gm + di, v);
+        else
+            rt_st32(gm + di, v);
+        di += step;
     }
-    c->r[7] = dst;
-    c->r[1] = 0;
+    RtStr r = { 0, 0, di };
+    return r;
 }
 
 /* ---- dispatch ---------------------------------------------------------- */
