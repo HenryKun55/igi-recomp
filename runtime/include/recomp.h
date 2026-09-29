@@ -126,6 +126,24 @@ static inline void fpop(Ctx *c) { c->ftop = (c->ftop + 1u) & 7u; }
 #define FSW_C2 0x0400u
 #define FSW_C3 0x4000u
 
+/* Type of the x87 registers the generated code keeps in locals.
+ *
+ * IGI_X87_FLOAT (off by default) makes them single precision. On the Cortex-A9
+ * that avoids the float<->double conversions on every load and store and makes
+ * multiplies, divides and square roots cheaper, but it is not exact: results
+ * differ from an x87 running with 53- or 64-bit precision control, and the
+ * differential tester (tools/recomp/difftest.py) no longer passes. It is closer
+ * to hardware only while the game runs with 24-bit precision control (Direct3D
+ * sets that unless FPU_PRESERVE is used), and even then the exponent range and
+ * double rounding differ. The context copy (Ctx.st) stays double either way. */
+#ifdef IGI_X87_FLOAT
+typedef float x87_t;
+static inline x87_t rt_fsqrt(x87_t v) { return sqrtf(v); }
+#else
+typedef double x87_t;
+static inline x87_t rt_fsqrt(x87_t v) { return sqrt(v); }
+#endif
+
 /* The generated code keeps the status word in the local `fp_sw` and, where the
  * stack depth is statically known, the x87 registers in locals as well (see
  * FuncGen.lower in tools/recomp/gen.py). The context copy is synchronised around
@@ -152,8 +170,8 @@ uint32_t rt_fxam(uint32_t sw, double v);
 
 /* Define IGI_X87_CHECK to verify the statically derived x87 stack effect of every
  * call whose effect the generator considers proven. */
-#ifdef IGI_X87_CHECK
 void rt_x87_mismatch(Ctx *c, uint32_t addr, uint32_t expect);
+#ifdef IGI_X87_CHECK
 #define X87_CHECK(expect, addr) do { if (c->ftop != (expect)) rt_x87_mismatch(c, (addr), (expect)); } while (0)
 #else
 #define X87_CHECK(expect, addr) ((void)0)

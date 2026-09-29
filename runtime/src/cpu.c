@@ -268,12 +268,11 @@ void rt_dispatch(Ctx *c, uint32_t target)
     rt_fatal(c, "dispatch to unknown address %08X (return address %08X)", target, RD32(c->r[4]));
 }
 
-#ifdef IGI_X87_CHECK
+/* Reached only from code generated with IGI_X87_CHECK. */
 void rt_x87_mismatch(Ctx *c, uint32_t addr, uint32_t expect)
 {
     rt_fatal(c, "x87 stack top %u after the call at %08X, expected %u", c->ftop, addr, expect);
 }
-#endif
 
 void rt_unimplemented(Ctx *c, uint32_t addr, const char *what)
 {

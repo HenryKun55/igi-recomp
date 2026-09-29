@@ -66,10 +66,10 @@ NORETURN_IMPORTS = {'ExitProcess', 'TerminateProcess', 'RaiseException'}
 REG_ALT = '|'.join(REGS32)
 TOKEN_RE = re.compile(r'\bST\((\d)\)|\bfpush\(c, |\bfpop\(c\);|\bFTOP\b|\bgoto L_'
                       r'|\b(%s)\s*(?:[-+*/%%&|^]|<<|>>)?=(?!=)'
-                      r'|\b[IX]?SPILL;|\b[IX]?RELOAD;' % REG_ALT)
+                      r'|\b[IXCR]?SPILL;|\b[IXC]?RELOAD;|\bRET[VC]\b' % REG_ALT)
 # `fst st(0)`, `fxch st(0)`... lower to self-assignments, which compilers warn about.
 SELF_ASSIGN_RE = re.compile(r'(?<![\w\]])(fr\d|c->st\[[^\]]*\]) = \1;')
-REGWRITE_RE = re.compile(r'\b(%s)\s*(?:[-+*/%%&|^]|<<|>>)?=(?!=)|\bI?RELOAD;' % REG_ALT)
+REGWRITE_RE = re.compile(r'\b(%s)\s*(?:[-+*/%%&|^]|<<|>>)?=(?!=)|\b([CI]?)RELOAD;' % REG_ALT)
 
 
 class _Top:
@@ -79,6 +79,14 @@ class _Top:
 
 
 TOP = _Top()
+
+# Generated functions take eax, ecx and esp as arguments and return eax and esp
+# (uint64_t f(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax)); every other
+# register is exchanged through the context. Dispatch goes through wrappers with
+# the plain GuestFn signature (see Generator.write_table).
+ARG_REGS = frozenset(('eax', 'ecx', 'esp'))
+FUNC_PROTO = 'uint64_t f_%08X(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax)'
+RET_REGS = frozenset(('eax', 'esp'))
 
 
 class Unsupported(Exception):
@@ -351,8 +359,8 @@ class FuncGen:
     def tail_call(self, target):
         g = self.g
         if target in g.func_set:
-            return 'SPILL; f_%08X(c); return;' % target
-        return 'SPILL; rt_dispatch(c, %s); return;' % h(target)
+            return 'CSPILL; return f_%08X(c, esp, ecx, eax);' % target
+        return 'SPILL; rt_dispatch(c, %s); return RETC;' % h(target)
 
     def is_noreturn_call(self, ins):
         imp = self.an.import_of(ins)
@@ -512,9 +520,10 @@ class FuncGen:
                 if m.group(1):
                     gen.add(m.group(1))
                 else:
-                    gen, reset = set(), True
+                    # After a direct call eax and esp come back in the return value.
+                    gen, reset = (set(RET_REGS) if m.group(2) == 'C' else set()), True
             trans[a] = (gen, reset)
-        dirty = {self.fn.entry: frozenset()}
+        dirty = {self.fn.entry: frozenset(ARG_REGS)}
         work = [self.fn.entry]
         while work:
             a = work.pop()
@@ -603,25 +612,37 @@ class FuncGen:
             elif m.group(2) is not None:                # register write
                 st['dirty'].add(m.group(2))
                 out.append(tok)
-            elif tok in ('SPILL;', 'ISPILL;'):
-                s = self.int_spill(st['dirty'])
-                if tok == 'SPILL;':
-                    s += self.fpu_flush(mode, st['d'])
-                    st['dspill'] = st['d']
-                out.append(s.rstrip())
-            elif tok in ('RELOAD;', 'IRELOAD;'):
-                s = ('eax = c->r[0]; ecx = c->r[1]; edx = c->r[2]; ebx = c->r[3]; '
-                     'esp = c->r[4]; ebp = c->r[5]; esi = c->r[6]; edi = c->r[7];')
-                st['dirty'] = set()
-                if tok == 'RELOAD;':
-                    s += self.fpu_reload(a, mode, st)
-                out.append(s)
             elif tok == 'XSPILL;':
                 assert mode == 'dynamic'
                 out.append('c->ftop = fp_top; c->fsw = fp_sw;')
             elif tok == 'XRELOAD;':
                 assert mode == 'dynamic'
                 out.append('fp_top = c->ftop; fp_sw = c->fsw;')
+            elif tok.endswith('SPILL;'):
+                # CSPILL: call of a generated function (eax, ecx, esp passed as
+                # arguments); RSPILL: return (eax, esp in the return value).
+                keep = st['dirty'] - {'CSPILL;': ARG_REGS, 'RSPILL;': RET_REGS}.get(tok, set())
+                s = self.int_spill(keep)
+                if tok != 'ISPILL;':
+                    s += self.fpu_flush(mode, st['d'])
+                    st['dspill'] = st['d']
+                out.append(s.rstrip())
+            elif tok.endswith('RELOAD;'):
+                if tok == 'CRELOAD;':
+                    s = ('eax = (uint32_t)rv; esp = (uint32_t)(rv >> 32); ecx = c->r[1]; edx = c->r[2]; '
+                         'ebx = c->r[3]; ebp = c->r[5]; esi = c->r[6]; edi = c->r[7];')
+                    st['dirty'] = set(RET_REGS)
+                else:
+                    s = ('eax = c->r[0]; ecx = c->r[1]; edx = c->r[2]; ebx = c->r[3]; '
+                         'esp = c->r[4]; ebp = c->r[5]; esi = c->r[6]; edi = c->r[7];')
+                    st['dirty'] = set()
+                if tok != 'IRELOAD;':
+                    s += self.fpu_reload(a, mode, st)
+                out.append(s)
+            elif tok == 'RETV':
+                out.append('(((uint64_t)esp << 32) | eax)')
+            elif tok == 'RETC':
+                out.append('(((uint64_t)c->r[4] << 32) | c->r[0])')
             else:
                 raise AssertionError(tok)
         return ''.join(out)
@@ -636,7 +657,7 @@ class FuncGen:
         if delta is None:
             # The analysis says the callee never returns: continue in the dynamic copy.
             st['trans'] = True
-            return s + ' fp_top = c->ftop; ' + self.dyn_continue(a)
+            return s + ' fp_top = c->ftop; ' + self.dyn_continue(a, st['dirty'])
         d2 = st['dspill'] + delta
         expect = '(fp_top0 + %du) & 7u' % ((-d2) & 7)
         if ok:
@@ -644,14 +665,14 @@ class FuncGen:
         else:
             st['trans'] = True
             s += ' if (__builtin_expect(c->ftop != (%s), 0)) { fp_top = c->ftop; %s }' % (
-                expect, self.dyn_continue(a))
+                expect, self.dyn_continue(a, st['dirty']))
         for k in range(1, min(d2, 8) + 1):
             s += ' fr%d = c->st[(fp_top0 + %du) & 7u];' % (k, (-k) & 7)
             self.fregs_used.add(k)
         st['d'] = d2
         return s
 
-    def dyn_continue(self, a):
+    def dyn_continue(self, a, dirty):
         """Jump from the static copy into the dynamic copy after the call at `a`."""
         self.need_dyn = True
         ins = self.fn.insns[a]
@@ -659,7 +680,7 @@ class FuncGen:
         if nxt in self.fn.insns:
             return 'goto D_%08X;' % nxt
         code = [self.tail_call(nxt)]
-        return self.lower(a, code, 'dynamic', 'D', 0, ())[0][0]
+        return self.lower(a, code, 'dynamic', 'D', 0, dirty)[0][0]
 
     # --------------------------------------------------------------- emit
     def emit(self):
@@ -673,7 +694,7 @@ class FuncGen:
             try:
                 code = self.emit_insn(ins, idx)
             except Unsupported as e:
-                code = ['SPILL; rt_unimplemented(c, %s, "%s"); return;' % (h(a), str(e).replace('"', "'"))]
+                code = ['SPILL; rt_unimplemented(c, %s, "%s"); return RETC;' % (h(a), str(e).replace('"', "'"))]
             nxt = a + ins.size
             falls = self.falls_through(ins)
             if a in self.fused_pairs:
@@ -1132,13 +1153,13 @@ class FuncGen:
         o = ins.ops[0]
         if o.size == 4:
             return ['{ uint32_t v = %s; uint64_t n = ((uint64_t)edx << 32) | eax; '
-                    'if (!v) { SPILL; rt_divide_error(c, %s); return; } '
+                    'if (!v) { SPILL; rt_divide_error(c, %s); return RETC; } '
                     # 32-bit division when the dividend fits (no 64-bit libgcc call on ARM).
                     'if (edx == 0) { uint32_t q = eax / v; edx = eax %% v; eax = q; } '
                     'else { eax = (uint32_t)(n / v); edx = (uint32_t)(n %% v); } }' % (self.rd(o), h(ins.addr))]
         if o.size == 1:
             return ['{ uint32_t v = %s; uint32_t n = eax & 0xFFFFu; '
-                    'if (!v) { SPILL; rt_divide_error(c, %s); return; } '
+                    'if (!v) { SPILL; rt_divide_error(c, %s); return RETC; } '
                     'eax = (eax & 0xFFFF0000u) | ((n %% v) << 8) | ((n / v) & 0xFFu); }' % (self.rd(o), h(ins.addr))]
         raise Unsupported('div16')
 
@@ -1147,7 +1168,7 @@ class FuncGen:
         if o.size != 4:
             raise Unsupported('idiv8/16')
         return ['{ int32_t v = (int32_t)%s; int64_t n = (int64_t)(((uint64_t)edx << 32) | eax); '
-                'if (!v) { SPILL; rt_divide_error(c, %s); return; } '
+                'if (!v) { SPILL; rt_divide_error(c, %s); return RETC; } '
                 # 32-bit division when edx is the sign extension of eax (cdq; idiv).
                 'if (edx == (uint32_t)((int32_t)eax >> 31) && v != -1) { int32_t a = (int32_t)eax; '
                 'eax = (uint32_t)(a / v); edx = (uint32_t)(a %% v); } '
@@ -1293,13 +1314,13 @@ class FuncGen:
             return [self.goto(t)]
         imp = self.an.import_of(ins)
         if imp:
-            return ['SPILL; %s(c); return;' % self.g.import_fn(imp)]
+            return ['SPILL; %s(c); return RETC;' % self.g.import_fn(imp)]
         o = ins.ops[0]
         if a in fn.jump_tables:
             cases = ' '.join('case %s: %s' % (h(x), self.goto(x)) for x in fn.jump_tables[a])
-            return ['{ uint32_t t = %s; switch (t) { %s default: SPILL; rt_dispatch(c, t); return; } }' % (
+            return ['{ uint32_t t = %s; switch (t) { %s default: SPILL; rt_dispatch(c, t); return RETC; } }' % (
                 self.rd(o, 4), cases)]
-        return ['{ uint32_t t = %s; SPILL; rt_dispatch(c, t); return; }' % self.rd(o, 4)]
+        return ['{ uint32_t t = %s; SPILL; rt_dispatch(c, t); return RETC; }' % self.rd(o, 4)]
 
     def i_jcc(self, ins, cc):
         t = self.an.direct_target(ins)
@@ -1322,26 +1343,27 @@ class FuncGen:
         t = self.an.direct_target(ins)
         if t == SETJMP_FUNC:
             return ['esp -= 4u; GWR32(esp, %s); SPILL;' % ret,
-                    'if (setjmp(*rt_jmpbuf(GRD32(esp + 4u)))) { RELOAD; } else { f_%08X(c); RELOAD; }' % t]
+                    'if (setjmp(*rt_jmpbuf(GRD32(esp + 4u)))) { RELOAD; } '
+                    'else { uint64_t rv = f_%08X(c, esp, ecx, eax); CRELOAD; }' % t]
         if t is not None:
             if t in self.g.func_set:
-                return ['esp -= 4u; GWR32(esp, %s); SPILL; f_%08X(c); RELOAD;' % (ret, t)]
+                return ['esp -= 4u; GWR32(esp, %s); CSPILL; { uint64_t rv = f_%08X(c, esp, ecx, eax); CRELOAD; }' % (ret, t)]
             return ['esp -= 4u; GWR32(esp, %s); SPILL; rt_dispatch(c, %s); RELOAD;' % (ret, h(t))]
         imp = self.an.import_of(ins)
         if imp:
             call = 'esp -= 4u; GWR32(esp, %s); SPILL; %s(c);' % (ret, self.g.import_fn(imp))
             if imp[1] in NORETURN_IMPORTS:
-                return [call + ' rt_noreturn(c, %s); return;' % h(ins.addr)]
+                return [call + ' rt_noreturn(c, %s); return RETC;' % h(ins.addr)]
             return [call + ' RELOAD;']
         return ['{ uint32_t t = %s; esp -= 4u; GWR32(esp, %s); SPILL; rt_dispatch(c, t); RELOAD; }' % (
             self.rd(ins.ops[0], 4), ret)]
 
     def i_ret(self, ins):
         n = 4 + (ins.ops[0].imm if ins.ops else 0)
-        return ['esp += %du; SPILL; return;' % n]
+        return ['esp += %du; RSPILL; return RETV;' % n]
 
     def i_int3(self, ins):
-        return ['SPILL; rt_unimplemented(c, %s, "int3"); return;' % h(ins.addr)]
+        return ['SPILL; rt_unimplemented(c, %s, "int3"); return RETC;' % h(ins.addr)]
 
     # --------------------------------------------------------- strings
     def emit_string(self, ins):
@@ -1411,12 +1433,12 @@ class FuncGen:
             return '%s %s %s' % (x, o, y)
 
         if op in (0xD8, 0xDC, 0xDA, 0xDE) and mem:
-            load = {0xD8: 'PRDF32(%s)', 0xDC: 'PRDF64(%s)', 0xDA: '(double)(int32_t)PRD32(%s)',
-                    0xDE: '(double)(int16_t)PRD16(%s)'}[op] % ep
+            load = {0xD8: 'PRDF32(%s)', 0xDC: 'PRDF64(%s)', 0xDA: '(x87_t)(int32_t)PRD32(%s)',
+                    0xDE: '(x87_t)(int16_t)PRD16(%s)'}[op] % ep
             if reg in (2, 3):
                 pop = ' fpop(c);' if reg == 3 else ''
                 return ['FCOM(ST(0), %s);%s' % (load, pop)]
-            return ['{ double m = %s; ST(0) = %s; }' % (load, arith_expr(reg, 'ST(0)', 'm'))]
+            return ['{ x87_t m = %s; ST(0) = %s; }' % (load, arith_expr(reg, 'ST(0)', 'm'))]
         if op == 0xD8 and not mem:
             if reg in (2, 3):
                 return ['FCOM(ST(0), ST(%d));%s' % (rm, ' fpop(c);' if reg == 3 else '')]
@@ -1451,9 +1473,9 @@ class FuncGen:
                     return ['PWR16(%s, c->fcw);' % ep]
                 raise Unsupported('D9 /%d' % reg)
             if reg == 0:
-                return ['{ double v = ST(%d); fpush(c, v); }' % rm]
+                return ['{ x87_t v = ST(%d); fpush(c, v); }' % rm]
             if reg == 1:
-                return ['{ double v = ST(0); ST(0) = ST(%d); ST(%d) = v; }' % (rm, rm)]
+                return ['{ x87_t v = ST(0); ST(0) = ST(%d); ST(%d) = v; }' % (rm, rm)]
             simple = {
                 0xD0: '',
                 0xE0: 'ST(0) = -ST(0);', 0xE1: 'ST(0) = fabs(ST(0));',
@@ -1468,8 +1490,8 @@ class FuncGen:
                 0xF3: 'ST(1) = atan2(ST(1), ST(0)); fpop(c);',
                 0xF5: 'ST(0) = remainder(ST(0), ST(1)); fp_sw &= ~0x400u;',
                 0xF8: 'ST(0) = fmod(ST(0), ST(1)); fp_sw &= ~0x400u;',
-                0xFA: 'ST(0) = sqrt(ST(0));',
-                0xFB: '{ double v = ST(0); ST(0) = sin(v); fpush(c, cos(v)); fp_sw &= ~0x400u; }',
+                0xFA: 'ST(0) = rt_fsqrt(ST(0));',
+                0xFB: '{ x87_t v = ST(0); ST(0) = sin(v); fpush(c, cos(v)); fp_sw &= ~0x400u; }',
                 0xFC: 'ST(0) = rt_fround(c, ST(0));',
                 0xFD: 'ST(0) = ldexp(ST(0), (int)trunc(ST(1)));',
                 0xFE: 'ST(0) = sin(ST(0)); fp_sw &= ~0x400u;',
@@ -1505,7 +1527,7 @@ class FuncGen:
         if op == 0xDB:
             if mem:
                 if reg == 0:
-                    return ['fpush(c, (double)(int32_t)PRD32(%s));' % ep]
+                    return ['fpush(c, (x87_t)(int32_t)PRD32(%s));' % ep]
                 if reg in (2, 3):
                     return ['PWR32(%s, (uint32_t)rt_fist32(c, ST(0)));%s' % (ep, ' fpop(c);' if reg == 3 else '')]
                 if reg == 5:
@@ -1521,11 +1543,11 @@ class FuncGen:
         if op == 0xDF:
             if mem:
                 if reg == 0:
-                    return ['fpush(c, (double)(int16_t)PRD16(%s));' % ep]
+                    return ['fpush(c, (x87_t)(int16_t)PRD16(%s));' % ep]
                 if reg in (2, 3):
                     return ['PWR16(%s, (uint16_t)rt_fist16(c, ST(0)));%s' % (ep, ' fpop(c);' if reg == 3 else '')]
                 if reg == 5:
-                    return ['fpush(c, (double)(int64_t)PRD64(%s));' % ep]
+                    return ['fpush(c, (x87_t)(int64_t)PRD64(%s));' % ep]
                 if reg == 7:
                     return ['PWR64(%s, (uint64_t)rt_fist64(c, ST(0))); fpop(c);' % ep]
                 raise Unsupported('DF /%d' % reg)
@@ -1651,17 +1673,16 @@ class Generator:
     def wrap(self, entry, body, fg):
         if entry in self.probes:
             # Diagnostic probe requested at configure time (IGI_PROBES).
-            body = ['    rt_probe(c, 0x%08Xu);' % entry] + body
+            body = ['    c->r[0] = eax; c->r[1] = ecx; c->r[4] = esp; rt_probe(c, 0x%08Xu);' % entry] + body
         text = '\n'.join(body)
-        out = ['void f_%08X(Ctx *c)' % entry, '{'] + self.prologue(text, fg) + [text, '}\n\n']
+        out = [FUNC_PROTO % entry, '{'] + self.prologue(text, fg) + [text, '}\n\n']
         return '\n'.join(out)
 
     @staticmethod
     def prologue(text, fg):
         """Local declarations of a generated function: guest registers, the guest memory
         base, used flags and the x87 state for the function's x87 mode."""
-        out = ['    uint32_t eax = c->r[0], ecx = c->r[1], edx = c->r[2], ebx = c->r[3];',
-               '    uint32_t esp = c->r[4], ebp = c->r[5], esi = c->r[6], edi = c->r[7];',
+        out = ['    uint32_t edx = c->r[2], ebx = c->r[3], ebp = c->r[5], esi = c->r[6], edi = c->r[7];',
                '    uint8_t *const gm = g_mem;']
         used_flags = [n for _, n in FLAG_NAMES if re.search(r'\b%s\b' % n, text)]
         if used_flags:
@@ -1679,7 +1700,7 @@ class Generator:
             voids.append('fp_sw')
         regs = sorted(fg.fregs_used)
         if regs:
-            out.append('    double %s;' % ', '.join('fr%d = 0.0' % k for k in regs))
+            out.append('    x87_t %s;' % ', '.join('fr%d = 0.0' % k for k in regs))
             voids += ['fr%d' % k for k in regs]
         out.append('    %s' % ' '.join('(void)%s;' % v for v in voids))
         return out
@@ -1693,7 +1714,7 @@ class Generator:
             f.write('#define RELOAD do { eax = c->r[0]; ecx = c->r[1]; edx = c->r[2]; ebx = c->r[3]; '
                     'esp = c->r[4]; ebp = c->r[5]; esi = c->r[6]; edi = c->r[7]; } while (0)\n\n')
             for e in sorted(self.funcs):
-                f.write('void f_%08X(Ctx *c);\n' % e)
+                f.write('%s;\nvoid w_%08X(Ctx *c);\n' % (FUNC_PROTO % e, e))
             f.write('\n')
             for cname in sorted(self.imports_used):
                 f.write('void %s(Ctx *c);\n' % cname)
@@ -1703,9 +1724,14 @@ class Generator:
         an = self.an
         with open(os.path.join(out_dir, 'dispatch_table.c'), 'w') as f:
             f.write('/* Generated by tools/recomp/gen.py - do not edit. */\n#include "recomp_gen.h"\n\n')
-            f.write('const GuestFunc g_guest_funcs[] = {\n')
+            # Dispatch entry points: the context-only GuestFn signature.
+            f.write('#define GUEST_WRAPPER(a) void w_##a(Ctx *c) { uint64_t r = f_##a(c, c->r[4], c->r[1], c->r[0]); '
+                    'c->r[0] = (uint32_t)r; c->r[4] = (uint32_t)(r >> 32); }\n')
             for e in entries:
-                f.write('    { 0x%08Xu, f_%08X },\n' % (e, e))
+                f.write('GUEST_WRAPPER(%08X)\n' % e)
+            f.write('\nconst GuestFunc g_guest_funcs[] = {\n')
+            for e in entries:
+                f.write('    { 0x%08Xu, w_%08X },\n' % (e, e))
             f.write('};\nconst uint32_t g_guest_func_count = %d;\n\n' % len(entries))
             # rt_dispatch hash table (GUEST_FUNC_HASH in recomp.h, linear probing, <= 50% load).
             size = 1
@@ -1719,7 +1745,7 @@ class Generator:
                 slots[i] = e
             f.write('const GuestFunc g_guest_func_hash[] = {\n')
             for e in slots:
-                f.write('    { 0x%08Xu, f_%08X },\n' % (e, e) if e is not None else '    { 0u, 0 },\n')
+                f.write('    { 0x%08Xu, w_%08X },\n' % (e, e) if e is not None else '    { 0u, 0 },\n')
             f.write('};\nconst uint32_t g_guest_func_hash_mask = 0x%Xu;\n\n' % (size - 1))
             # Every IAT slot, so the loader can point it at a host thunk.
             f.write('const GuestImport g_guest_imports[] = {\n')

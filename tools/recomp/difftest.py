@@ -85,18 +85,18 @@ def emit_test(g, ins, idx, mode):
     fpu = ''
     if mode == 'static':
         fpu = ('    const uint32_t fp_top0 = c->ftop; uint32_t fp_sw = c->fsw; (void)fp_top0; (void)fp_sw;\n'
-               '    double %s; %s\n') % (', '.join('fr%d = 0.0' % k for k in range(1, 9)),
+               '    x87_t %s; %s\n') % (', '.join('fr%d = 0.0' % k for k in range(1, 9)),
                                         ' '.join('(void)fr%d;' % k for k in range(1, 9)))
     elif mode == 'dynamic':
         fpu = '    uint32_t fp_top = c->ftop; uint32_t fp_sw = c->fsw; (void)fp_top; (void)fp_sw;\n'
-    return ('static void t_%d(Ctx *c)\n{\n'
+    return ('static uint64_t t_%d(Ctx *c)\n{\n'
             '    uint32_t eax = c->r[0], ecx = c->r[1], edx = c->r[2], ebx = c->r[3];\n'
             '    uint32_t esp = c->r[4], ebp = c->r[5], esi = c->r[6], edi = c->r[7];\n'
             '    uint8_t *const gm = g_mem; (void)gm;\n'
             '    int cf = (int)(c->eflags_extra & 1u), pf = (int)((c->eflags_extra >> 2) & 1u), '
             'zf = (int)((c->eflags_extra >> 6) & 1u), sf = (int)((c->eflags_extra >> 7) & 1u), '
             'of = (int)((c->eflags_extra >> 11) & 1u);\n%s'
-            '    %s\n    goto done;\n    %s\ndone:\n    %s\n    c->eflags_extra = %s;\n}\n\n') % (
+            '    %s\n    goto done;\n    %s\ndone:\n    %s\n    c->eflags_extra = %s;\n    return 0;\n}\n\n') % (
         idx, fpu, body, labels or '', exit_code, flags)
 
 
@@ -115,7 +115,7 @@ const uint32_t g_guest_func_hash_mask = 0;
 const GuestImport g_guest_imports[1];
 const uint32_t g_guest_import_count = 0;
 %TESTS%
-typedef void (*TestFn)(Ctx *);
+typedef uint64_t (*TestFn)(Ctx *);
 static const TestFn tests[] = { %TABLE% };
 int main(void)
 {
