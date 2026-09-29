@@ -52,6 +52,16 @@ target_include_directories(igi_recomp PUBLIC runtime/include "${GEN_DIR}")
 # and signed char. Without these, GCC (Vita) and clang (macOS) optimize the
 # recompiled code differently.
 target_compile_options(igi_recomp PRIVATE -Wall -Wextra -O2 -fwrapv -fno-strict-aliasing -fsigned-char)
+# Generated-code variants (see runtime/include/recomp.h). IGI_X87_FLOAT trades x87
+# exactness for speed; IGI_X87_CHECK verifies the static x87 stack analysis.
+option(IGI_X87_FLOAT "Single-precision x87 registers in generated code (faster, inexact)" OFF)
+option(IGI_X87_CHECK "Check statically derived x87 stack effects at run time" OFF)
+if(IGI_X87_FLOAT)
+    target_compile_definitions(igi_recomp PRIVATE IGI_X87_FLOAT)
+endif()
+if(IGI_X87_CHECK)
+    target_compile_definitions(igi_recomp PRIVATE IGI_X87_CHECK)
+endif()
 
 file(GLOB RUNTIME_SOURCES CONFIGURE_DEPENDS runtime/src/*.c)
 file(GLOB SHIM_SOURCES CONFIGURE_DEPENDS shim/src/*.c)
