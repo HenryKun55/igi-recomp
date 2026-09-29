@@ -121,8 +121,6 @@ typedef struct Rect {
 } Rect;
 
 void render_init(int w, int h);
-/* Submit pending batched geometry (before anything that changes surfaces or targets). */
-void render_flush(void);
 void render_begin_frame(void);
 void render_present(void);
 void render_fill(const Rect *r, uint32_t rgba);

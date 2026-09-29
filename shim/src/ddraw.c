@@ -375,7 +375,6 @@ static void soft_fill(Surface *dst, const Rect *r, uint32_t v)
 
 static void surf_Blt(Ctx *c)
 {
-    render_flush();
     Surface *dst = surface_from_obj(THIS);
     if (dd_trace_left > 0) {
         Surface *s2 = surface_from_obj(ARG(2));
@@ -415,7 +414,6 @@ static void surf_Blt(Ctx *c)
 
 static void surf_BltFast(Ctx *c)
 {
-    render_flush();
     Surface *dst = surface_from_obj(THIS);
     if (dd_trace_left > 0) {
         dd_trace_left--;
@@ -522,7 +520,6 @@ static void surf_Restore(Ctx *c) { stdcall_ret(c, DD_OK, 1); }
 
 static void surf_Lock(Ctx *c)
 {
-    render_flush();
     Surface *s = surface_from_obj(THIS);
     if (dd_trace_left > 0 && !s->is_texture) {
         dd_trace_left--;
@@ -546,7 +543,6 @@ static void surf_Lock(Ctx *c)
 
 static void surf_Unlock(Ctx *c)
 {
-    render_flush();
     Surface *s = surface_from_obj(THIS);
     s->locked = 0;
     s->dirty = 1;

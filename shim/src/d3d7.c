@@ -328,7 +328,6 @@ static void dev_BeginScene(Ctx *c)
 
 static void dev_EndScene(Ctx *c)
 {
-    render_flush();
     in_scene = 0;
     stdcall_ret(c, D3D_OK, 1);
 }
@@ -341,7 +340,6 @@ static void dev_GetDirect3D(Ctx *c)
 
 static void dev_SetRenderTarget(Ctx *c)
 {
-    render_flush();
     Surface *s = surface_from_obj(ARG(1));
     if (s)
         g_backbuffer = s;
@@ -666,7 +664,6 @@ static void dev_PreLoad(Ctx *c)
 
 static void dev_Load(Ctx *c)
 {
-    render_flush();
     /* Copy the source texture (and mips) into the destination surface. */
     Surface *dst = surface_from_obj(ARG(1)), *src = surface_from_obj(ARG(3));
     for (; dst && src; dst = dst->attached, src = src->attached) {
