@@ -31,6 +31,7 @@ typedef struct SoundBuffer {
     int primary;
     uint32_t flags;
     uint32_t mem, size;
+    int *mem_refs;               /* shared by DuplicateSoundBuffer copies */
     int channels, bits, rate, block;
     uint32_t freq;               /* current playback rate */
     int32_t volume, pan;         /* hundredths of dB / pan units */
@@ -210,8 +211,10 @@ static void buffer_free(SoundBuffer *b)
         if (buffers[i] == b)
             buffers[i] = NULL;
     SDL_UnlockAudioDevice(dev);
-    if (b->mem)
+    if (b->mem && b->mem_refs && --*b->mem_refs == 0) {
         heap_free(b->mem);
+        free(b->mem_refs);
+    }
     if (b->obj3d) {
         WR32(b->obj3d + 8u, 1);
         com_release(b->obj3d);
@@ -739,6 +742,8 @@ static void ds_CreateSoundBuffer(Ctx *c)
             read_format(wfx, b);
         b->size = bytes;
         b->mem = heap_alloc(bytes ? bytes : 4u);
+        b->mem_refs = malloc(sizeof(int));
+        *b->mem_refs = 1;
         memset(gptr(b->mem), b->bits == 8 ? 0x80 : 0, bytes);
     }
     b->freq = (uint32_t)b->rate;
@@ -762,14 +767,18 @@ static void ds_DuplicateSoundBuffer(Ctx *c)
     b->block = src->block;
     b->freq = src->freq;
     b->size = src->size;
-    /* Duplicates share sample memory in DirectSound; copy so either can be freed first. */
-    b->mem = heap_alloc(src->size ? src->size : 4u);
-    memcpy(gptr(b->mem), gptr(src->mem), src->size);
+    /* Duplicates share sample memory with the original, as in DirectSound. */
+    b->mem = src->mem;
+    b->mem_refs = src->mem_refs;
+    if (b->mem_refs)
+        ++*b->mem_refs;
     b->volume = src->volume;
     b->pan = src->pan;
     b->min_dist = src->min_dist;
     b->max_dist = src->max_dist;
     update_gain(b);
+    if (trace_sound())
+        rt_log("DS DuplicateSoundBuffer %08X -> %08X", src->obj, b->obj);
     WR32(ARG(2), b->obj);
     stdcall_ret(c, DS_OK, 3);
 }
