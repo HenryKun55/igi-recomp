@@ -586,20 +586,29 @@ static void draw(uint32_t prim, uint32_t fvf, uint32_t verts, uint32_t stride, u
     /* Diagnostic: report who submits large untextured pre-transformed triangles
      * (the cutscene overlay), with the guest call chain from the frame pointers. */
     static int reported;
-    if (reported < 6 && draw_ctx && (fvf & 0x0Eu) == 0x4u && !g_rs.stage[0].texture && nv >= 3u) {
+    if (reported < 6 && draw_ctx && (fvf & 0x0Eu) == 0x4u && !g_rs.stage[0].texture && nv == 3u) {
         float y0, y1;
         memcpy(&y0, gptr(verts + 4u), 4);
         memcpy(&y1, gptr(verts + stride * 2u + 4u), 4);
         if (y1 - y0 > 100.0f || y0 - y1 > 100.0f) {
             Ctx *c = draw_ctx;
             reported++;
-            uint32_t ebp = c->r[5], chain[6] = { RD32(c->r[4]), 0, 0, 0, 0, 0 };
-            for (int i = 1; i < 6 && ebp >= GUEST_STACK_BASE && ebp < GUEST_STACK_BASE + GUEST_STACK_SIZE; i++) {
-                chain[i] = RD32(ebp + 4u);
-                ebp = RD32(ebp);
+            /* No frame pointers in IGI: scan the stack for words that are return
+             * addresses (point just after a call instruction in .text). */
+            char buf[512];
+            int len = snprintf(buf, sizeof(buf), "overlay draw fvf %03X nv %u, return addresses:", fvf, nv);
+            uint32_t sp = c->r[4];
+            for (uint32_t i = 0, found = 0; i < 256u && found < 12u && len < (int)sizeof(buf) - 12; i++) {
+                uint32_t a = RD32(sp + i * 4u);
+                if (a < 0x401005u || a >= 0x533000u)
+                    continue;
+                if (RD8(a - 5u) == 0xE8u || (RD8(a - 6u) == 0xFFu && (RD8(a - 5u) & 0x38u) == 0x10u) ||
+                    (RD8(a - 3u) == 0xFFu && (RD8(a - 2u) & 0x38u) == 0x10u) || (RD8(a - 2u) == 0xFFu && (RD8(a - 1u) & 0x38u) == 0x10u)) {
+                    len += snprintf(buf + len, sizeof(buf) - (size_t)len, " %08X", a);
+                    found++;
+                }
             }
-            rt_log("overlay draw fvf %03X nv %u from %08X <- %08X <- %08X <- %08X <- %08X <- %08X", fvf, nv,
-                   chain[0], chain[1], chain[2], chain[3], chain[4], chain[5]);
+            rt_log("%s", buf);
         }
     }
     if (getenv("IGI_TRACE_DRAW")) {
