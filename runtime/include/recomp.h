@@ -315,7 +315,8 @@ extern volatile uint32_t rt_prof_stack[RT_PROF_MAX];
 void rt_prof_start(void);
 /* Host sections inside a thunk (ids 0xFD0000xx, named in profile.c). */
 enum { PROF_H_DECODE = 0xFD000001u, PROF_H_NEARCLIP, PROF_H_PACK, PROF_H_BATCH, PROF_H_STATE, PROF_H_GLDRAW,
-       PROF_H_TEXTURE, PROF_H_BLIT, PROF_H_MIX, PROF_H_INDEX };
+       PROF_H_TEXTURE, PROF_H_BLIT, PROF_H_MIX, PROF_H_INDEX, PROF_H_FILL, PROF_H_SOFTFILL,
+       PROF_H_SOFTBLIT };
 #define PROF_SECTION(id) const uint32_t prof_hprev = rt_prof_cur; rt_prof_cur = (id)
 #define PROF_SECTION_END (rt_prof_cur = prof_hprev)
 #else

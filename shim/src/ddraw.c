@@ -1,6 +1,7 @@
 /* ddraw.dll: DirectDraw 1/2/4/7 on top of the GL renderer. */
 #include "ddraw_priv.h"
 #include "platform.h"
+#include "render.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -388,9 +389,18 @@ static void soft_fill(Surface *dst, const Rect *r, uint32_t v)
 #define DDBLT_KEYSRCOVERRIDE 0x10000u
 #define DDBLT_DEPTHFILL 0x2000000u
 
+static int blt_log_left = 40;   /* first Blts per session, for the profile */
+
 static void surf_Blt(Ctx *c)
 {
     render_flush();
+    if (blt_log_left > 0 && g_frame_serial > 600u) {
+        Surface *s2 = surface_from_obj(ARG(2));
+        blt_log_left--;
+        rt_log("Blt frame %u: dst %ux%u rt %d mem %d <- src %ux%u flags %08X rect %s", g_frame_serial,
+               surface_from_obj(THIS)->w, surface_from_obj(THIS)->h, is_render_target(surface_from_obj(THIS)),
+               surface_from_obj(THIS)->client_mem, s2 ? s2->w : 0u, s2 ? s2->h : 0u, ARG(4), ARG(1) ? "yes" : "full");
+    }
     Surface *dst = surface_from_obj(THIS);
     if (dd_trace_left > 0) {
         Surface *s2 = surface_from_obj(ARG(2));
@@ -408,10 +418,15 @@ static void surf_Blt(Ctx *c)
     }
     if (flags & DDBLT_COLORFILL) {
         uint32_t color = fx ? RD32(fx + 80u) : 0u;   /* DDBLTFX.dwFillColor */
-        if (is_render_target(dst))
+        if (is_render_target(dst)) {
+            PROF_SECTION(PROF_H_FILL);
             render_fill(&dr, pixel_to_rgba(&dst->pf, (const uint8_t *)&color));
-        else
+            PROF_SECTION_END;
+        } else {
+            PROF_SECTION(PROF_H_SOFTFILL);
             soft_fill(dst, &dr, color);
+            PROF_SECTION_END;
+        }
         stdcall_ret(c, DD_OK, 6);
         return;
     }
@@ -421,10 +436,15 @@ static void surf_Blt(Ctx *c)
     }
     rect_read(ARG(3), &sr, src);
     int ck = (flags & (DDBLT_KEYSRC | DDBLT_KEYSRCOVERRIDE)) != 0;
-    if (is_render_target(dst))
+    if (is_render_target(dst)) {
+        PROF_SECTION(PROF_H_BLIT);
         render_blit(src, &sr, &dr, ck);
-    else
+        PROF_SECTION_END;
+    } else {
+        PROF_SECTION(PROF_H_SOFTBLIT);
         soft_blit(dst, &dr, src, &sr, ck);
+        PROF_SECTION_END;
+    }
     stdcall_ret(c, DD_OK, 6);
 }
 
