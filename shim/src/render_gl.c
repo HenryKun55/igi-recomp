@@ -1014,14 +1014,24 @@ void render_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, u
     if (!nv)
         return;
     if (pretransformed) {
-        /* rhw <= 0 means w is infinite or behind the eye: Direct3D hardware drops such
-         * primitives. IGI's cutscenes build an overlay whose rhw is never filled in (0);
+        /* A (near) zero rhw makes w effectively infinite. Hardware of the era interpolates
+         * colors perspective-correctly (attribute * rhw), so such primitives come out fully
+         * transparent. IGI's cutscenes submit an overlay with rhw left as garbage/zero;
          * drawing it paints a green band over the scene. */
-        uint32_t valid = 0;
-        for (uint32_t i = 0; i < nv; i++)
-            valid += v[i].w > 0.0f;
-        if (!valid)
+        float min_rhw = 1e30f, max_rhw = 0.0f;
+        for (uint32_t i = 0; i < nv; i++) {
+            min_rhw = v[i].w < min_rhw ? v[i].w : min_rhw;
+            max_rhw = v[i].w > max_rhw ? v[i].w : max_rhw;
+        }
+        if (max_rhw < 1e-6f) {
+            static int reported;
+            if (reported < 8) {
+                reported++;
+                rt_log("dropping pre-transformed prim %d (%u verts): rhw %g..%g, color %08X", prim, nv,
+                       (double)min_rhw, (double)max_rhw, v[0].color);
+            }
             return;
+        }
     }
     if (g_trace_next_frame == 2) {
         float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
