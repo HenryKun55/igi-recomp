@@ -232,6 +232,8 @@ static int aspect_fill = -1;
 
 /* Culling override for diagnosis: 0 normal, 1 off, 2 flipped (cull=off|flip). */
 static int cull_override;
+/* 1: remap D3D clip z [0,w] to GL [-w,w] (desktop GL). zremap=0 in igi.cfg disables it. */
+static int z_remap = 1;
 
 static void load_aspect_setting(void)
 {
@@ -247,6 +249,9 @@ static void load_aspect_setting(void)
             if (strncmp(buf, "aspect=", 7) == 0) {
                 memcpy(line, buf, sizeof(line));
                 v = line + 7;
+            } else if (strncmp(buf, "zremap=", 7) == 0) {
+                z_remap = buf[7] != '0';
+                rt_log("zremap=%d", z_remap);
             } else if (strncmp(buf, "cull=", 5) == 0) {
                 memcpy(cline, buf, sizeof(cline));
                 cv = cline + 5;
@@ -1069,8 +1074,9 @@ static void apply_transforms(int pretransformed)
     /* D3D clip-space z is [0, w]; GL wants [-w, w]: z' = 2z - w. */
     float p[16];
     memcpy(p, g_rs.proj, sizeof(p));
-    for (int r = 0; r < 4; r++)
-        p[r * 4 + 2] = 2.0f * g_rs.proj[r * 4 + 2] - g_rs.proj[r * 4 + 3];
+    if (z_remap)
+        for (int r = 0; r < 4; r++)
+            p[r * 4 + 2] = 2.0f * g_rs.proj[r * 4 + 2] - g_rs.proj[r * 4 + 3];
     glMatrixMode(GL_PROJECTION);
     glLoadMatrixf(p);
     float wv[16];
