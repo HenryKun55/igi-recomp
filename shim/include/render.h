@@ -55,6 +55,8 @@ void render_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, u
                  int pretransformed, int has_normal, int has_color, int has_spec, int ntex);
 /* Diagnostic mode: decode whole index ranges instead of only the used vertices. */
 int render_diag_no_compact(void);
+/* Diagnostic mode: decode vertex buffers on every draw instead of caching them. */
+int render_diag_no_vb_cache(void);
 void render_clear(uint32_t nrects, const Rect *rects, uint32_t flags, uint32_t color, float z);
 
 #endif

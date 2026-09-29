@@ -148,6 +148,9 @@ static void d3d_EnumZBufferFormats(Ctx *c)
 
 typedef struct VertexBuffer {
     uint32_t fvf, count, stride, mem;
+    uint32_t gen;              /* bumped by every writable Lock */
+    uint32_t cache_gen;        /* gen the decoded copy matches (0 = none) */
+    struct RVertex *cache;     /* whole buffer decoded (static geometry is drawn every frame) */
 } VertexBuffer;
 
 static uint32_t fvf_stride(uint32_t fvf);
@@ -156,6 +159,7 @@ static void d3d_CreateVertexBuffer(Ctx *c)
 {
     uint32_t desc = ARG(1);
     VertexBuffer *vb = calloc(1, sizeof(*vb));
+    vb->gen = 1;
     vb->fvf = RD32(desc + 8u);
     vb->count = RD32(desc + 12u);
     vb->stride = fvf_stride(vb->fvf);
@@ -651,8 +655,23 @@ static void dev_ValidateDevice(Ctx *c)
     stdcall_ret(c, D3D_OK, 2);
 }
 
+/* Vertices `count` from `src` (or consecutive) out of a decoded copy. */
+static RVertex *gather(const RVertex *cache, const uint32_t *src, uint32_t count)
+{
+    static RVertex *g;
+    static uint32_t g_cap;
+    if (count > g_cap) {
+        g_cap = count + 256u;
+        g = realloc(g, g_cap * sizeof(RVertex));
+    }
+    for (uint32_t i = 0; i < count; i++)
+        g[i] = cache[src[i]];
+    return g;
+}
+
+/* `cache`, when set, is the decoded copy of the vertices at `verts` (with `cd` its format). */
 static void draw(uint32_t prim, uint32_t fvf, uint32_t verts, uint32_t stride, uint32_t nv,
-                 uint32_t indices, uint32_t ni)
+                 uint32_t indices, uint32_t ni, RVertex *cache, const Decoded *cd)
 {
     if ((fvf & 0x0Eu) == 0x4u && !g_rs.stage[0].texture && igi_skip_untextured_2d())
         return;
@@ -683,7 +702,7 @@ static void draw(uint32_t prim, uint32_t fvf, uint32_t verts, uint32_t stride, u
                 uint32_t x = (uint32_t)ip[i * 2u] | ((uint32_t)ip[i * 2u + 1u] << 8);
                 rebased[i] = (uint16_t)(x - lo);
             }
-            RVertex *v = decode(fvf, verts + lo * stride, stride, NULL, range, &d);
+            RVertex *v = cache ? (d = *cd, cache + lo) : decode(fvf, verts + lo * stride, stride, NULL, range, &d);
             render_draw((int)prim, v, range, rebased, ni, d.pretransformed, d.has_normal, d.has_color,
                         d.has_spec, d.ntex);
             return;
@@ -719,34 +738,55 @@ static void draw(uint32_t prim, uint32_t fvf, uint32_t verts, uint32_t stride, u
             }
             rebased[i] = (uint16_t)slot[x];
         }
-        RVertex *v = decode(fvf, verts + lo * stride, stride, used, nu, &d);
+        RVertex *v = cache ? (d = *cd, gather(cache + lo, used, nu)) : decode(fvf, verts + lo * stride, stride, used, nu, &d);
         render_draw((int)prim, v, nu, rebased, ni, d.pretransformed, d.has_normal, d.has_color, d.has_spec,
                     d.ntex);
         return;
     }
-    RVertex *v = decode(fvf, verts, stride, NULL, nv, &d);
+    RVertex *v = cache ? (d = *cd, cache) : decode(fvf, verts, stride, NULL, nv, &d);
     render_draw((int)prim, v, nv, NULL, 0, d.pretransformed, d.has_normal, d.has_color, d.has_spec, d.ntex);
 }
 
 static void dev_DrawPrimitive(Ctx *c)
 {
     uint32_t prim = ARG(1), fvf = ARG(2), verts = ARG(3), n = ARG(4);
-    draw(prim, fvf, verts, fvf_stride(fvf), prim_vertex_count(prim, n), 0, 0);
+    draw(prim, fvf, verts, fvf_stride(fvf), prim_vertex_count(prim, n), 0, 0, NULL, NULL);
     stdcall_ret(c, D3D_OK, 6);
 }
 
 static void dev_DrawIndexedPrimitive(Ctx *c)
 {
     uint32_t prim = ARG(1), fvf = ARG(2), verts = ARG(3), nv = ARG(4), idx = ARG(5), ni = ARG(6);
-    draw(prim, fvf, verts, fvf_stride(fvf), nv, idx, ni);
+    draw(prim, fvf, verts, fvf_stride(fvf), nv, idx, ni, NULL, NULL);
     stdcall_ret(c, D3D_OK, 8);
+}
+
+/* Decoded copy of the whole buffer, refreshed after a writable Lock. */
+static RVertex *vb_cache(VertexBuffer *vb, Decoded *d)
+{
+    if (render_diag_no_vb_cache() || !vb->count)
+        return NULL;
+    if (vb->cache_gen != vb->gen || !vb->cache) {
+        if (!vb->cache)
+            vb->cache = malloc((size_t)vb->count * sizeof(RVertex));
+        RVertex *v = decode(vb->fvf, vb->mem, vb->stride, NULL, vb->count, d);
+        memcpy(vb->cache, v, (size_t)vb->count * sizeof(RVertex));
+        vb->cache_gen = vb->gen;
+    } else {
+        decode(vb->fvf, vb->mem, vb->stride, NULL, 0, d);   /* format only */
+    }
+    return vb->cache;
 }
 
 static void dev_DrawPrimitiveVB(Ctx *c)
 {
     uint32_t prim = ARG(1), start = ARG(3), n = ARG(4);
     VertexBuffer *vb = com_host(ARG(2));
-    draw(prim, vb->fvf, vb->mem + start * vb->stride, vb->stride, n, 0, 0);
+    Decoded d;
+    RVertex *cache = vb_cache(vb, &d);
+    if (start + n > vb->count)
+        cache = NULL;
+    draw(prim, vb->fvf, vb->mem + start * vb->stride, vb->stride, n, 0, 0, cache ? cache + start : NULL, &d);
     stdcall_ret(c, D3D_OK, 6);
 }
 
@@ -754,7 +794,11 @@ static void dev_DrawIndexedPrimitiveVB(Ctx *c)
 {
     uint32_t prim = ARG(1), start = ARG(3), nv = ARG(4), idx = ARG(5), ni = ARG(6);
     VertexBuffer *vb = com_host(ARG(2));
-    draw(prim, vb->fvf, vb->mem + start * vb->stride, vb->stride, nv, idx, ni);
+    Decoded d;
+    RVertex *cache = vb_cache(vb, &d);
+    if (start + nv > vb->count)
+        cache = NULL;
+    draw(prim, vb->fvf, vb->mem + start * vb->stride, vb->stride, nv, idx, ni, cache ? cache + start : NULL, &d);
     stdcall_ret(c, D3D_OK, 8);
 }
 
@@ -867,6 +911,7 @@ static void vb_Release(Ctx *c)
     uint32_t n = RD32(obj + 8u);
     if (n <= 1u) {
         heap_free(vb->mem);
+        free(vb->cache);
         free(vb);
     }
     stdcall_ret(c, com_release(obj), 1);
@@ -875,6 +920,8 @@ static void vb_Release(Ctx *c)
 static void vb_Lock(Ctx *c)
 {
     VertexBuffer *vb = com_host(THIS);
+    if (!(ARG(1) & 0x10u))   /* DDLOCK_READONLY */
+        vb->gen++;
     WR32(ARG(2), vb->mem);
     if (ARG(3))
         WR32(ARG(3), vb->stride * vb->count);
