@@ -543,7 +543,11 @@ static void maybe_screenshot(void)
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
     glReadPixels(0, 0, fb_w, fb_h, GL_BGRA, GL_UNSIGNED_BYTE, px);
     char name[64];
+#if defined(__vita__)
+    snprintf(name, sizeof(name), "ux0:data/igi/shot_%05u.bmp", frame);
+#else
     snprintf(name, sizeof(name), "shot_%05u.bmp", frame);
+#endif
     FILE *f = fopen(name, "wb");
     if (f) {
         uint32_t size = 54u + (uint32_t)fb_w * (uint32_t)fb_h * 4u;

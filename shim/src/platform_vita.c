@@ -162,6 +162,9 @@ void platform_pump(void)
     const uint32_t diag = SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER | SCE_CTRL_SELECT;
     if ((pad.buttons & diag) == diag && (prev_buttons & diag) != diag)
         render_diag_cycle();
+    const uint32_t trace = SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER | SCE_CTRL_START;
+    if ((pad.buttons & trace) == trace && (prev_buttons & trace) != trace && !g_trace_next_frame)
+        g_trace_next_frame = 1;   /* log the next frame's draws and save its image */
     prev_buttons = pad.buttons;
 
     /* Left stick: arrow keys (move / strafe). */
