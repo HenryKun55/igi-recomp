@@ -401,12 +401,14 @@ SHIM(msvfw32, ICDecompress)
                 bmask = RD32(bi_out + 48u);
             }
             uint32_t pitch = (((uint32_t)w * bpp / 8u) + 3u) & ~3u;
-            for (int y = 0; y < h && y < k->height; y++) {
-                const uint32_t *src = k->rgba + (size_t)y * (size_t)k->width;
+            /* Indeo's VfW driver zooms (e.g. 320x240 -> 640x480): sample nearest. */
+            for (int y = 0; y < h; y++) {
+                int sy = (int)((int64_t)y * k->height / h);
+                const uint32_t *src = k->rgba + (size_t)sy * (size_t)k->width;
                 uint32_t row = top_down ? (uint32_t)y : (uint32_t)(h - 1 - y);
                 uint8_t *dst = g_mem + bits + row * pitch;
-                for (int x = 0; x < w && x < k->width; x++) {
-                    uint32_t p = src[x];
+                for (int x = 0; x < w; x++) {
+                    uint32_t p = src[(int64_t)x * k->width / w];
                     uint32_t R = p & 0xFFu, G = (p >> 8) & 0xFFu, B = (p >> 16) & 0xFFu;
                     if (bpp == 32u) {
                         uint32_t v = B | (G << 8) | (R << 16);

@@ -77,6 +77,7 @@ struct Surface {
     uint32_t gl_tex;       /* texture name, 0 = none */
     int dirty;             /* guest pixels changed since the last upload */
     int mip_levels;
+    int client_mem;        /* mem belongs to the game (DDSD_LPSURFACE): never freed */
     uint32_t priv[8];      /* renderer scratch */
 };
 

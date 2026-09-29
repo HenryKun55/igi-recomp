@@ -133,7 +133,7 @@ static void surface_destroy(Surface *s)
             com_release(o);
         }
     }
-    if (s->mem)
+    if (s->mem && !s->client_mem)
         heap_free(s->mem);
     if (s == g_primary)
         g_primary = NULL;
@@ -514,6 +514,27 @@ static void surf_GetDC(Ctx *c)
     stdcall_ret(c, DD_OK, 2);
 }
 
+static void surf_SetSurfaceDesc(Ctx *c)
+{
+    Surface *s = surface_from_obj(THIS);
+    uint32_t d = ARG(1);
+    uint32_t flags = RD32(d + 4u);
+    if ((flags & DDSD_LPSURFACE) && RD32(d + 36u)) {
+        if (s->mem && !s->client_mem)
+            heap_free(s->mem);
+        s->mem = RD32(d + 36u);
+        s->client_mem = 1;
+        if (flags & DDSD_PITCH)
+            s->pitch = RD32(d + 16u);
+        if (flags & DDSD_WIDTH)
+            s->w = RD32(d + 12u);
+        if (flags & DDSD_HEIGHT)
+            s->h = RD32(d + 8u);
+        s->dirty = 1;
+    }
+    stdcall_ret(c, DD_OK, 3);
+}
+
 static void surf_GetDDInterface(Ctx *c)
 {
     extern uint32_t g_ddraw7_obj;
@@ -581,7 +602,7 @@ static const ComMethod surface_methods[] = {
     { "PageLock", surf_ok2 },
     { "PageUnlock", surf_ok2 },
     /* v3 */
-    { "SetSurfaceDesc", NULL },
+    { "SetSurfaceDesc", surf_SetSurfaceDesc },
     /* v4 */
     { "SetPrivateData", NULL },
     { "GetPrivateData", NULL },
@@ -715,6 +736,13 @@ static void dd_CreateSurface(Ctx *c)
     }
     Surface *s = surface_new(w, h, &pf, caps | DDSCAPS_LOCALVIDMEM | DDSCAPS_VIDEOMEMORY);
     s->caps2 = caps2;
+    if ((flags & DDSD_LPSURFACE) && RD32(d + 36u)) {
+        /* The game supplies the pixel memory (used for video frames). */
+        s->mem = RD32(d + 36u);
+        s->client_mem = 1;
+        if (flags & DDSD_PITCH)
+            s->pitch = RD32(d + 16u);
+    }
     if (flags & DDSD_CKSRCBLT) {
         s->has_ck = 1;
         s->ck_lo = RD32(d + 64u);
