@@ -342,10 +342,15 @@ static int aspect_fill = -1;
 static int cull_override;
 /* Live diagnostic mode (Vita: L+R+SELECT cycles it), shown on the overlay. */
 enum { DIAG_NONE, DIAG_NO_BATCH, DIAG_NO_CULL, DIAG_FLIP_ZREMAP, DIAG_NO_SCREEN, DIAG_NO_3D, DIAG_DEPTH_LEQUAL,
-       DIAG_COUNT };
+       DIAG_NO_COMPACT, DIAG_COUNT };
 static const char *const diag_names[DIAG_COUNT] = { "NORMAL", "NO BATCH", "NO CULL", "FLIP ZREMAP",
-                                                     "NO 2D VERTS", "NO 3D VERTS", "DEPTH LEQUAL" };
+                                                     "NO 2D VERTS", "NO 3D VERTS", "DEPTH LEQUAL", "NO COMPACT" };
 static int diag_mode;
+
+int render_diag_no_compact(void)
+{
+    return diag_mode == DIAG_NO_COMPACT;
+}
 
 void render_diag_cycle(void)
 {

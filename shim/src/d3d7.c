@@ -619,7 +619,7 @@ static void draw(uint32_t prim, uint32_t fvf, uint32_t verts, uint32_t stride, u
             rebased = realloc(rebased, rebased_cap * sizeof(uint16_t));
         }
         uint32_t range = hi - lo + 1u;
-        if (range <= ni) {
+        if (range <= ni || render_diag_no_compact()) {
             for (uint32_t i = 0; i < ni; i++) {
                 uint32_t x = (uint32_t)ip[i * 2u] | ((uint32_t)ip[i * 2u + 1u] << 8);
                 rebased[i] = (uint16_t)(x - lo);
