@@ -171,6 +171,8 @@ class FuncGen:
         self.fregs_used = set()
         self.fmode = 'none'
         self.need_dyn = False
+        self.uses_fsw = True
+        self.fsync = {}
 
     # ----------------------------------------------------------- operands
     def rname(self, reg):
@@ -505,6 +507,26 @@ class FuncGen:
             summary = None
         return summary, unproven, callees, conflict
 
+    def compute_fsync(self):
+        """Depth at which c->ftop was last written or checked, before each instruction
+        (entry: 0; after a call: the depth it returns with); None where paths disagree."""
+        sync = {self.fn.entry: 0}
+        work = [self.fn.entry]
+        while work:
+            a = work.pop()
+            out = sync[a]
+            call = self.fcalls.get(a)
+            if call is not None and call[0] is not None and a in self.fdepth:
+                out = self.fdepth[a] + call[0]
+            for s in self.succ[a]:
+                if s not in sync:
+                    sync[s] = out
+                    work.append(s)
+                elif sync[s] is not None and sync[s] != out:
+                    sync[s] = None
+                    work.append(s)
+        self.fsync = sync
+
     def has_x87(self):
         return any(self.x87_fpu_info(self.fn.insns[a]) is not None for a in self.order)
 
@@ -548,21 +570,29 @@ class FuncGen:
     def int_spill(self, dirty):
         return ''.join('c->r[%d] = %s; ' % (i, r) for i, r in enumerate(REGS32) if r in dirty)
 
-    def fpu_flush(self, mode, d):
+    def fpu_flush(self, mode, d, sync=None):
+        """Write the x87 state back to the context. `sync` is the depth at which
+        c->ftop was last known to be current (static mode), making its store
+        redundant when unchanged. The status word is only exchanged by functions
+        that use it."""
         if mode == 'none':
             return ''
+        sw = 'c->fsw = fp_sw; ' if self.uses_fsw else ''
         if mode == 'dynamic':
-            return 'c->ftop = fp_top; c->fsw = fp_sw; '
+            return 'c->ftop = fp_top; ' + sw
         s = ''
         for k in range(1, min(d, 8) + 1):
             self.fregs_used.add(k)
             s += 'c->st[(fp_top0 + %du) & 7u] = fr%d; ' % ((-k) & 7, k)
-        return s +'c->ftop = (fp_top0 + %du) & 7u; c->fsw = fp_sw; ' % ((-d) & 7)
+        if sync != d:
+            s += 'c->ftop = (fp_top0 + %du) & 7u; ' % ((-d) & 7)
+        return s + sw
 
     def lower(self, a, code, mode, prefix, d, dirty):
         """Expand the generator tokens (ST, fpush, fpop, FTOP, SPILL, RELOAD, ...) of
         one instruction for a code copy. Returns (lines, depth after, transitioned)."""
-        st = {'d': d, 'dirty': set(dirty), 'dspill': d, 'trans': False}
+        st = {'d': d, 'dirty': set(dirty), 'dspill': d, 'trans': False,
+              'sync': self.fsync.get(a) if mode == 'static' else None}
         lines = [SELF_ASSIGN_RE.sub('', self.lower_text(a, line, mode, prefix, st)) for line in code]
         return lines, st['d'], st['trans']
 
@@ -624,7 +654,7 @@ class FuncGen:
                 keep = st['dirty'] - {'CSPILL;': ARG_REGS, 'RSPILL;': RET_REGS}.get(tok, set())
                 s = self.int_spill(keep)
                 if tok != 'ISPILL;':
-                    s += self.fpu_flush(mode, st['d'])
+                    s += self.fpu_flush(mode, st['d'], st['sync'])
                     st['dspill'] = st['d']
                 out.append(s.rstrip())
             elif tok.endswith('RELOAD;'):
@@ -651,9 +681,9 @@ class FuncGen:
         if mode == 'none':
             return ''
         if mode == 'dynamic':
-            return ' fp_top = c->ftop; fp_sw = c->fsw;'
+            return ' fp_top = c->ftop;' + (' fp_sw = c->fsw;' if self.uses_fsw else '')
         delta, ok = self.fcalls[a]
-        s = ' fp_sw = c->fsw;'
+        s = ' fp_sw = c->fsw;' if self.uses_fsw else ''
         if delta is None:
             # The analysis says the callee never returns: continue in the dynamic copy.
             st['trans'] = True
@@ -670,6 +700,7 @@ class FuncGen:
             s += ' fr%d = c->st[(fp_top0 + %du) & 7u];' % (k, (-k) & 7)
             self.fregs_used.add(k)
         st['d'] = d2
+        st['sync'] = d2
         return s
 
     def dyn_continue(self, a, dirty):
@@ -710,6 +741,10 @@ class FuncGen:
         else:
             _, _, _, conflict = self.fpu_flow(self.g.fsumm, self.g.fproven)
             self.fmode = 'dynamic' if conflict or self.g.x87_force_dynamic else 'static'
+            text = ' '.join(' '.join(code) for _, _, code, _, _ in items)
+            self.uses_fsw = any(t in text for t in ('fp_sw', 'FCOM(', 'XSPILL'))
+            if self.fmode == 'static':
+                self.compute_fsync()
         out = self.emit_copy(items, self.fmode, 'L')
         if self.need_dyn:
             out += self.emit_copy(items, 'dynamic', 'D')
