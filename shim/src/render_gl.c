@@ -1763,9 +1763,10 @@ static void trace_draw(int prim, const RVertex *v, uint32_t nv, uint32_t ni, int
         wmin = w < wmin ? w : wmin;
         wmax = w > wmax ? w : wmax;
     }
-    rt_log("    depth: zfunc %u z %.6f..%.6f %s %.4f..%.4f range %.3f..%.3f fogcol %08X", g_rs.rs[23], (double)zmin,
-           (double)zmax, pretransformed ? "rhw" : "w", (double)wmin, (double)wmax, (double)g_rs.vp_minz,
-           (double)g_rs.vp_maxz, g_rs.rs[34]);
+    rt_log("    depth: zfunc %u z %.6f..%.6f %s %.4f..%.4f range %.3f..%.3f fogcol %08X world %.1f %.1f %.1f tex %08X",
+           g_rs.rs[23], (double)zmin, (double)zmax, pretransformed ? "rhw" : "w", (double)wmin, (double)wmax,
+           (double)g_rs.vp_minz, (double)g_rs.vp_maxz, g_rs.rs[34], (double)g_rs.world[12], (double)g_rs.world[13],
+           (double)g_rs.world[14], g_rs.stage[0].texture ? g_rs.stage[0].texture->mem : 0u);
     if (pretransformed && nv <= 8) {
         for (uint32_t i = 0; i < nv; i++)
             rt_log("    v%u: %.1f %.1f z %.4f rhw %.4f col %08X spec %08X uv %.3f %.3f", i, (double)v[i].x,
