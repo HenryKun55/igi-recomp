@@ -73,6 +73,15 @@ uint32_t thunk_register(GuestFn fn, const char *name)
     return THUNK_BASE + (thunk_count++) * THUNK_STRIDE;
 }
 
+uint32_t thunk_register_unique(GuestFn fn, const char *name)
+{
+    if (thunk_count == THUNK_MAX)
+        rt_fatal(NULL, "too many host thunks");
+    thunk_fns[thunk_count] = fn;
+    thunk_names[thunk_count] = name;
+    return THUNK_BASE + (thunk_count++) * THUNK_STRIDE;
+}
+
 GuestFn thunk_lookup(uint32_t addr)
 {
     uint32_t i = (addr - THUNK_BASE) / THUNK_STRIDE;

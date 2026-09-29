@@ -212,12 +212,15 @@ static GuestFn lookup_func(uint32_t addr)
     return NULL;
 }
 
+uint32_t g_current_thunk;
+
 void rt_dispatch(Ctx *c, uint32_t target)
 {
     GuestFn fn;
     if (target >= THUNK_BASE && target < THUNK_BASE + THUNK_MAX * THUNK_STRIDE) {
         fn = thunk_lookup(target);
         if (fn) {
+            g_current_thunk = target;
             fn(c);
             return;
         }
@@ -228,6 +231,8 @@ void rt_dispatch(Ctx *c, uint32_t target)
             return;
         }
     }
+    if (target == GUEST_RETURN_MAGIC)
+        rt_fatal(c, "guest returned to the host return address as a jump target");
     rt_fatal(c, "dispatch to unknown address %08X (return address %08X)", target, RD32(c->r[4]));
 }
 

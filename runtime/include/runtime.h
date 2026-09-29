@@ -40,6 +40,8 @@ void heap_free(uint32_t ptr);
 uint32_t heap_size(uint32_t ptr);
 
 uint32_t thunk_register(GuestFn fn, const char *name);
+uint32_t thunk_register_unique(GuestFn fn, const char *name);
+extern uint32_t g_current_thunk;   /* address of the thunk being executed */
 GuestFn thunk_lookup(uint32_t addr);
 const char *thunk_name(uint32_t addr);
 

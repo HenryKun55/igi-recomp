@@ -91,6 +91,21 @@ class Analyzer:
         if op.type != X.X86_OP_MEM or op.mem.base != 0 or op.mem.scale != 4 or op.mem.index == 0:
             return None
         table = op.mem.disp & 0xFFFFFFFF
+        prev = self._preceding(fn, ins.addr, 1)
+        if prev and prev[0].mnem == 'neg' and prev[0].ops[0].type == X.X86_OP_REG \
+                and prev[0].ops[0].reg == op.mem.index:
+            # `neg idx; jmp [idx*4 + table]`: entries run backwards from the table base.
+            count = None
+            earlier = sorted((a for a in fn.insns if a < prev[0].addr), reverse=True)[:12]
+            for p in (fn.insns[a] for a in earlier):
+                if p.mnem == 'cmp' and p.ops[0].type == X.X86_OP_REG and p.ops[1].type == X.X86_OP_IMM \
+                        and p.ops[0].reg == op.mem.index:
+                    count = p.ops[1].imm & 0xFFFFFFFF
+                    break
+            if count is None or count > 256:
+                return None
+            back = [self.pe.u32(table - 4 * k) for k in range(count)]
+            return sorted({v for v in back if v is not None and self.in_text(v)}) or None
         count = self._table_bound(fn, ins, op.mem.index)
         targets = []
         a = table
@@ -254,8 +269,34 @@ class Analyzer:
                 if a != fn.entry:
                     inner[a] = fn
         table_targets = {t for f in funcs.values() for tab in f.jump_tables.values() for t in tab}
-        return {p for p in self.code_pointers_in_data()
-                if p in inner and p not in funcs and p not in table_targets}
+        # A table target is still an alt entry when its function also has computed
+        # jumps we could not resolve: those reach it through runtime dispatch.
+        unresolved = {id(f) for f in funcs.values() if self.has_unresolved_jump(f)}
+        return {p for p in self.code_pointers_in_data() | self.code_pointers_in_text_data(funcs)
+                if p in inner and p not in funcs and (p not in table_targets or id(inner[p]) in unresolved)}
+
+    def has_unresolved_jump(self, fn):
+        for a, ins in fn.insns.items():
+            if ins.mnem == 'jmp' and self.direct_target(ins) is None and not self.import_of(ins) \
+                    and a not in fn.jump_tables:
+                return True
+        return False
+
+    def code_pointers_in_text_data(self, funcs):
+        """Aligned dwords inside .text that are not instructions (jump tables placed
+        after their function) and point into .text."""
+        covered = bytearray(self.text.vsize)
+        for fn in funcs.values():
+            for a, ins in fn.insns.items():
+                covered[a - self.text_lo:a - self.text_lo + ins.size] = b'\x01' * ins.size
+        ptrs = set()
+        for off in range(0, self.text.vsize - 3, 4):
+            if covered[off] or covered[off + 3]:
+                continue
+            v = struct.unpack_from('<I', self.code, off)[0]
+            if self.in_text(v):
+                ptrs.add(v)
+        return ptrs
 
     def _run_once(self, banned):
         entries = {self.pe.entry}

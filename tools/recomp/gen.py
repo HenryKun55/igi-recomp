@@ -315,6 +315,10 @@ class FuncGen:
                 code.append(self.goto(nxt))
             body.append((a, ins.text, code))
         out = []
+        if self.order and self.order[0] != fn.entry:
+            # Blocks below the entry address (backward jumps) are emitted first.
+            self.labels_used.add(fn.entry)
+            out.append('    goto L_%08X;' % fn.entry)
         for a, text, code in body:
             if a in self.labels_used:
                 out.append('L_%08X:;' % a)
