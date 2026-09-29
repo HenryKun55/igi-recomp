@@ -313,7 +313,14 @@ extern volatile uint32_t rt_prof_stack[RT_PROF_MAX];
 /* A setjmp returning through longjmp: this function is current again. */
 #define PROF_REENTER(a) (rt_prof_depth = prof_pd + 1u, rt_prof_cur = (a))
 void rt_prof_start(void);
+/* Host sections inside a thunk (ids 0xFD0000xx, named in profile.c). */
+enum { PROF_H_DECODE = 0xFD000001u, PROF_H_NEARCLIP, PROF_H_PACK, PROF_H_BATCH, PROF_H_STATE, PROF_H_GLDRAW,
+       PROF_H_TEXTURE, PROF_H_BLIT, PROF_H_MIX };
+#define PROF_SECTION(id) const uint32_t prof_hprev = rt_prof_cur; rt_prof_cur = (id)
+#define PROF_SECTION_END (rt_prof_cur = prof_hprev)
 #else
+#define PROF_SECTION(id) ((void)0)
+#define PROF_SECTION_END ((void)0)
 #define PROF_ENTER(a) ((void)0)
 #define PROF_EXIT ((void)0)
 #define PROF_HOST(id) ((void)0)

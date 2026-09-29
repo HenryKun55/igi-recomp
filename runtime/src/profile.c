@@ -114,6 +114,12 @@ static const char *name_of(uint32_t id, char *buf, size_t n)
             snprintf(buf, n, "%s!%s", g_guest_imports[i].dll, g_guest_imports[i].name);
             return buf;
         }
+    static const char *const host[] = { "?", "decode", "near clip", "pack", "batch", "gl state", "gl draw",
+                                        "texture", "blit", "audio mix" };
+    if ((id & 0xFFFFFF00u) == 0xFD000000u && (id & 0xFFu) < sizeof(host) / sizeof(host[0])) {
+        snprintf(buf, n, "host %s", host[id & 0xFFu]);
+        return buf;
+    }
     if (id >= THUNK_BASE && id < THUNK_BASE + THUNK_MAX * THUNK_STRIDE) {
         snprintf(buf, n, "thunk %s", thunk_name(id));
         return buf;

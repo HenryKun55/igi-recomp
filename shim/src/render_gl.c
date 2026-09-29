@@ -865,7 +865,17 @@ void render_texture_release(Surface *s)
 
 #define MAX_MIPS 16
 
+static uint32_t texture_get(Surface *s);
+
 uint32_t render_texture_get(Surface *s)
+{
+    PROF_SECTION(PROF_H_TEXTURE);
+    uint32_t r = texture_get(s);
+    PROF_SECTION_END;
+    return r;
+}
+
+static uint32_t texture_get(Surface *s)
 {
     if (!s)
         return white_tex;
@@ -1594,6 +1604,7 @@ static void layout_init(Layout *L, int pretransformed, int has_normal, int has_c
 /* Writes nv vertices at array position `base`. */
 static void pack_vertices(const Layout *L, const RVertex *v, uint32_t nv, uint32_t base)
 {
+    PROF_SECTION(PROF_H_PACK);
     uint64_t t0 = win32_perf_counter();
     ensure_capacity((size_t)base + nv);
     if (L->pretransformed) {
@@ -1642,6 +1653,7 @@ static void pack_vertices(const Layout *L, const RVertex *v, uint32_t nv, uint32
         }
     }
     pc_frame[PC_PACK_US] += win32_perf_counter() - t0;
+    PROF_SECTION_END;
 }
 
 /* Client array pointers: re-sent only when they change (GL reads them at draw time). */
@@ -1662,6 +1674,7 @@ static int ptr_changed(int slot, const void *p, int size)
 static void submit(int prim, const Layout *L, uint32_t nv, const uint16_t *idx, uint32_t ni)
 {
     perf_gpu_draws++;
+    PROF_SECTION(PROF_H_STATE);
     uint64_t t0 = win32_perf_counter();
     uint64_t tex_before = pc_frame[PC_TEX_US];
     apply_states(L->pretransformed, L->has_normal);
@@ -1725,6 +1738,7 @@ static void submit(int prim, const Layout *L, uint32_t nv, const uint16_t *idx, 
     uint64_t t1 = win32_perf_counter();
     pc_frame[PC_STATE_US] += (t1 - t0) - (pc_frame[PC_TEX_US] - tex_before);
 
+    PROF_HOST(PROF_H_GLDRAW);
     if (idx)
         glDrawElements(gl_prim(prim), (GLsizei)ni, GL_UNSIGNED_SHORT, idx);
     else
@@ -1734,6 +1748,7 @@ static void submit(int prim, const Layout *L, uint32_t nv, const uint16_t *idx, 
     pc_frame[PC_GL_US] += win32_perf_counter() - t1;
     pc_frame[PC_VERTS] += nv;
     pc_frame[PC_INDICES] += idx ? ni : 0u;
+    PROF_SECTION_END;
 }
 
 static void trace_draw(int prim, const RVertex *v, uint32_t nv, uint32_t ni, int pretransformed, int has_normal,
@@ -1924,8 +1939,20 @@ static RVertex nc_lerp(const RVertex *a, const RVertex *b, float t)
 }
 
 /* Returns 1 and a clipped triangle list in out/nout when some triangle crosses the near plane. */
+static int near_clip_impl(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, uint32_t ni, RVertex **out,
+                          uint32_t *nout);
+
 static int near_clip(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, uint32_t ni, RVertex **out,
                      uint32_t *nout)
+{
+    PROF_SECTION(PROF_H_NEARCLIP);
+    int r = near_clip_impl(prim, v, nv, idx, ni, out, nout);
+    PROF_SECTION_END;
+    return r;
+}
+
+static int near_clip_impl(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, uint32_t ni, RVertex **out,
+                          uint32_t *nout)
 {
     static float *d;
     static uint32_t d_cap;

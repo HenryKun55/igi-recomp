@@ -217,7 +217,19 @@ typedef struct Decoded {
 } Decoded;
 
 /* Decodes `count` vertices: vertex i comes from base + (src ? src[i] : i) * stride. */
+static RVertex *decode_vertices(uint32_t fvf, uint32_t base, uint32_t stride, const uint32_t *src, uint32_t count,
+                               Decoded *d);
+
 static RVertex *decode(uint32_t fvf, uint32_t base, uint32_t stride, const uint32_t *src, uint32_t count, Decoded *d)
+{
+    PROF_SECTION(PROF_H_DECODE);
+    RVertex *r = decode_vertices(fvf, base, stride, src, count, d);
+    PROF_SECTION_END;
+    return r;
+}
+
+static RVertex *decode_vertices(uint32_t fvf, uint32_t base, uint32_t stride, const uint32_t *src, uint32_t count,
+                               Decoded *d)
 {
     if (count > vbuf_cap) {
         vbuf_cap = count + 256u;
