@@ -1356,7 +1356,18 @@ static void apply_lights(void)
             p[3] = 1.0f;
         }
         glLightfv(gl, GL_POSITION, p);
-#if !defined(__vita__)
+#if defined(__vita__)
+        /* vitaGL takes attenuation only through glLightfv; it has no spot lights. */
+        /* Directional lights (and degenerate all-zero factors) get no attenuation;
+         * the slot may still hold a previous point light's factors. */
+        int unatt = l->type == 3u || (l->att0 == 0.0f && l->att1 == 0.0f && l->att2 == 0.0f);
+        GLfloat a0[4] = { unatt ? 1.0f : l->att0, 0, 0, 0 };
+        GLfloat a1[4] = { unatt ? 0.0f : l->att1, 0, 0, 0 };
+        GLfloat a2[4] = { unatt ? 0.0f : l->att2, 0, 0, 0 };
+        glLightfv(gl, GL_CONSTANT_ATTENUATION, a0);
+        glLightfv(gl, GL_LINEAR_ATTENUATION, a1);
+        glLightfv(gl, GL_QUADRATIC_ATTENUATION, a2);
+#else
         glLightf(gl, GL_CONSTANT_ATTENUATION, l->att0);
         glLightf(gl, GL_LINEAR_ATTENUATION, l->att1);
         glLightf(gl, GL_QUADRATIC_ATTENUATION, l->att2);
