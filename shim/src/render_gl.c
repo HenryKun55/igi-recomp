@@ -418,6 +418,15 @@ static void maybe_screenshot(void)
 
 void render_present(void)
 {
+    /* IGI_TRACE_EVERY=N: trace (log every draw + save the image of) every Nth frame. */
+    static int trace_every = -1;
+    static unsigned present_count;
+    if (trace_every < 0) {
+        const char *e = getenv("IGI_TRACE_EVERY");
+        trace_every = e ? atoi(e) : 0;
+    }
+    if (trace_every > 0 && ++present_count % (unsigned)trace_every == 0 && !g_trace_next_frame)
+        g_trace_next_frame = 1;
     platform_scripted_input();   /* cutscenes present frames without pumping messages */
     draw_bars();
     maybe_screenshot();   /* before the trace state advances: saves the traced frame */
