@@ -586,13 +586,17 @@ static void draw(uint32_t prim, uint32_t fvf, uint32_t verts, uint32_t stride, u
     /* Diagnostic: report who submits large untextured pre-transformed triangles
      * (the cutscene overlay), with the guest call chain from the frame pointers. */
     static int reported;
-    if (reported < 6 && draw_ctx && (fvf & 0x0Eu) == 0x4u && !g_rs.stage[0].texture && nv == 3u) {
+    if (reported < 3 && draw_ctx && (fvf & 0x0Eu) == 0x4u && !g_rs.stage[0].texture && nv == 3u) {
         float y0, y1;
         memcpy(&y0, gptr(verts + 4u), 4);
         memcpy(&y1, gptr(verts + stride * 2u + 4u), 4);
         if (y1 - y0 > 100.0f || y0 - y1 > 100.0f) {
             Ctx *c = draw_ctx;
             reported++;
+            /* Trace the next frames automatically so the queue probes show the culprit. */
+            extern int g_trace_next_frame;
+            if (!g_trace_next_frame)
+                g_trace_next_frame = 1;
             /* No frame pointers in IGI: scan the stack for words that are return
              * addresses (point just after a call instruction in .text). */
             char buf[512];
