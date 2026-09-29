@@ -113,8 +113,14 @@ static void c_depthmask(GLboolean m)
 static void c_alphafunc(GLenum f, GLfloat ref)
 {
     float v[2] = { (float)f, ref };
-    if (cache_set(0x30000004u, v, 2))
+    if (cache_set(0x30000004u, v, 2)) {
         (glAlphaFunc)(f, ref);
+#if defined(__vita__)
+        /* vitaGL re-uploads the alpha reference only on a shader change;
+         * glUseProgram(0) marks all fragment uniforms dirty. */
+        glUseProgram(0);
+#endif
+    }
 }
 
 static void c_cullface(GLenum m)
@@ -169,18 +175,15 @@ static void c_texenvi(GLenum target, GLenum pname, GLint value)
         (glTexEnvi)(target, pname, value);
 }
 
-static void c_texenvf(GLenum target, GLenum pname, GLfloat value)
-{
-    if (cache_set(0x40000000u ^ ((uint32_t)(cur_unit - GL_TEXTURE0) << 20) ^ pname, &value, 1))
-        (glTexEnvf)(target, pname, value);
-}
-
 static void c_texenvfv(GLenum target, GLenum pname, const GLfloat *value)
 {
     if (cache_set(0x40000000u ^ ((uint32_t)(cur_unit - GL_TEXTURE0) << 20) ^ pname, value, 4)) {
         GLfloat v[4];   /* vitaGL takes a non-const pointer */
         memcpy(v, value, sizeof(v));
         (glTexEnvfv)(target, pname, v);
+#if defined(__vita__)
+        glUseProgram(0);   /* refresh fragment uniforms (combiner scale/color) */
+#endif
     }
 }
 
@@ -218,7 +221,6 @@ static void c_fogfv(GLenum pname, const GLfloat *value)
 #define glActiveTexture c_activetexture
 #define glClientActiveTexture c_clientactivetexture
 #define glTexEnvi c_texenvi
-#define glTexEnvf c_texenvf
 #define glTexEnvfv c_texenvfv
 #define glFogi c_fogi
 #define glFogf c_fogf
@@ -654,6 +656,17 @@ uint32_t render_texture_get(Surface *s)
         uint32_t *px = surface_rgba(m);
         glTexImage2D(GL_TEXTURE_2D, level, GL_RGBA, (GLsizei)m->w, (GLsizei)m->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
         m->dirty = 0;
+#if defined(__vita__)
+        /* vitaGL ignores uploaded mip levels and rebuilds them with a GPU transfer
+         * (gpu_alloc_mipmaps); those came out empty/zero-alpha, making distant walls
+         * vanish under the color-key alpha test. Use level 0 only. */
+        for (Surface *rest = m->attached; rest && rest->parent == m; rest = rest->attached) {
+            rest->dirty = 0;
+            m = rest;
+        }
+        level++;
+        break;
+#endif
         if (!m->attached || m->attached->parent != m)
             break;
     }
@@ -666,6 +679,13 @@ uint32_t render_texture_get(Surface *s)
 static void draw_rgba_quad(const uint32_t *px, int w, int h, const Rect *sr, const Rect *dr, int blend)
 {
     glBindTexture(GL_TEXTURE_2D, blit_tex);
+#if defined(__vita__)
+    /* vitaGL's glTexSubImage2D writes in place while earlier draws of this frame are
+     * still queued on the GPU; a full glTexImage2D gets fresh storage. */
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    blit_tex_w = w;
+    blit_tex_h = h;
+#else
     if (w != blit_tex_w || h != blit_tex_h) {
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
         blit_tex_w = w;
@@ -673,6 +693,7 @@ static void draw_rgba_quad(const uint32_t *px, int w, int h, const Rect *sr, con
     } else {
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px);
     }
+#endif
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -865,7 +886,9 @@ static void setup_combiner(int alpha, uint32_t op, uint32_t a1, uint32_t a2)
         glTexEnvi(GL_TEXTURE_ENV, src2, (GLint)is);
         glTexEnvi(GL_TEXTURE_ENV, op2, GL_SRC_ALPHA);
     }
-    glTexEnvf(GL_TEXTURE_ENV, scale, sc);
+    /* glTexEnvfv: vitaGL only marks the scale uniform dirty through the vector form. */
+    const GLfloat scv[4] = { sc, sc, sc, sc };
+    glTexEnvfv(GL_TEXTURE_ENV, scale, scv);
 }
 
 static GLint wrap_mode(uint32_t a)
@@ -1227,8 +1250,15 @@ static void draw_now(int prim, const RVertex *v, uint32_t nv, const uint16_t *id
             glEnableClientState(GL_TEXTURE_COORD_ARRAY);
             glTexCoordPointer(2, GL_FLOAT, 0, uv);
         } else {
+#if defined(__vita__)
+            /* vitaGL only counts a texture unit whose texcoord array is enabled. */
+            memset(uv_buf[s], 0, nv * 8u);
+            glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+            glTexCoordPointer(2, GL_FLOAT, 0, uv_buf[s]);
+#else
             glDisableClientState(GL_TEXTURE_COORD_ARRAY);
             glMultiTexCoord2f(GL_TEXTURE0 + (GLenum)s, 0, 0);
+#endif
         }
     }
     glClientActiveTexture(GL_TEXTURE0);
