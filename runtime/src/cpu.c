@@ -253,6 +253,17 @@ void rt_noreturn(Ctx *c, uint32_t addr)
 
 void rt_probe(Ctx *c, uint32_t func)
 {
+    if (func == 0x00418970u) {
+        /* Camera view render: log its mode field whenever it changes. */
+        static uint32_t last_mode = 0xFFFFFFFFu;
+        uint32_t obj = RD32(c->r[4] + 4u);
+        uint32_t mode = RD32(obj + 0x28u);
+        if (mode != last_mode) {
+            rt_log("camera %08X mode %u -> %u", obj, last_mode, mode);
+            last_mode = mode;
+        }
+        return;
+    }
     static uint32_t funcs[64], counts[64];
     uint32_t i = 0;
     while (i < 64u && funcs[i] && funcs[i] != func)
