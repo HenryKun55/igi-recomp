@@ -379,6 +379,59 @@ void render_begin_frame(void)
     update_letterbox();
 }
 
+/* IGI_SHOT=N: save every Nth presented frame as shot_<frame>.bmp (debugging aid). */
+static void maybe_screenshot(void)
+{
+    static int every = -1;
+    static unsigned frame;
+    if (every < 0) {
+        const char *e = getenv("IGI_SHOT");
+        every = e ? atoi(e) : 0;
+    }
+    frame++;
+    int forced = g_trace_next_frame == 2;
+    if (!forced && (every <= 0 || frame % (unsigned)every))
+        return;
+    uint8_t *px = malloc((size_t)fb_w * (size_t)fb_h * 4u);
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    glReadPixels(0, 0, fb_w, fb_h, GL_BGRA, GL_UNSIGNED_BYTE, px);
+    char name[64];
+    snprintf(name, sizeof(name), "shot_%05u.bmp", frame);
+    FILE *f = fopen(name, "wb");
+    if (f) {
+        uint32_t size = 54u + (uint32_t)fb_w * (uint32_t)fb_h * 4u;
+        uint8_t h[54] = { 'B', 'M' };
+        memcpy(h + 2, &size, 4);
+        h[10] = 54;
+        h[14] = 40;
+        int32_t w = fb_w, hh = fb_h;
+        memcpy(h + 18, &w, 4);
+        memcpy(h + 22, &hh, 4);
+        h[26] = 1;
+        h[28] = 32;
+        fwrite(h, 1, 54, f);
+        fwrite(px, 4, (size_t)fb_w * (size_t)fb_h, f);
+        fclose(f);
+    }
+    free(px);
+}
+
+void render_present(void)
+{
+    draw_bars();
+    maybe_screenshot();   /* before the trace state advances: saves the traced frame */
+    if (g_trace_next_frame == 2) {
+        g_trace_next_frame = 0;
+        rt_log("---- frame trace end ----");
+    } else if (g_trace_next_frame == 1) {
+        g_trace_next_frame = 2;
+        rt_log("---- frame trace begin ----");
+    }
+    platform_swap();
+    platform_pump();
+    render_begin_frame();
+}
+
 /* Game pixel rectangle -> GL window rectangle (y up). */
 static void to_fb(int32_t x, int32_t y, int32_t w, int32_t h, GLint *ox, GLint *oy, GLsizei *ow, GLsizei *oh)
 {
