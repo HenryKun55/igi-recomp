@@ -229,42 +229,51 @@ static RVertex *decode(uint32_t fvf, uint32_t base, uint32_t stride, uint32_t co
     d->has_spec = (fvf & 0x80u) != 0;
     d->ntex = (int)((fvf >> 8) & 0xFu);
     uint32_t pos_size = pos == 0x4u ? 16u : pos == 0x2u ? 12u : 12u + ((pos - 0x4u) / 2u) * 4u;
-    for (uint32_t i = 0; i < count; i++) {
-        uint32_t a = base + i * stride;
-        const uint8_t *p = g_mem + a;
+    /* Attribute offsets are the same for every vertex: work them out once. */
+    uint32_t o = pos_size;
+    uint32_t nrm_off = o;
+    if (d->has_normal)
+        o += 12;
+    if (fvf & 0x20u)
+        o += 4;
+    uint32_t col_off = o;
+    if (d->has_color)
+        o += 4;
+    uint32_t spec_off = o;
+    if (d->has_spec)
+        o += 4;
+    uint32_t uv_off[MAX_STAGES], uv_bytes[MAX_STAGES];
+    int nuv = d->ntex < MAX_STAGES ? d->ntex : MAX_STAGES;
+    for (int t = 0; t < nuv; t++) {
+        uint32_t f = (fvf >> (16 + t * 2)) & 3u;
+        uint32_t sz = f == 0 ? 8u : f == 1 ? 12u : f == 2 ? 16u : 4u;
+        uv_off[t] = o;
+        uv_bytes[t] = sz >= 8u ? 8u : 4u;
+        o += sz;
+    }
+    const int pretransformed = d->pretransformed, has_normal = d->has_normal;
+    const int has_color = d->has_color, has_spec = d->has_spec;
+    const uint8_t *p = g_mem + base;
+    for (uint32_t i = 0; i < count; i++, p += stride) {
         RVertex *v = &vbuf[i];
         memcpy(&v->x, p, 12);
-        if (d->pretransformed)
+        if (pretransformed)
             memcpy(&v->w, p + 12, 4);
         else
             v->w = 1.0f;
-        uint32_t o = pos_size;
-        if (d->has_normal) {
-            memcpy(&v->nx, p + o, 12);
-            o += 12;
-        }
-        if (fvf & 0x20u)
-            o += 4;
+        if (has_normal)
+            memcpy(&v->nx, p + nrm_off, 12);
         uint32_t col = 0xFFFFFFFFu, spec = 0xFF000000u;
-        if (d->has_color) {
-            memcpy(&col, p + o, 4);
-            o += 4;
-        }
-        if (d->has_spec) {
-            memcpy(&spec, p + o, 4);
-            o += 4;
-        }
+        if (has_color)
+            memcpy(&col, p + col_off, 4);
+        if (has_spec)
+            memcpy(&spec, p + spec_off, 4);
         v->color = d3dcolor_to_rgba(col);
         v->spec = d3dcolor_to_rgba(spec);
-        for (int t = 0; t < d->ntex; t++) {
-            uint32_t f = (fvf >> (16 + t * 2)) & 3u;
-            uint32_t sz = f == 0 ? 8u : f == 1 ? 12u : f == 2 ? 16u : 4u;
-            if (t < MAX_STAGES) {
-                memcpy(v->uv[t], p + o, sz >= 8u ? 8u : 4u);
-                if (sz == 4u)
-                    v->uv[t][1] = 0.0f;
-            }
-            o += sz;
+        for (int t = 0; t < nuv; t++) {
+            memcpy(v->uv[t], p + uv_off[t], uv_bytes[t]);
+            if (uv_bytes[t] == 4u)
+                v->uv[t][1] = 0.0f;
         }
     }
     return vbuf;

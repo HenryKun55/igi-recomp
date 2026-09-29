@@ -74,6 +74,7 @@ struct Surface {
     int is_primary, is_back, is_z, is_texture;
     int locked;
     int lock_readback;     /* lock of a render target: pixels came from GL */
+    int lock_readonly;     /* current lock has DDLOCK_READONLY */
     uint32_t gl_tex;       /* texture name, 0 = none */
     int dirty;             /* guest pixels changed since the last upload */
     int mip_levels;
