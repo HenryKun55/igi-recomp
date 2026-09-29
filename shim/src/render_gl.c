@@ -506,22 +506,35 @@ void render_clear(uint32_t nrects, const Rect *rects, uint32_t flags, uint32_t c
     }
     if (!mask)
         return;
-    glEnable(GL_SCISSOR_TEST);
-    if (!nrects) {
+    /* vitaGL emulates the scissor by drawing a full-screen quad that obeys the
+     * current depth state, so scissoring must never happen with depth writes on
+     * unless depth is being cleared anyway, and is skipped for full clears. */
+    int restore_mask = !(flags & 2u);
+    uint32_t n = nrects ? nrects : 1u;
+    for (uint32_t i = 0; i < n; i++) {
+        int32_t l, t, rr, b;
+        if (nrects) {
+            l = rects[i].l; t = rects[i].t; rr = rects[i].r; b = rects[i].b;
+        } else {
+            l = g_rs.vp_x; t = g_rs.vp_y; rr = g_rs.vp_x + g_rs.vp_w; b = g_rs.vp_y + g_rs.vp_h;
+        }
+        int full = l <= 0 && t <= 0 && rr >= rt_w && b >= rt_h;
+        if (full && vp_w == fb_w && vp_h == fb_h) {
+            glDisable(GL_SCISSOR_TEST);
+            glClear(mask);
+            continue;
+        }
         GLint x, y;
         GLsizei w, h;
-        to_fb(g_rs.vp_x, g_rs.vp_y, g_rs.vp_w, g_rs.vp_h, &x, &y, &w, &h);
+        to_fb(l, t, rr - l, b - t, &x, &y, &w, &h);
+        if (restore_mask)
+            glDepthMask(GL_FALSE);
+        glEnable(GL_SCISSOR_TEST);
         glScissor(x, y, w, h);
         glClear(mask);
+        glDisable(GL_SCISSOR_TEST);
     }
-    for (uint32_t i = 0; i < nrects; i++) {
-        GLint x, y;
-        GLsizei w, h;
-        to_fb(rects[i].l, rects[i].t, rects[i].r - rects[i].l, rects[i].b - rects[i].t, &x, &y, &w, &h);
-        glScissor(x, y, w, h);
-        glClear(mask);
-    }
-    glDisable(GL_SCISSOR_TEST);
+    /* Depth mask is re-applied from the render state on the next draw. */
 }
 
 void render_fill(const Rect *r, uint32_t rgba)
@@ -1053,15 +1066,6 @@ static void mat_mul(const float *a, const float *b, float *out)
 
 static void apply_transforms(int pretransformed)
 {
-    /* Direct3D never rasterizes outside the current viewport, pre-transformed
-     * vertices included: the viewport rectangle acts as a scissor. */
-    {
-        GLint sx, sy;
-        GLsizei sw, sh;
-        to_fb(g_rs.vp_x, g_rs.vp_y, g_rs.vp_w, g_rs.vp_h, &sx, &sy, &sw, &sh);
-        glEnable(GL_SCISSOR_TEST);
-        glScissor(sx, sy, sw, sh);
-    }
     if (pretransformed) {
         load_screen_ortho();
         return;
