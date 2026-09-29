@@ -675,7 +675,7 @@ def float_close(x, y):
 # ================================================================== insn mode
 
 ARM_INSN_MAIN = r'''
-typedef void (*TestFn)(Ctx *);
+typedef uint64_t (*TestFn)(Ctx *);
 static const TestFn tests[] = { %TABLE% };
 void armdt_run_test(Ctx *c, int idx);
 void armdt_run_test(Ctx *c, int idx) { tests[idx](c); }
@@ -690,8 +690,10 @@ def insn_mode(args):
     parts, keep = [], []
     for ins in tests:
         try:
-            parts.append(difftest.emit_test(g, ins, len(keep)))
-            keep.append(ins)
+            # x87 forms run both with the stack in locals and in the context copy.
+            for mode in difftest.test_modes(g, ins):
+                parts.append(difftest.emit_test(g, ins, len(keep), mode))
+                keep.append(ins)
         except Exception as e:  # noqa: BLE001 - unsupported form in isolation
             print('skip', ins.text, e)
     print('instruction samples:', len(keep))
@@ -767,7 +769,11 @@ def insn_mode(args):
 
     fails_x86, fails_host = {}, {}
     for (idx, ins, regs, flags, fcw, vals, mem, res), hline in zip(cases, host_out):
-        # ARM run.
+        # ARM run. Like difftest's host harness, clear what earlier tests left around
+        # esi/edi (string operations read past the initialised bytes).
+        for k in (6, 7):
+            if 0x02000100 <= regs[k] < 0x02E00000:
+                arm.gwrite(regs[k] - 0x100, bytes(0x300))
         touched = set()
         for a, d in mem:
             arm.gwrite(a, d)
@@ -992,7 +998,7 @@ class FuncWorker:
                     # space and would corrupt the tester itself.
                     res['skipped'][xs.split()[0]] = res['skipped'].get(xs.split()[0], 0) + 1
                     continue
-                as_, acb = self.arm.call('f_%08X' % entry, make_ctx(regs, 0x27F, fs_base=TIB))
+                as_, acb = self.arm.call('w_%08X' % entry, make_ctx(regs, 0x27F, fs_base=TIB))
                 aw = self.arm.dirty_ranges(self.expect)
                 if as_ == 'limit':
                     # Out of emulation budget (e.g. a big rep stos through the byte-loop
@@ -1134,13 +1140,14 @@ def build_trace_program(g, work):
                '#include "armdt_trace.h"\n\n']
         for e in entries[n:n + Generator.FUNCS_PER_FILE]:
             body = []
-            for line in FuncGen(g, g.funcs[e]).emit():
+            fg = FuncGen(g, g.funcs[e])
+            for line in fg.emit():
                 body.append(line)
                 m = line.strip()
                 if m.startswith('/* ') and m[3:11].isalnum() and m[11:13] == ': ':
                     body.append('    TRACE(0x%sU);' % m[3:11])
                     traced.add(int(m[3:11], 16))
-            out.append(g.wrap(e, body))
+            out.append(g.wrap(e, body, fg))
         path = os.path.join(tdir, 'tfuncs_%03d.c' % (n // Generator.FUNCS_PER_FILE))
         write_if_changed(path, ''.join(out))
         files.append(path)
@@ -1173,7 +1180,7 @@ def call_trace(args, g, elf, image, entry, regs, stack, buf):
             ctx = parse_ctx(bytes(uc.mem_read(uc.reg_read(A.UC_ARM_REG_R0), CTX_SIZE)))
             t_arm.append((f, ctx['r'], ctx['ftop'], [ctx['st'][(ctx['ftop'] + i) & 7] for i in range(8)]))
     arm.uc.hook_add(UC_HOOK_BLOCK, arm_block)
-    status, _ = arm.call('f_%08X' % entry, make_ctx(regs, 0x27F, fs_base=TIB))
+    status, _ = arm.call('w_%08X' % entry, make_ctx(regs, 0x27F, fs_base=TIB))
     x86 = X86Engine(image, record=False)
     x86.uc.mem_write(BUF, buf)
     x86.uc.mem_write(ESP0, stack_bytes)
@@ -1221,15 +1228,16 @@ def trace_mode(args, g, work, image_path, bufs_path):
     rt_inc = os.path.join(ROOT, 'runtime', 'include')
     stub = os.path.join(work, 'stub.c')
     cpu_c = os.path.join(ROOT, 'runtime/src/cpu.c')
+    hle_c = os.path.join(ROOT, 'runtime/src/crt_hle.c')
     tobjs = compile_many(args.jobs, VITA_CC, VITA_FLAGS + ['-O2'], files + [stub],
                          os.path.join(work, 'arm_trace_obj'), [tdir, rt_inc])
-    tobjs += compile_many(1, VITA_CC, VITA_FLAGS + ['-O3'], [cpu_c], os.path.join(work, 'arm_trace_obj'), [tdir, rt_inc])
+    tobjs += compile_many(1, VITA_CC, VITA_FLAGS + ['-O3'], [cpu_c, hle_c], os.path.join(work, 'arm_trace_obj'), [tdir, rt_inc])
     elf = os.path.join(work, 'trace_arm.elf')
     vita_link(tobjs, elf, 'rt_dispatch')
     main_c = os.path.join(work, 'trace_main.c')
     write_if_changed(main_c, TRACE_HOST_MAIN)
     hflags = HOST_FLAGS + ['-O2', '-DBUF_ADDR=0x%Xu' % BUF, '-DTIB_ADDR=0x%Xu' % TIB]
-    hobjs = compile_many(args.jobs, 'cc', hflags, files + [stub, main_c, cpu_c], os.path.join(work, 'host_trace_obj'),
+    hobjs = compile_many(args.jobs, 'cc', hflags, files + [stub, main_c, cpu_c, hle_c], os.path.join(work, 'host_trace_obj'),
                          [tdir, rt_inc])
     host = os.path.join(work, 'trace_host')
     sh(['cc', '-o', host] + hobjs + ['-lm'])
@@ -1250,7 +1258,7 @@ def trace_mode(args, g, work, image_path, bufs_path):
     arm.gwrite(TIB, struct.pack('<I', 0xFFFFFFFF))
     arm.gwrite(BUF, buf)
     arm.gwrite(ESP0, stack_bytes)
-    status, _ = arm.call('f_%08X' % entry, make_ctx(regs, 0x27F, fs_base=TIB))
+    status, _ = arm.call('w_%08X' % entry, make_ctx(regs, 0x27F, fs_base=TIB))
     n = struct.unpack('<I', arm.uc.mem_read(arm.syms['g_armdt_trace_n'], 4))[0]
     t_arm = parse_trace(bytes(arm.uc.mem_read(arm.syms['g_armdt_trace'], n * TRACE_REC_SIZE)))
     # x86: state before every guest instruction the C code traces (fused jcc/setcc excluded).
@@ -1319,18 +1327,19 @@ def func_mode(args):
     write_if_changed(os.path.join(work, 'stub.c'), STUB_C)
     write_if_changed(os.path.join(work, 'native_main.c'), NATIVE_FUNC_MAIN)
     cpu_c = os.path.join(ROOT, 'runtime/src/cpu.c')
+    hle_c = os.path.join(ROOT, 'runtime/src/crt_hle.c')
     # ARM build of every generated function.
     print('building ARM objects ...', flush=True)
     objs = compile_many(args.jobs, VITA_CC, VITA_FLAGS + ['-O2'], gen_files + [os.path.join(work, 'stub.c')],
                         os.path.join(work, 'arm_obj'), [gen_dir, rt_inc])
-    objs += compile_many(1, VITA_CC, VITA_FLAGS + ['-O3'], [cpu_c], os.path.join(work, 'arm_obj'), [gen_dir, rt_inc])
+    objs += compile_many(1, VITA_CC, VITA_FLAGS + ['-O3'], [cpu_c, hle_c], os.path.join(work, 'arm_obj'), [gen_dir, rt_inc])
     elf = os.path.join(work, 'func_arm.elf')
     vita_link(objs, elf, 'rt_dispatch')
     # Host build.
     print('building host objects ...', flush=True)
     hflags = HOST_FLAGS + ['-O2', '-DBUF_ADDR=0x%Xu' % BUF, '-DTIB_ADDR=0x%Xu' % TIB]
     hobjs = compile_many(args.jobs, 'cc', hflags, gen_files + [os.path.join(work, 'stub.c'),
-                                                             os.path.join(work, 'native_main.c'), cpu_c],
+                                                             os.path.join(work, 'native_main.c'), cpu_c, hle_c],
                          os.path.join(work, 'host_obj'), [gen_dir, rt_inc])
     host = os.path.join(work, 'func_host')
     sh(['cc', '-o', host] + hobjs + ['-lm'])
