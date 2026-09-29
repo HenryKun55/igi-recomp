@@ -1388,7 +1388,7 @@ class FuncGen:
             return [self.goto(t)]
         imp = self.an.import_of(ins)
         if imp:
-            return ['SPILL; %s(c); return RETC;' % self.g.import_fn(imp)]
+            return ['SPILL; %s return RETC;' % self.import_call(ins, imp)]
         o = ins.ops[0]
         if a in fn.jump_tables:
             cases = ' '.join('case %s: %s' % (h(x), self.goto(x)) for x in fn.jump_tables[a])
@@ -1417,7 +1417,7 @@ class FuncGen:
         t = self.an.direct_target(ins)
         if t == SETJMP_FUNC:
             return ['esp -= 4u; GWR32(esp, %s); SPILL;' % ret,
-                    'if (setjmp(*rt_jmpbuf(GRD32(esp + 4u)))) { RELOAD; } '
+                    'if (setjmp(*rt_jmpbuf(GRD32(esp + 4u)))) { RELOAD; PROF_REENTER(%s); } ' % h(self.fn.entry) +
                     'else { uint64_t rv = f_%08X(c, esp, ecx, eax); CRELOAD; }' % t]
         if t is not None:
             if t in self.g.func_set:
@@ -1425,7 +1425,7 @@ class FuncGen:
             return ['esp -= 4u; GWR32(esp, %s); SPILL; rt_dispatch(c, %s); RELOAD;' % (ret, h(t))]
         imp = self.an.import_of(ins)
         if imp:
-            call = 'esp -= 4u; GWR32(esp, %s); SPILL; %s(c);' % (ret, self.g.import_fn(imp))
+            call = 'esp -= 4u; GWR32(esp, %s); SPILL; %s' % (ret, self.import_call(ins, imp))
             if imp[1] in NORETURN_IMPORTS:
                 return [call + ' rt_noreturn(c, %s); return RETC;' % h(ins.addr)]
             return [call + ' RELOAD;']
@@ -1433,6 +1433,12 @@ class FuncGen:
         # convention and host thunks through rt_dispatch.
         return ['{ uint32_t t = %s; esp -= 4u; GWR32(esp, %s); CSPILL; '
                 'uint64_t rv = rt_call_indirect(c, t, esp, ecx, eax); CRELOAD; }' % (self.rd(ins.ops[0], 4), ret)]
+
+    def import_call(self, ins, imp):
+        """Call of a host import; under IGI_PROFILE the profiler attributes the time to
+        the import (identified by its IAT slot)."""
+        slot = ins.ops[0].mem.disp & 0xFFFFFFFF
+        return 'PROF_HOST(%s); %s(c); PROF_BACK(%s);' % (h(slot), self.g.import_fn(imp), h(self.fn.entry))
 
     def i_ret(self, ins):
         n = 4 + (ins.ops[0].imm if ins.ops else 0)
@@ -1750,8 +1756,17 @@ class Generator:
         if entry in self.probes:
             # Diagnostic probe requested at configure time (IGI_PROBES).
             body = ['    c->r[0] = eax; c->r[1] = ecx; c->r[4] = esp; rt_probe(c, 0x%08Xu);' % entry] + body
+        # Profiler hooks (empty unless IGI_PROFILE): every exit restores the caller.
+        body = [re.sub(r'\breturn\b', 'PROF_EXIT; return', line) for line in body]
         text = '\n'.join(body)
-        out = [FUNC_PROTO % entry, '{'] + self.prologue(text, fg) + [text, '}\n\n']
+        out = [FUNC_PROTO % entry, '{'] + self.prologue(text, fg) + ['    PROF_ENTER(%s);' % h(entry), text, '}\n\n']
+        if 'setjmp(' in text:
+            # After a longjmp every register local is reloaded from the context and
+            # the other locals read afterwards are never modified after setjmp, so
+            # GCC's -Wclobbered reports are false positives here.
+            out = ['#if defined(__GNUC__) && !defined(__clang__)', '#pragma GCC diagnostic push',
+                   '#pragma GCC diagnostic ignored "-Wclobbered"', '#endif'] + out + [
+                '#if defined(__GNUC__) && !defined(__clang__)', '#pragma GCC diagnostic pop', '#endif\n']
         return '\n'.join(out)
 
     @staticmethod

@@ -252,8 +252,15 @@ void rt_dispatch(Ctx *c, uint32_t target)
     if (target >= THUNK_BASE && target < THUNK_BASE + THUNK_MAX * THUNK_STRIDE) {
         fn = thunk_lookup(target);
         if (fn) {
+#ifdef IGI_PROFILE
+            uint32_t prof_prev = rt_prof_cur;
+            rt_prof_cur = target;
+#endif
             g_current_thunk = target;
             fn(c);
+#ifdef IGI_PROFILE
+            rt_prof_cur = prof_prev;
+#endif
             return;
         }
     } else {

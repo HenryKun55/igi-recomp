@@ -226,6 +226,9 @@ int main(int argc, char **argv)
     uint32_t entry = load_exe(exe);
     rt_log("loaded %s, entry %08X, %u functions, %u imports", exe, entry, g_guest_func_count, g_guest_import_count);
 
+#ifdef IGI_PROFILE
+    rt_prof_start();
+#endif
     Ctx *c = &g_ctx;
     rt_fninit(c);
     setup_tib(c);

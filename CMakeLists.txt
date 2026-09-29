@@ -69,6 +69,13 @@ file(GLOB SHIM_SOURCES CONFIGURE_DEPENDS shim/src/*.c)
 add_executable(igi ${RUNTIME_SOURCES} ${SHIM_SOURCES})
 target_include_directories(igi PRIVATE runtime/include shim/include "${GEN_DIR}")
 target_compile_options(igi PRIVATE -Wall -Wextra -fwrapv -fno-strict-aliasing -fsigned-char)
+# Sampling profiler (runtime/src/profile.c): hooks in the generated code and a
+# sampling thread; writes profile.txt / igi_profile.txt. No cost when OFF.
+option(IGI_PROFILE "Build with the sampling profiler" OFF)
+if(IGI_PROFILE)
+    target_compile_definitions(igi_recomp PUBLIC IGI_PROFILE)
+    target_compile_definitions(igi PRIVATE IGI_PROFILE)
+endif()
 
 if(VITA)
     target_include_directories(igi PRIVATE "$ENV{VITASDK}/arm-vita-eabi/include/SDL2")
