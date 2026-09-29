@@ -330,23 +330,38 @@ static void soft_blit(Surface *dst, const Rect *dr, Surface *src, const Rect *sr
     int32_t sw = sr->r - sr->l, sh = sr->b - sr->t;
     if (dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0)
         return;
+    /* Source column per destination column, computed once per blit rather than
+     * per pixel (integer division is a library call on the Vita's CPU). -1 = clipped. */
+    static int32_t *col_src;
+    static int32_t col_cap;
+    if (dw > col_cap) {
+        col_cap = dw + 64;
+        col_src = realloc(col_src, (size_t)col_cap * sizeof(int32_t));
+    }
+    for (int32_t x = 0; x < dw; x++) {
+        int32_t dx = dr->l + x, sx = sr->l + x * sw / dw;
+        col_src[x] = (dx < 0 || dx >= (int32_t)dst->w || sx < 0 || sx >= (int32_t)src->w) ? -1 : sx;
+    }
+    const int ck = use_ck && src->has_ck;
+    const uint32_t ck_lo = src->ck_lo, ck_hi = src->ck_hi;
     for (int32_t y = 0; y < dh; y++) {
         int32_t dy = dr->t + y, sy = sr->t + y * sh / dh;
         if (dy < 0 || dy >= (int32_t)dst->h || sy < 0 || sy >= (int32_t)src->h)
             continue;
+        const uint8_t *srow = g_mem + src->mem + (uint32_t)sy * src->pitch;
+        uint8_t *drow = g_mem + dst->mem + (uint32_t)dy * dst->pitch;
         for (int32_t x = 0; x < dw; x++) {
-            int32_t dx = dr->l + x, sx = sr->l + x * sw / dw;
-            if (dx < 0 || dx >= (int32_t)dst->w || sx < 0 || sx >= (int32_t)src->w)
+            int32_t sx = col_src[x];
+            if (sx < 0)
                 continue;
-            uint8_t *sp = g_mem + src->mem + (uint32_t)sy * src->pitch + (uint32_t)sx * bpp;
-            uint8_t *dp = g_mem + dst->mem + (uint32_t)dy * dst->pitch + (uint32_t)dx * bpp;
-            if (use_ck && src->has_ck) {
+            const uint8_t *sp = srow + (uint32_t)sx * bpp;
+            if (ck) {
                 uint32_t v = 0;
                 memcpy(&v, sp, bpp);
-                if (v >= src->ck_lo && v <= src->ck_hi)
+                if (v >= ck_lo && v <= ck_hi)
                     continue;
             }
-            memcpy(dp, sp, bpp);
+            memcpy(drow + (uint32_t)(dr->l + x) * bpp, sp, bpp);
         }
     }
     dst->dirty = 1;
@@ -492,6 +507,8 @@ static void surf_SetColorKey(Ctx *c)
     Surface *s = surface_from_obj(THIS);
     uint32_t flags = ARG(1), key = ARG(2);
     if (flags & 0x8u) {           /* DDCKEY_SRCBLT */
+        int had = s->has_ck;
+        uint32_t lo = s->ck_lo, hi = s->ck_hi;
         if (key) {
             s->has_ck = 1;
             s->ck_lo = RD32(key);
@@ -499,7 +516,9 @@ static void surf_SetColorKey(Ctx *c)
         } else {
             s->has_ck = 0;
         }
-        s->dirty = 1;
+        /* The key is baked into the uploaded texture's alpha: re-upload only on a change. */
+        if (s->has_ck != had || (s->has_ck && (s->ck_lo != lo || s->ck_hi != hi)))
+            s->dirty = 1;
     }
     stdcall_ret(c, DD_OK, 3);
 }
@@ -520,6 +539,8 @@ static void surf_GetSurfaceDesc(Ctx *c)
 static void surf_IsLost(Ctx *c) { stdcall_ret(c, DD_OK, 1); }
 static void surf_Restore(Ctx *c) { stdcall_ret(c, DD_OK, 1); }
 
+#define DDLOCK_READONLY 0x10u
+
 static void surf_Lock(Ctx *c)
 {
     render_flush();
@@ -528,13 +549,14 @@ static void surf_Lock(Ctx *c)
         dd_trace_left--;
         rt_log("Lock %ux%u %ubpp primary %d back %d mem %08X", s->w, s->h, s->pf.bits, s->is_primary, s->is_back, s->mem);
     }
-    uint32_t rect = ARG(1), desc = ARG(2);
+    uint32_t rect = ARG(1), desc = ARG(2), flags = ARG(3);
     surface_alloc_mem(s);
     if (is_render_target(s)) {
         render_readback(s);
         s->lock_readback = 1;
     }
     s->locked = 1;
+    s->lock_readonly = (flags & DDLOCK_READONLY) != 0;
     surface_desc_write(s, desc);
     uint32_t p = s->mem;
     if (rect)
@@ -549,11 +571,14 @@ static void surf_Unlock(Ctx *c)
     render_flush();
     Surface *s = surface_from_obj(THIS);
     s->locked = 0;
-    s->dirty = 1;
-    if (s->lock_readback) {
-        render_writeback(s);
-        s->lock_readback = 0;
+    /* A read-only lock changed nothing: no texture re-upload, no render target write back. */
+    if (!s->lock_readonly) {
+        s->dirty = 1;
+        if (s->lock_readback)
+            render_writeback(s);
     }
+    s->lock_readback = 0;
+    s->lock_readonly = 0;
     stdcall_ret(c, DD_OK, 2);
 }
 
