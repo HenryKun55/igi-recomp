@@ -341,9 +341,9 @@ static int aspect_fill = -1;
 /* Culling override for diagnosis: 0 normal, 1 off, 2 flipped (cull=off|flip). */
 static int cull_override;
 /* Live diagnostic mode (Vita: L+R+SELECT cycles it), shown on the overlay. */
-enum { DIAG_NONE, DIAG_NO_BATCH, DIAG_NO_CULL, DIAG_NO_ZREMAP, DIAG_NO_SCREEN, DIAG_NO_3D, DIAG_DEPTH_LEQUAL,
+enum { DIAG_NONE, DIAG_NO_BATCH, DIAG_NO_CULL, DIAG_FLIP_ZREMAP, DIAG_NO_SCREEN, DIAG_NO_3D, DIAG_DEPTH_LEQUAL,
        DIAG_COUNT };
-static const char *const diag_names[DIAG_COUNT] = { "NORMAL", "NO BATCH", "NO CULL", "NO ZREMAP",
+static const char *const diag_names[DIAG_COUNT] = { "NORMAL", "NO BATCH", "NO CULL", "FLIP ZREMAP",
                                                      "NO 2D VERTS", "NO 3D VERTS", "DEPTH LEQUAL" };
 static int diag_mode;
 
@@ -352,8 +352,15 @@ void render_diag_cycle(void)
     diag_mode = (diag_mode + 1) % DIAG_COUNT;
     rt_log("diagnostic mode %d: %s", diag_mode, diag_names[diag_mode]);
 }
-/* 1: remap D3D clip z [0,w] to GL [-w,w] (desktop GL). zremap=0 in igi.cfg disables it. */
+/* 1: remap D3D clip z [0,w] to GL [-w,w] (desktop GL). zremap=0 in igi.cfg disables it.
+ * GXM clips z to [0,w] like D3D, so on the Vita the remap would clip away the
+ * near half of the depth range: clip z stays in D3D form there and the depth
+ * range is widened instead (see d3d_depth_range). */
+#if defined(__vita__)
+static int z_remap = 0;
+#else
 static int z_remap = 1;
+#endif
 
 static void load_aspect_setting(void)
 {
@@ -599,13 +606,31 @@ static void to_fb(int32_t x, int32_t y, int32_t w, int32_t h, GLint *ox, GLint *
 }
 
 /* Orthographic projection over the whole render target in D3D pixel coordinates. */
+static int use_z_remap(void)
+{
+    return z_remap != (diag_mode == DIAG_FLIP_ZREMAP);
+}
+
+/* Depth range for clip z in D3D form ([0,w]): GL maps NDC [-1,1] to [n,f], so
+ * NDC [0,1] lands on [minz,maxz] with n = 2 minz - maxz. */
+static void d3d_depth_range(float minz, float maxz)
+{
+    c_depthrange(2.0f * minz - maxz, maxz);
+}
+
 static void load_screen_ortho(void)
 {
     c_viewport(vp_x, vp_y, vp_w, vp_h);
-    c_depthrange(0.0f, 1.0f);
     /* D3D samples pixel centers at integer coordinates, GL at +0.5. */
     float m[16];
     ortho_matrix(-0.5, rt_w - 0.5, rt_h - 0.5, -0.5, 0.0, -1.0, m);
+    if (use_z_remap()) {
+        c_depthrange(0.0f, 1.0f);
+    } else {
+        m[10] = 1.0f;   /* clip z = screen z */
+        m[14] = 0.0f;
+        d3d_depth_range(0.0f, 1.0f);
+    }
     c_load_matrix(GL_PROJECTION, m);
     c_load_matrix(GL_MODELVIEW, identity_matrix);
 }
@@ -1436,11 +1461,15 @@ static void apply_transforms(int pretransformed)
     GLsizei w, h;
     to_fb(g_rs.vp_x, g_rs.vp_y, g_rs.vp_w, g_rs.vp_h, &x, &y, &w, &h);
     c_viewport(x, y, w, h);
-    c_depthrange(g_rs.vp_minz, g_rs.vp_maxz);
     /* D3D clip-space z is [0, w]; GL wants [-w, w]: z' = 2z - w. */
     float p[16];
     memcpy(p, g_rs.proj, sizeof(p));
-    if (z_remap && diag_mode != DIAG_NO_ZREMAP)
+    int remap = use_z_remap();
+    if (remap)
+        c_depthrange(g_rs.vp_minz, g_rs.vp_maxz);
+    else
+        d3d_depth_range(g_rs.vp_minz, g_rs.vp_maxz);
+    if (remap)
         for (int r = 0; r < 4; r++)
             p[r * 4 + 2] = 2.0f * g_rs.proj[r * 4 + 2] - g_rs.proj[r * 4 + 3];
     c_load_matrix(GL_PROJECTION, p);
