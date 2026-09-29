@@ -230,17 +230,28 @@ static int vp_x, vp_y, vp_w = 640, vp_h = 480;   /* game image inside the drawab
  * IGI_ASPECT=fill|keep on desktop, "aspect=fill|keep" in ux0:data/igi/igi.cfg on the Vita. */
 static int aspect_fill = -1;
 
+/* Culling override for diagnosis: 0 normal, 1 off, 2 flipped (cull=off|flip). */
+static int cull_override;
+
 static void load_aspect_setting(void)
 {
     const char *v = getenv("IGI_ASPECT");
+    const char *cv = getenv("IGI_CULL");
 #if defined(__vita__)
     aspect_fill = 1;
-    static char line[128];
+    static char line[128], cline[128];
     FILE *f = fopen("ux0:data/igi/igi.cfg", "r");
     if (f) {
-        while (fgets(line, sizeof(line), f))
-            if (strncmp(line, "aspect=", 7) == 0)
+        char buf[128];
+        while (fgets(buf, sizeof(buf), f)) {
+            if (strncmp(buf, "aspect=", 7) == 0) {
+                memcpy(line, buf, sizeof(line));
                 v = line + 7;
+            } else if (strncmp(buf, "cull=", 5) == 0) {
+                memcpy(cline, buf, sizeof(cline));
+                cv = cline + 5;
+            }
+        }
         fclose(f);
     }
 #else
@@ -248,6 +259,10 @@ static void load_aspect_setting(void)
 #endif
     if (v)
         aspect_fill = strncmp(v, "fill", 4) == 0;
+    if (cv)
+        cull_override = strncmp(cv, "off", 3) == 0 ? 1 : strncmp(cv, "flip", 4) == 0 ? 2 : 0;
+    if (cull_override)
+        rt_log("culling override: %s", cull_override == 1 ? "off" : "flipped");
 }
 
 static void update_letterbox(void)
@@ -913,12 +928,12 @@ static void apply_states(int pretransformed, int has_normal)
     } else {
         glDisable(GL_ALPHA_TEST);
     }
-    if (rs[22] == 1u || pretransformed) {
+    if (rs[22] == 1u || pretransformed || cull_override == 1) {
         glDisable(GL_CULL_FACE);
     } else {
         glEnable(GL_CULL_FACE);
         glCullFace(GL_BACK);
-        glFrontFace(rs[22] == 3u ? GL_CW : GL_CCW);
+        glFrontFace((rs[22] == 3u) != (cull_override == 2) ? GL_CW : GL_CCW);
     }
     glShadeModel(rs[9] == 1u ? GL_FLAT : GL_SMOOTH);
     glPolygonMode(GL_FRONT_AND_BACK, rs[8] == 2u ? GL_LINE : rs[8] == 1u ? GL_POINT : GL_FILL);
