@@ -16,6 +16,7 @@
 #endif
 
 RenderState g_rs;
+static uint32_t perf_gpu_draws;   /* draws actually submitted to GL this frame */
 static void perf_frame_begin_swap(void);
 static void perf_swap(void);
 
@@ -441,6 +442,7 @@ static void maybe_screenshot(void)
 
 void render_present(void)
 {
+    render_flush();
     /* IGI_TRACE_EVERY=N: trace (log every draw + save the image of) every Nth frame. */
     static int trace_every = -1;
     static unsigned present_count;
@@ -495,6 +497,7 @@ static void load_screen_ortho(void)
 
 void render_clear(uint32_t nrects, const Rect *rects, uint32_t flags, uint32_t color, float z)
 {
+    render_flush();
     GLbitfield mask = 0;
     if (flags & 1u) {
         mask |= GL_COLOR_BUFFER_BIT;
@@ -712,6 +715,7 @@ static void draw_rgba_quad(const uint32_t *px, int w, int h, const Rect *sr, con
 
 void render_blit(Surface *src, const Rect *sr, const Rect *dr, int use_ck)
 {
+    render_flush();
     VideoFrameSource *vs = src->client_mem ? video_source_for(src->mem) : NULL;
     if (vs) {
         /* Movie frame: convert it once, upload at native size, let the GPU scale. */
@@ -733,6 +737,7 @@ void render_blit(Surface *src, const Rect *sr, const Rect *dr, int use_ck)
 
 void render_readback(Surface *s)
 {
+    render_flush();
     surface_alloc_mem(s);
     uint32_t *px = malloc((size_t)vp_w * (size_t)vp_h * 4u);
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
@@ -751,6 +756,7 @@ void render_readback(Surface *s)
 
 void render_writeback(Surface *s)
 {
+    render_flush();
     int ck = s->has_ck;
     s->has_ck = 0;
     uint32_t *px = surface_rgba(s);
@@ -1111,31 +1117,12 @@ static float *nrm_buf;
 static float *uv_buf[MAX_STAGES];
 static size_t pos_cap;
 
-static void render_draw_impl(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, uint32_t ni,
-                             int pretransformed, int has_normal, int has_color, int has_spec, int ntex)
+static void draw_now(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, uint32_t ni,
+                     int pretransformed, int has_normal, int has_color, int has_spec, int ntex)
 {
     if (!nv)
         return;
-    if (pretransformed) {
-        /* A (near) zero rhw makes w effectively infinite. Hardware of the era interpolates
-         * colors perspective-correctly (attribute * rhw), so such primitives come out fully
-         * transparent. IGI's cutscenes submit an overlay with rhw left as garbage/zero;
-         * drawing it paints a green band over the scene. */
-        float min_rhw = 1e30f, max_rhw = 0.0f;
-        for (uint32_t i = 0; i < nv; i++) {
-            min_rhw = v[i].w < min_rhw ? v[i].w : min_rhw;
-            max_rhw = v[i].w > max_rhw ? v[i].w : max_rhw;
-        }
-        if (max_rhw < 1e-6f) {
-            static int reported;
-            if (reported < 8) {
-                reported++;
-                rt_log("dropping pre-transformed prim %d (%u verts): rhw %g..%g, color %08X", prim, nv,
-                       (double)min_rhw, (double)max_rhw, v[0].color);
-            }
-            return;
-        }
-    }
+    perf_gpu_draws++;
     if (g_trace_next_frame == 2) {
         float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
         for (uint32_t i = 0; i < nv; i++) {
@@ -1251,6 +1238,124 @@ static void render_draw_impl(int prim, const RVertex *v, uint32_t nv, const uint
         glDrawArrays(gl_prim(prim), 0, (GLsizei)nv);
 }
 
+
+/* A (near) zero rhw makes w effectively infinite. Hardware of the era interpolates
+ * colors perspective-correctly (attribute * rhw), so such primitives come out fully
+ * transparent. IGI's cutscenes submit an overlay with rhw left as garbage/zero. */
+static int rhw_invisible(int prim, const RVertex *v, uint32_t nv)
+{
+    float min_rhw = 1e30f, max_rhw = 0.0f;
+    for (uint32_t i = 0; i < nv; i++) {
+        min_rhw = v[i].w < min_rhw ? v[i].w : min_rhw;
+        max_rhw = v[i].w > max_rhw ? v[i].w : max_rhw;
+    }
+    if (max_rhw >= 1e-6f)
+        return 0;
+    static int reported;
+    if (reported < 8) {
+        reported++;
+        rt_log("dropping pre-transformed prim %d (%u verts): rhw %g..%g, color %08X", prim, nv, (double)min_rhw,
+               (double)max_rhw, v[0].color);
+    }
+    return 1;
+}
+
+/* ---- draw batching --------------------------------------------------------
+ * Consecutive triangle draws with identical render state are merged into one
+ * indexed triangle list: on the Vita every draw costs a round of vitaGL/GXM
+ * state setup. IGI_BATCH=0 disables it.
+ */
+#define BATCH_MAX_V 16384u
+#define BATCH_MAX_I 49152u
+
+static RVertex batch_v[BATCH_MAX_V];
+static uint16_t batch_i[BATCH_MAX_I];
+static uint32_t batch_nv, batch_ni;
+static RenderState batch_rs;
+static int batch_key[5];
+static int batch_active;
+static int batch_enabled = -1;
+
+void render_flush(void)
+{
+    if (!batch_active)
+        return;
+    batch_active = 0;
+    if (!batch_ni)
+        return;
+    static RenderState saved;
+    saved = g_rs;
+    g_rs = batch_rs;
+    draw_now(PRIM_TRIANGLES, batch_v, batch_nv, batch_i, batch_ni, batch_key[0], batch_key[1], batch_key[2],
+             batch_key[3], batch_key[4]);
+    g_rs = saved;
+    batch_nv = batch_ni = 0;
+}
+
+static void batch_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, uint32_t ni,
+                       int pretransformed, int has_normal, int has_color, int has_spec, int ntex)
+{
+    if (!nv)
+        return;
+    if (pretransformed && rhw_invisible(prim, v, nv))
+        return;
+    if (batch_enabled < 0) {
+        const char *e = getenv("IGI_BATCH");
+        batch_enabled = !(e && e[0] == '0');
+    }
+    uint32_t n = idx ? ni : nv;
+    int batchable = batch_enabled &&
+                    (prim == PRIM_TRIANGLES || prim == PRIM_TRIANGLE_STRIP || prim == PRIM_TRIANGLE_FAN);
+    uint32_t tris = prim == PRIM_TRIANGLES ? n / 3u : (n >= 3u ? n - 2u : 0u);
+    if (!batchable || nv > BATCH_MAX_V || tris * 3u > BATCH_MAX_I || g_trace_next_frame == 2) {
+        render_flush();
+        draw_now(prim, v, nv, idx, ni, pretransformed, has_normal, has_color, has_spec, ntex);
+        return;
+    }
+    if (!tris)
+        return;
+    int key[5] = { pretransformed, has_normal, has_color, has_spec, ntex };
+    if (batch_active && (batch_nv + nv > BATCH_MAX_V || batch_ni + tris * 3u > BATCH_MAX_I ||
+                         memcmp(key, batch_key, sizeof(key)) != 0 || memcmp(&g_rs, &batch_rs, sizeof(g_rs)) != 0))
+        render_flush();
+    if (!batch_active) {
+        batch_active = 1;
+        batch_rs = g_rs;
+        memcpy(batch_key, key, sizeof(key));
+        batch_nv = batch_ni = 0;
+    }
+    uint32_t base = batch_nv;
+    memcpy(&batch_v[base], v, nv * sizeof(RVertex));
+    batch_nv += nv;
+    uint16_t *out = &batch_i[batch_ni];
+    for (uint32_t t = 0; t < tris; t++) {
+        uint32_t a, b, c;
+        if (prim == PRIM_TRIANGLES) {
+            a = t * 3u;
+            b = a + 1u;
+            c = a + 2u;
+        } else if (prim == PRIM_TRIANGLE_STRIP) {
+            /* Alternate winding so every triangle keeps the strip's orientation. */
+            a = (t & 1u) ? t + 1u : t;
+            b = (t & 1u) ? t : t + 1u;
+            c = t + 2u;
+        } else {
+            a = 0u;
+            b = t + 1u;
+            c = t + 2u;
+        }
+        if (idx) {
+            a = idx[a];
+            b = idx[b];
+            c = idx[c];
+        }
+        *out++ = (uint16_t)(base + a);
+        *out++ = (uint16_t)(base + b);
+        *out++ = (uint16_t)(base + c);
+    }
+    batch_ni += tris * 3u;
+}
+
 /* ---- on-screen performance overlay ----------------------------------------
  * Per-frame averages over one second: total frame time, time spent submitting
  * draws to GL, time blocked in the buffer swap, and the rest (game code), plus
@@ -1262,7 +1367,8 @@ static struct {
     uint64_t draw_us, swap_us, frame_start;
     uint32_t draws, frames;
     uint64_t acc_frame, acc_draw, acc_swap, window_start;
-    uint32_t acc_draws;
+    uint32_t acc_draws, acc_gpu_draws;
+    uint32_t gpu_draws_per_frame;
     float fps, ms_frame, ms_draw, ms_swap, ms_game;
     uint32_t draws_per_frame;
     int enabled;
@@ -1272,7 +1378,7 @@ void render_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, u
                  int pretransformed, int has_normal, int has_color, int has_spec, int ntex)
 {
     uint64_t t0 = win32_perf_counter();
-    render_draw_impl(prim, v, nv, idx, ni, pretransformed, has_normal, has_color, has_spec, ntex);
+    batch_draw(prim, v, nv, idx, ni, pretransformed, has_normal, has_color, has_spec, ntex);
     perf.draw_us += win32_perf_counter() - t0;
     perf.draws++;
 }
@@ -1288,6 +1394,7 @@ static const uint16_t *glyph(char ch)
     static const struct { char c; uint16_t g[5]; } letters[] = {
         { 'F', { 7, 4, 6, 4, 4 } }, { 'G', { 7, 4, 5, 5, 7 } }, { 'D', { 6, 5, 5, 5, 6 } },
         { 'S', { 7, 4, 7, 1, 7 } }, { 'N', { 5, 7, 7, 7, 5 } }, { 'T', { 7, 2, 2, 2, 2 } },
+        { 'B', { 6, 5, 6, 5, 6 } },
     };
     if (ch >= '0' && ch <= '9')
         return digits[ch - '0'];
@@ -1319,12 +1426,13 @@ static void overlay_text(float x, float y, float px, const char *s)
 
 static void perf_overlay_draw(void)
 {
-    char lines[5][32];
+    char lines[6][32];
     snprintf(lines[0], sizeof(lines[0]), "F %.1f", (double)perf.fps);
     snprintf(lines[1], sizeof(lines[1]), "T %.1f", (double)perf.ms_frame);
     snprintf(lines[2], sizeof(lines[2]), "G %.1f", (double)perf.ms_game);
     snprintf(lines[3], sizeof(lines[3]), "D %.1f", (double)perf.ms_draw);
-    snprintf(lines[4], sizeof(lines[4]), "S %.1f N %u", (double)perf.ms_swap, perf.draws_per_frame);
+    snprintf(lines[4], sizeof(lines[4]), "S %.1f", (double)perf.ms_swap);
+    snprintf(lines[5], sizeof(lines[5]), "N %u B %u", perf.draws_per_frame, perf.gpu_draws_per_frame);
     glDisable(GL_SCISSOR_TEST);
     glDisable(GL_BLEND);
     glDisable(GL_DEPTH_TEST);
@@ -1350,12 +1458,12 @@ static void perf_overlay_draw(void)
     glBegin(GL_QUADS);
     glVertex2f(0, 0);
     glVertex2f(px * 60.0f, 0);
-    glVertex2f(px * 60.0f, px * 32.0f);
-    glVertex2f(0, px * 32.0f);
+    glVertex2f(px * 60.0f, px * 38.0f);
+    glVertex2f(0, px * 38.0f);
     glEnd();
     glColor4f(1, 1, 0, 1);
     glBegin(GL_QUADS);
-    for (int i = 0; i < 5; i++)
+    for (int i = 0; i < 6; i++)
         overlay_text(px, px * (1.0f + 6.0f * (float)i), px, lines[i]);
     glEnd();
     glColor4f(1, 1, 1, 1);
@@ -1379,6 +1487,8 @@ static void perf_frame_begin_swap(void)
     perf.acc_frame += now - perf.frame_start;
     perf.acc_draw += perf.draw_us;
     perf.acc_draws += perf.draws;
+    perf.acc_gpu_draws += perf_gpu_draws;
+    perf_gpu_draws = 0;
     perf.frames++;
     perf.draw_us = 0;
     perf.draws = 0;
@@ -1391,11 +1501,12 @@ static void perf_frame_begin_swap(void)
         perf.ms_swap = (float)perf.acc_swap / n / 1000.0f;
         perf.ms_game = perf.ms_frame - perf.ms_draw - perf.ms_swap;
         perf.draws_per_frame = perf.acc_draws / perf.frames;
+        perf.gpu_draws_per_frame = perf.acc_gpu_draws / perf.frames;
         rt_log("perf: %.1f fps, frame %.1f ms = game %.1f + draw %.1f + swap %.1f, %u draws", (double)perf.fps,
                (double)perf.ms_frame, (double)perf.ms_game, (double)perf.ms_draw, (double)perf.ms_swap,
                perf.draws_per_frame);
         perf.acc_frame = perf.acc_draw = perf.acc_swap = 0;
-        perf.acc_draws = 0;
+        perf.acc_draws = perf.acc_gpu_draws = 0;
         perf.frames = 0;
         perf.window_start = now;
     }
