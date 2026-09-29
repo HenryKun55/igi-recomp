@@ -26,6 +26,8 @@ void platform_capture_mouse(int on);
 
 /* Keyboard state indexed by DirectInput DIK_* code. */
 extern uint8_t g_key_state[256];
+/* Set by the Cmd+P hotkey: log every draw of the next frame (1 = armed, 2 = tracing). */
+extern int g_trace_next_frame;
 
 /* Buffered keyboard events for DirectInput (DIK code, pressed). */
 typedef struct KeyEvent {

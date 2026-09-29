@@ -7,6 +7,7 @@
 #include <stdlib.h>
 
 uint8_t g_key_state[256];
+int g_trace_next_frame;
 MouseState g_mouse;
 
 static SDL_Window *window;
@@ -305,6 +306,10 @@ static void handle_event(const SDL_Event *e)
         break;
     case SDL_KEYDOWN:
     case SDL_KEYUP: {
+        if (e->type == SDL_KEYDOWN && e->key.keysym.sym == SDLK_p && (e->key.keysym.mod & KMOD_GUI)) {
+            g_trace_next_frame = 1;    /* Cmd+P: dump the next frame's draws */
+            break;
+        }
         int down = e->type == SDL_KEYDOWN;
         uint8_t dik = sdl_to_dik(e->key.keysym.scancode);
         if (dik) {

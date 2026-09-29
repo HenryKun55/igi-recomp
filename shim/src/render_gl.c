@@ -102,7 +102,8 @@ static void maybe_screenshot(void)
         every = e ? atoi(e) : 0;
     }
     frame++;
-    if (every <= 0 || frame % (unsigned)every)
+    int forced = g_trace_next_frame == 2;
+    if (!forced && (every <= 0 || frame % (unsigned)every))
         return;
     uint8_t *px = malloc((size_t)fb_w * (size_t)fb_h * 4u);
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
@@ -130,6 +131,13 @@ static void maybe_screenshot(void)
 
 void render_present(void)
 {
+    if (g_trace_next_frame == 2) {
+        g_trace_next_frame = 0;
+        rt_log("---- frame trace end ----");
+    } else if (g_trace_next_frame == 1) {
+        g_trace_next_frame = 2;
+        rt_log("---- frame trace begin ----");
+    }
     maybe_screenshot();
     platform_swap();
     platform_pump();
@@ -698,6 +706,26 @@ void render_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, u
 {
     if (!nv)
         return;
+    if (g_trace_next_frame == 2) {
+        float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+        for (uint32_t i = 0; i < nv; i++) {
+            x0 = v[i].x < x0 ? v[i].x : x0;
+            y0 = v[i].y < y0 ? v[i].y : y0;
+            x1 = v[i].x > x1 ? v[i].x : x1;
+            y1 = v[i].y > y1 ? v[i].y : y1;
+        }
+        const StageState *s0 = &g_rs.stage[0], *s1 = &g_rs.stage[1];
+        rt_log("draw prim %d nv %u ni %u tl %d n %d c %d s %d t %d box %.1f,%.1f-%.1f,%.1f col0 %08X | z %u/%u "
+               "blend %u %u/%u atest %u %u/%u ck %u fog %u light %u cull %u | s0 c%u(%X,%X) a%u(%X,%X) tex %ux%u/%ubpp ck%d "
+               "| s1 c%u a%u tex %ux%u tf %08X",
+               prim, nv, ni, pretransformed, has_normal, has_color, has_spec, ntex, (double)x0, (double)y0, (double)x1,
+               (double)y1, v[0].color, g_rs.rs[7], g_rs.rs[14], g_rs.rs[27], g_rs.rs[19], g_rs.rs[20], g_rs.rs[15],
+               g_rs.rs[25], g_rs.rs[24], g_rs.rs[41], g_rs.rs[28], g_rs.rs[137], g_rs.rs[22], s0->colorop,
+               s0->colorarg1, s0->colorarg2, s0->alphaop, s0->alphaarg1, s0->alphaarg2,
+               s0->texture ? s0->texture->w : 0u, s0->texture ? s0->texture->h : 0u,
+               s0->texture ? s0->texture->pf.bits : 0u, s0->texture ? s0->texture->has_ck : 0, s1->colorop,
+               s1->alphaop, s1->texture ? s1->texture->w : 0u, s1->texture ? s1->texture->h : 0u, g_rs.rs[60]);
+    }
     apply_states(pretransformed, has_normal);
     int stages = apply_stages(ntex);
     apply_transforms(pretransformed);
