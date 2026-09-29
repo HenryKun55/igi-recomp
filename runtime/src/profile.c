@@ -115,7 +115,7 @@ static const char *name_of(uint32_t id, char *buf, size_t n)
             return buf;
         }
     static const char *const host[] = { "?", "decode", "near clip", "pack", "batch", "gl state", "gl draw",
-                                        "texture", "blit", "audio mix" };
+                                        "texture", "blit", "audio mix", "index scan" };
     if ((id & 0xFFFFFF00u) == 0xFD000000u && (id & 0xFFu) < sizeof(host) / sizeof(host[0])) {
         snprintf(buf, n, "host %s", host[id & 0xFFu]);
         return buf;

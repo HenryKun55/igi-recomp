@@ -2031,8 +2031,19 @@ static int near_clip_impl(int prim, const RVertex *v, uint32_t nv, const uint16_
 }
 #endif
 
+static void batch_draw_impl(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, uint32_t ni,
+                            int pretransformed, int has_normal, int has_color, int has_spec, int ntex);
+
 static void batch_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, uint32_t ni,
                        int pretransformed, int has_normal, int has_color, int has_spec, int ntex)
+{
+    PROF_SECTION(PROF_H_BATCH);
+    batch_draw_impl(prim, v, nv, idx, ni, pretransformed, has_normal, has_color, has_spec, ntex);
+    PROF_SECTION_END;
+}
+
+static void batch_draw_impl(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, uint32_t ni,
+                            int pretransformed, int has_normal, int has_color, int has_spec, int ntex)
 {
     if (!nv)
         return;

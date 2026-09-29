@@ -670,12 +670,23 @@ static RVertex *gather(const RVertex *cache, const uint32_t *src, uint32_t count
     return g;
 }
 
+static void draw_indexed(uint32_t prim, uint32_t fvf, uint32_t verts, uint32_t stride, uint32_t nv,
+                         uint32_t indices, uint32_t ni, RVertex *cache, const Decoded *cd);
+
 /* `cache`, when set, is the decoded copy of the vertices at `verts` (with `cd` its format). */
 static void draw(uint32_t prim, uint32_t fvf, uint32_t verts, uint32_t stride, uint32_t nv,
                  uint32_t indices, uint32_t ni, RVertex *cache, const Decoded *cd)
 {
     if ((fvf & 0x0Eu) == 0x4u && !g_rs.stage[0].texture && igi_skip_untextured_2d())
         return;
+    PROF_SECTION(PROF_H_INDEX);
+    draw_indexed(prim, fvf, verts, stride, nv, indices, ni, cache, cd);
+    PROF_SECTION_END;
+}
+
+static void draw_indexed(uint32_t prim, uint32_t fvf, uint32_t verts, uint32_t stride, uint32_t nv,
+                         uint32_t indices, uint32_t ni, RVertex *cache, const Decoded *cd)
+{
     Decoded d;
     if (indices && ni) {
         /* D3D passes the whole vertex buffer size; decode only the range the
