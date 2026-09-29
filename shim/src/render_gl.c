@@ -16,6 +16,208 @@
 
 RenderState g_rs;
 
+/* ---- GL state cache ------------------------------------------------------
+ * D3D state is re-applied before every draw. Forwarding redundant calls is
+ * cheap on desktop GL but on vitaGL most of them invalidate the generated
+ * fixed-function shaders, so only real changes reach GL.
+ */
+#define CACHE_SLOTS 128
+typedef struct CacheSlot {
+    uint32_t key;
+    int valid;
+    float v[4];
+} CacheSlot;
+static CacheSlot cache[CACHE_SLOTS];
+static GLenum cur_unit = GL_TEXTURE0, cur_client_unit = GL_TEXTURE0;
+
+/* Returns 1 if the value changed (and records it). */
+static int cache_set(uint32_t key, const float *v, int n)
+{
+    uint32_t h = (key * 2654435761u) >> 25;   /* 7 bits */
+    for (uint32_t i = 0; i < CACHE_SLOTS; i++) {
+        CacheSlot *s = &cache[(h + i) % CACHE_SLOTS];
+        if (s->valid && s->key == key) {
+            if (!memcmp(s->v, v, (size_t)n * sizeof(float)))
+                return 0;
+            memcpy(s->v, v, (size_t)n * sizeof(float));
+            return 1;
+        }
+        if (!s->valid) {
+            s->valid = 1;
+            s->key = key;
+            memset(s->v, 0, sizeof(s->v));
+            memcpy(s->v, v, (size_t)n * sizeof(float));
+            return 1;
+        }
+    }
+    return 1;   /* table full: never skip */
+}
+
+static uint32_t unit_key(GLenum cap)
+{
+    /* Per-unit capabilities carry the unit in the high bits. */
+    if (cap == GL_TEXTURE_2D)
+        return cap | ((uint32_t)(cur_unit - GL_TEXTURE0) << 24);
+    if (cap == GL_TEXTURE_COORD_ARRAY)
+        return cap | ((uint32_t)(cur_client_unit - GL_TEXTURE0) << 24);
+    return cap;
+}
+
+static void c_enable(GLenum cap, int on)
+{
+    float v = (float)on;
+    if (!cache_set(0x10000000u ^ unit_key(cap), &v, 1))
+        return;
+    if (on)
+        (glEnable)(cap);
+    else
+        (glDisable)(cap);
+}
+
+static void c_client(GLenum cap, int on)
+{
+    float v = (float)on;
+    if (!cache_set(0x20000000u ^ unit_key(cap), &v, 1))
+        return;
+    if (on)
+        (glEnableClientState)(cap);
+    else
+        (glDisableClientState)(cap);
+}
+
+static void c_blend(GLenum s, GLenum d)
+{
+    float v[2] = { (float)s, (float)d };
+    if (cache_set(0x30000001u, v, 2))
+        (glBlendFunc)(s, d);
+}
+
+static void c_depthfunc(GLenum f)
+{
+    float v = (float)f;
+    if (cache_set(0x30000002u, &v, 1))
+        (glDepthFunc)(f);
+}
+
+static void c_depthmask(GLboolean m)
+{
+    float v = (float)m;
+    if (cache_set(0x30000003u, &v, 1))
+        (glDepthMask)(m);
+}
+
+static void c_alphafunc(GLenum f, GLfloat ref)
+{
+    float v[2] = { (float)f, ref };
+    if (cache_set(0x30000004u, v, 2))
+        (glAlphaFunc)(f, ref);
+}
+
+static void c_cullface(GLenum m)
+{
+    float v = (float)m;
+    if (cache_set(0x30000005u, &v, 1))
+        (glCullFace)(m);
+}
+
+static void c_frontface(GLenum m)
+{
+    float v = (float)m;
+    if (cache_set(0x30000006u, &v, 1))
+        (glFrontFace)(m);
+}
+
+static void c_shademodel(GLenum m)
+{
+    float v = (float)m;
+    if (cache_set(0x30000007u, &v, 1))
+        (glShadeModel)(m);
+}
+
+static void c_polygonmode(GLenum face, GLenum m)
+{
+    float v = (float)m;
+    (void)face;
+    if (cache_set(0x30000008u, &v, 1))
+        (glPolygonMode)(GL_FRONT_AND_BACK, m);
+}
+
+static void c_activetexture(GLenum u)
+{
+    if (u != cur_unit) {
+        cur_unit = u;
+        (glActiveTexture)(u);
+    }
+}
+
+static void c_clientactivetexture(GLenum u)
+{
+    if (u != cur_client_unit) {
+        cur_client_unit = u;
+        (glClientActiveTexture)(u);
+    }
+}
+
+static void c_texenvi(GLenum target, GLenum pname, GLint value)
+{
+    float v = (float)value;
+    if (cache_set(0x40000000u ^ ((uint32_t)(cur_unit - GL_TEXTURE0) << 20) ^ pname, &v, 1))
+        (glTexEnvi)(target, pname, value);
+}
+
+static void c_texenvf(GLenum target, GLenum pname, GLfloat value)
+{
+    if (cache_set(0x40000000u ^ ((uint32_t)(cur_unit - GL_TEXTURE0) << 20) ^ pname, &value, 1))
+        (glTexEnvf)(target, pname, value);
+}
+
+static void c_texenvfv(GLenum target, GLenum pname, const GLfloat *value)
+{
+    if (cache_set(0x40000000u ^ ((uint32_t)(cur_unit - GL_TEXTURE0) << 20) ^ pname, value, 4))
+        (glTexEnvfv)(target, pname, value);
+}
+
+static void c_fogi(GLenum pname, GLint value)
+{
+    float v = (float)value;
+    if (cache_set(0x50000000u ^ pname, &v, 1))
+        (glFogi)(pname, value);
+}
+
+static void c_fogf(GLenum pname, GLfloat value)
+{
+    if (cache_set(0x50000000u ^ pname, &value, 1))
+        (glFogf)(pname, value);
+}
+
+static void c_fogfv(GLenum pname, const GLfloat *value)
+{
+    if (cache_set(0x50000000u ^ pname, value, 4))
+        (glFogfv)(pname, value);
+}
+
+#define glEnable(c) c_enable(c, 1)
+#define glDisable(c) c_enable(c, 0)
+#define glEnableClientState(c) c_client(c, 1)
+#define glDisableClientState(c) c_client(c, 0)
+#define glBlendFunc c_blend
+#define glDepthFunc c_depthfunc
+#define glDepthMask c_depthmask
+#define glAlphaFunc c_alphafunc
+#define glCullFace c_cullface
+#define glFrontFace c_frontface
+#define glShadeModel c_shademodel
+#define glPolygonMode c_polygonmode
+#define glActiveTexture c_activetexture
+#define glClientActiveTexture c_clientactivetexture
+#define glTexEnvi c_texenvi
+#define glTexEnvf c_texenvf
+#define glTexEnvfv c_texenvfv
+#define glFogi c_fogi
+#define glFogf c_fogf
+#define glFogfv c_fogfv
+
+
 static int rt_w = 640, rt_h = 480;       /* game resolution */
 static int fb_w = 640, fb_h = 480;       /* drawable size in pixels */
 static int vp_x, vp_y, vp_w = 640, vp_h = 480;   /* game image inside the drawable (aspect kept) */
@@ -108,6 +310,10 @@ void render_begin_frame(void)
     if (vp_w != fb_w || vp_h != fb_h) {
         /* Keep the bars around the 4:3 image black. */
         glDisable(GL_SCISSOR_TEST);
+        glDisable(GL_BLEND);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_ALPHA_TEST);
+        glDisable(GL_CULL_FACE);
         glViewport(0, 0, fb_w, fb_h);
         glClearColor(0, 0, 0, 1);
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
@@ -312,7 +518,6 @@ static void draw_rgba_quad(const uint32_t *px, int w, int h, const Rect *sr, con
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-    glPushAttrib(GL_ALL_ATTRIB_BITS);
     glActiveTexture(GL_TEXTURE1);
     glDisable(GL_TEXTURE_2D);
     glActiveTexture(GL_TEXTURE0);
@@ -346,7 +551,6 @@ static void draw_rgba_quad(const uint32_t *px, int w, int h, const Rect *sr, con
     glTexCoord2f(u0, v1);
     glVertex2f((float)dr->l, (float)dr->b);
     glEnd();
-    glPopAttrib();
 }
 
 void render_blit(Surface *src, const Rect *sr, const Rect *dr, int use_ck)

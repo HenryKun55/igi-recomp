@@ -38,6 +38,13 @@ void platform_create_window(int w, int h, const char *title)
 
 void platform_show_window(int show) { (void)show; }
 void platform_set_title(const char *title) { (void)title; }
+/* Stop the audio thread (it reads guest memory) before the process goes away. */
+void platform_shutdown(void)
+{
+    SDL_Quit();
+    sceKernelExitProcess(0);
+}
+
 void platform_show_cursor(int show) { (void)show; }
 void platform_capture_mouse(int on) { (void)on; }
 

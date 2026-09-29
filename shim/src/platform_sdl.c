@@ -257,6 +257,12 @@ void platform_capture_mouse(int on)
     apply_mouse_capture();
 }
 
+/* Stop the audio thread (it reads guest memory) before the process goes away. */
+void platform_shutdown(void)
+{
+    SDL_Quit();
+}
+
 void platform_show_cursor(int show)
 {
     SDL_ShowCursor(show ? SDL_ENABLE : SDL_DISABLE);

@@ -589,9 +589,37 @@ static void draw(uint32_t prim, uint32_t fvf, uint32_t verts, uint32_t stride, u
                prim, fvf, nv, ni, g_rs.rs[28], g_rs.rs[35], g_rs.rs[140], fs, fe, g_rs.rs[34], g_rs.rs[137]);
     }
     Decoded d;
+    if (indices && ni) {
+        /* D3D passes the whole vertex buffer size; decode only the range the
+         * indices touch and rebase them (IGI draws small pieces of big buffers). */
+        static uint16_t *rebased;
+        static uint32_t rebased_cap;
+        const uint8_t *ip = g_mem + indices;
+        uint32_t lo = 0xFFFFu, hi = 0;
+        for (uint32_t i = 0; i < ni; i++) {
+            uint32_t x = (uint32_t)ip[i * 2u] | ((uint32_t)ip[i * 2u + 1u] << 8);
+            lo = x < lo ? x : lo;
+            hi = x > hi ? x : hi;
+        }
+        if (hi >= nv)
+            hi = nv ? nv - 1u : 0u;
+        if (lo > hi)
+            return;
+        if (ni > rebased_cap) {
+            rebased_cap = ni + 1024u;
+            rebased = realloc(rebased, rebased_cap * sizeof(uint16_t));
+        }
+        for (uint32_t i = 0; i < ni; i++) {
+            uint32_t x = (uint32_t)ip[i * 2u] | ((uint32_t)ip[i * 2u + 1u] << 8);
+            rebased[i] = (uint16_t)(x - lo);
+        }
+        RVertex *v = decode(fvf, verts + lo * stride, stride, hi - lo + 1u, &d);
+        render_draw((int)prim, v, hi - lo + 1u, rebased, ni, d.pretransformed, d.has_normal, d.has_color,
+                    d.has_spec, d.ntex);
+        return;
+    }
     RVertex *v = decode(fvf, verts, stride, nv, &d);
-    render_draw((int)prim, v, nv, indices ? (const uint16_t *)gptr(indices) : NULL, ni, d.pretransformed,
-                d.has_normal, d.has_color, d.has_spec, d.ntex);
+    render_draw((int)prim, v, nv, NULL, 0, d.pretransformed, d.has_normal, d.has_color, d.has_spec, d.ntex);
 }
 
 static void dev_DrawPrimitive(Ctx *c)

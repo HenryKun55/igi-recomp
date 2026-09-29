@@ -219,15 +219,19 @@ uint32_t win32_get_proc(const char *dll, const char *name)
 
 SHIM(kernel32, GetCurrentProcess) { stdcall_ret(c, 0xFFFFFFFFu, 0); }
 
+void platform_shutdown(void);
+
 SHIM(kernel32, ExitProcess)
 {
     rt_log("ExitProcess(%u)", ARG(0));
+    platform_shutdown();
     exit((int)ARG(0));
 }
 
 SHIM(kernel32, TerminateProcess)
 {
     rt_log("TerminateProcess(%u)", ARG(1));
+    platform_shutdown();
     exit((int)ARG(1));
 }
 
@@ -652,20 +656,38 @@ SHIM(kernel32, FindClose)
 
 /* ---- time --------------------------------------------------------------- */
 
-static struct timespec t0;
+#if defined(__vita__)
+#include <psp2/kernel/processmgr.h>
+static uint64_t t0_us;
 
-uint32_t win32_tick_count(void)
+static uint64_t now_us(void) { return sceKernelGetProcessTimeWide(); }
+#else
+static uint64_t t0_us;
+
+static uint64_t now_us(void)
 {
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
-    return (uint32_t)((t.tv_sec - t0.tv_sec) * 1000 + (t.tv_nsec - t0.tv_nsec) / 1000000);
+    return (uint64_t)t.tv_sec * 1000000ull + (uint64_t)t.tv_nsec / 1000ull;
+}
+#endif
+
+uint32_t win32_tick_count(void)
+{
+    return (uint32_t)((now_us() - t0_us) / 1000ull);
 }
 
 uint64_t win32_perf_counter(void)
 {
-    struct timespec t;
-    clock_gettime(CLOCK_MONOTONIC, &t);
-    return (uint64_t)(t.tv_sec - t0.tv_sec) * 1000000ull + (uint64_t)((t.tv_nsec - t0.tv_nsec) / 1000);
+    return now_us() - t0_us;
+}
+
+/* Milliseconds since start, for log timestamps (valid before kernel32_init too). */
+uint32_t win32_perf_counter_ms(void)
+{
+    if (!t0_us)
+        t0_us = now_us();
+    return (uint32_t)((now_us() - t0_us) / 1000ull);
 }
 
 SHIM(kernel32, GetTickCount) { stdcall_ret(c, win32_tick_count() + 60000u, 0); }
@@ -841,7 +863,8 @@ SHIM(kernel32, GetLocaleInfoA) { stdcall_ret(c, 0, 4); }
 
 void kernel32_init(void)
 {
-    clock_gettime(CLOCK_MONOTONIC, &t0);
+    if (!t0_us)
+        t0_us = now_us();
     cmdline = scratch_strdup(WIN_INSTALL_DIR "\\IGI.exe");
     env_block = scratch_alloc(4, 4);
     env_block_w = scratch_alloc(4, 4);

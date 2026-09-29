@@ -45,6 +45,17 @@ void platform_scripted_input(void)
     if (!init) {
         init = 1;
         script = getenv("IGI_INPUT");
+#if defined(__vita__)
+        /* No environment on the Vita: read the script from a file. */
+        static char buf[4096];
+        FILE *f = fopen("ux0:data/igi/input.txt", "r");
+        if (f) {
+            size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+            buf[n] = 0;
+            fclose(f);
+            script = buf;
+        }
+#endif
         t0 = SDL_GetTicks();
     }
     static uint8_t release_dik;

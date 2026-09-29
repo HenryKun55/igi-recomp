@@ -12,16 +12,13 @@ static Ctx g_ctx;
 
 static FILE *log_file;
 
-#include <time.h>
+void platform_shutdown(void);
+
+uint32_t win32_perf_counter_ms(void);
 
 static double log_time(void)
 {
-    static struct timespec t0;
-    struct timespec t;
-    clock_gettime(CLOCK_MONOTONIC, &t);
-    if (!t0.tv_sec)
-        t0 = t;
-    return (double)(t.tv_sec - t0.tv_sec) + (double)(t.tv_nsec - t0.tv_nsec) * 1e-9;
+    return (double)win32_perf_counter_ms() / 1000.0;
 }
 
 void rt_log(const char *fmt, ...)
@@ -62,6 +59,7 @@ void rt_fatal(Ctx *c, const char *fmt, ...)
             rt_log("    [esp+%02X] %08X", i * 4u, RD32(a));
         }
     }
+    platform_shutdown();
     exit(1);
 }
 
@@ -219,6 +217,8 @@ int main(int argc, char **argv)
     log_file = fopen("igi.log", "w");
 #endif
     snprintf(g_game_dir, sizeof(g_game_dir), "%s", dir);
+    if (log_file)
+        setvbuf(log_file, NULL, _IONBF, 0);
 
     mem_init();
     char exe[1100];
