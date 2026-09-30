@@ -767,9 +767,28 @@ static uint64_t now_us(void)
 }
 #endif
 
+/* Microseconds -> milliseconds without a 64-bit division (a library call on the
+ * Vita's CPU; the game polls the tick count thousands of times per frame): only
+ * the 32-bit delta since the previous call is divided (by a constant). */
+static uint32_t us_to_ms(uint64_t us)
+{
+    static uint64_t base_us;
+    static uint32_t base_ms;
+    uint64_t d = us - base_us;
+    if (us < base_us || d >= 0x7FFFFFFFull) {   /* rare: first call or a long gap */
+        base_ms = (uint32_t)(us / 1000ull);
+        base_us = (uint64_t)base_ms * 1000u;
+        return base_ms;
+    }
+    uint32_t dms = (uint32_t)d / 1000u;
+    base_us += (uint64_t)dms * 1000u;
+    base_ms += dms;
+    return base_ms;
+}
+
 uint32_t win32_tick_count(void)
 {
-    return (uint32_t)((now_us() - t0_us) / 1000ull);
+    return us_to_ms(now_us() - t0_us);
 }
 
 uint64_t win32_perf_counter(void)
@@ -797,7 +816,7 @@ SHIM(kernel32, GetTickCount)
     if (now - last < SPIN_GAP_US)
         g_idle_us += now - last;
     last = now;
-    stdcall_ret(c, (uint32_t)(now / 1000u) + 60000u, 0);
+    stdcall_ret(c, us_to_ms(now) + 60000u, 0);
 }
 
 SHIM(kernel32, QueryPerformanceCounter)

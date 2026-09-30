@@ -1,6 +1,7 @@
 /* Platform-independent input plumbing shared by the SDL and Vita backends. */
 #include "platform.h"
 #include "runtime.h"
+#include "shim.h"
 
 #include <SDL.h>
 #include <stdio.h>
@@ -22,7 +23,7 @@ void platform_push_key(uint8_t dik, int down)
         return;
     keyq[keyq_tail].dik = dik;
     keyq[keyq_tail].down = (uint8_t)down;
-    keyq[keyq_tail].time = SDL_GetTicks();
+    keyq[keyq_tail].time = win32_tick_count();
     keyq_tail = next;
 }
 
@@ -75,12 +76,12 @@ void platform_scripted_input(void)
             script = buf;
         }
 #endif
-        t0 = SDL_GetTicks();
+        t0 = win32_tick_count();
     }
     static uint8_t release_dik;
     static int release_lmb;
     static Uint32 release_at;
-    Uint32 now = SDL_GetTicks() - t0;
+    Uint32 now = win32_tick_count() - t0;
     static Uint32 dbg;
     if (getenv("IGI_INPUT_DEBUG") && now / 2000u != dbg) {
         dbg = now / 2000u;
