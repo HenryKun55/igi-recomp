@@ -170,6 +170,14 @@ static inline uint32_t rt_fcom(uint32_t sw, double a, double b)
 /* The operands are kept in fp_ca/fp_cb so that a following `fnstsw ax; test ah, K;
  * jcc` can branch on them directly (FuncGen.fcom_test). */
 #define FCOM(a, b) (fp_ca = (a), fp_cb = (b), fp_sw = rt_fcom(fp_sw, fp_ca, fp_cb))
+/* Lazy compare: only the operands are kept, for the tests that branch on them. */
+#define FCOMX(a, b) (fp_ca = (a), fp_cb = (b))
+/* Brings the condition codes up to date after FCOMX compares, before the status word is read. */
+#define FSYNC (fp_sw = rt_fcom(fp_sw, fp_ca, fp_cb))
+/* The same where only some paths leave the update pending (flag fp_lz). */
+#define FCOML(a, b) (fp_ca = (a), fp_cb = (b), fp_lz = 1)
+#define FCOME(a, b) (FCOM(a, b), fp_lz = 0)
+#define FSYNCL do { if (fp_lz) { FSYNC; fp_lz = 0; } } while (0)
 
 static inline uint32_t rt_fstsw(uint32_t sw, uint32_t top) { return (sw & ~0x3800u) | ((top & 7u) << 11); }
 

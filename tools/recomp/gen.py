@@ -178,6 +178,7 @@ class FuncGen:
         self.live_out = {}
         self.fused = set()
         self.fused_pairs = {}
+        self.fcom_tests = set()
         self.cur_idx = 0
         self.fdepth = {}
         self.fcalls = {}
@@ -747,6 +748,7 @@ class FuncGen:
                 nxt = last.addr + last.size
                 falls = self.falls_through(last)
             items.append((a, ins.text, code, falls, nxt))
+        items = self.drop_dead_fsw(items)
         self.compute_dirty({a: code for a, _, code, _, _ in items})
         self.fregs_used = set()
         self.need_dyn = False
@@ -756,7 +758,7 @@ class FuncGen:
             _, _, _, conflict = self.fpu_flow(self.g.fsumm, self.g.fproven)
             self.fmode = 'dynamic' if conflict or self.g.x87_force_dynamic else 'static'
             text = ' '.join(' '.join(code) for _, _, code, _, _ in items)
-            self.uses_fsw = any(t in text for t in ('fp_sw', 'FCOM(', 'XSPILL'))
+            self.uses_fsw = any(t in text for t in ('fp_sw', 'FCOM', 'FSYNC', 'XSPILL'))
             if self.fmode == 'static':
                 self.compute_fsync()
         out = self.emit_copy(items, self.fmode, 'L')
@@ -766,6 +768,103 @@ class FuncGen:
         text = '\n'.join(out)
         used = set(re.findall(r'goto ([LD]_[0-9A-F]{8});', text))
         return [line for line in out if not (line.endswith(':;') and line[:-2] not in used)]
+
+    def backward_live(self, use, kill):
+        """Backward may-liveness of one bit of state: live_out per instruction."""
+        live_in = {a: False for a in self.order}
+        live_out = {}
+        changed = True
+        while changed:
+            changed = False
+            for a in reversed(self.order):
+                out = any(live_in[s] for s in self.succ[a])
+                live_out[a] = out
+                inn = use[a] or (out and not kill[a])
+                if inn != live_in[a]:
+                    live_in[a] = inn
+                    changed = True
+        return live_out
+
+    def drop_dead_fsw(self, items):
+        """Status word dead-code elimination on the emitted code.
+
+        1. `fnstsw ax` whose result is overwritten before anything reads ax (the
+           fcom/fnstsw/test/jcc idiom once the test branches on the compared values)
+           is dropped.
+        2. Compares update the status word lazily (see below): most of them only
+           feed fused tests and are overwritten before anything reads the status
+           word (fnstsw, fxam, a call, a return...)."""
+        fn = self.fn
+        code_of = {a: code for a, _, code, _, _ in items}
+        ax_names = ('eax', 'ax', 'ah', 'al')
+        use, kill = {}, {}
+        for a in self.order:
+            ins = fn.insns[a]
+            text = ' '.join(code_of.get(a, ()))
+            base = ins.mnem.split()[-1]
+            if a in self.fcom_tests:
+                rd, wr = [], []
+            else:
+                try:
+                    rd, wr = ins.raw.regs_access()
+                except Exception:           # noqa: BLE001 - unknown to capstone: assume a use
+                    rd, wr = [X.X86_REG_EAX], []
+                rd = [self.rname(r) for r in rd]
+                wr = [self.rname(r) for r in wr]
+                if base in ('xor', 'sub') and len(ins.ops) == 2 and all(o.type == X.X86_OP_REG for o in ins.ops) \
+                        and ins.ops[0].reg == ins.ops[1].reg:
+                    rd = []                     # zeroing idiom
+            u = (any(r in ax_names for r in rd) or base in ('call', 'ret', 'retf', 'iretd', 'int', 'int3')
+                 or bool(self.exit_targets(a)) or 'SPILL' in text or 'rt_unimplemented' in text)
+            use[a] = u
+            kill[a] = not u and ('eax' in wr or 'ax' in wr)
+        ax_out = self.backward_live(use, kill)
+        dropped = set()
+        for a in self.order:
+            ins = fn.insns[a]
+            if ins.mnem == 'fnstsw' and ins.ops and ins.ops[0].type == X.X86_OP_REG \
+                    and self.rname(ins.ops[0].reg) == 'ax' and not ax_out[a] and a in code_of:
+                dropped.add(a)
+        # Lazy condition codes: compares only record their operands (FCOMX), and the
+        # status word is brought up to date (FSYNC) right before an instruction that
+        # reads it, where the last status word update on every path is a compare
+        # (fp_ca/fp_cb always hold the operands of the latest one). Where paths
+        # disagree, a run-time flag says whether the update is pending (FCOML/FSYNCL).
+        kind = {}
+        for a in self.order:
+            text = '' if a in dropped else ' '.join(code_of.get(a, ()))
+            if any(k in text for k in ('fp_sw', 'rt_fstsw', 'SPILL', 'RELOAD', 'rt_unimplemented', 'return')) \
+                    or self.exit_targets(a):
+                kind[a] = 'use'
+            elif 'FCOM(' in text:
+                kind[a] = 'lazy'
+        state = {fn.entry: 'E'}
+        work = [fn.entry]
+        while work:
+            a = work.pop()
+            k = kind.get(a)
+            out = 'L' if k == 'lazy' else 'E' if k == 'use' else state[a]
+            for s in self.succ[a]:
+                old = state.get(s)
+                new = out if old is None or old == out else 'M'
+                if new != old:
+                    state[s] = new
+                    work.append(s)
+        flag = any(kind.get(a) == 'use' and state.get(a) == 'M' for a in self.order)
+        out = []
+        for a, text, code, falls, nxt in items:
+            k = kind.get(a)
+            if a in dropped:
+                code = []
+            elif k == 'lazy':
+                code = [line.replace('FCOM(', 'FCOML(' if flag else 'FCOMX(') for line in code]
+            elif k == 'use' and code:
+                if flag:
+                    code = [line.replace('FCOM(', 'FCOME(') for line in code]
+                if state.get(a) in ('L', 'M'):
+                    code = [('FSYNCL; ' if flag else 'FSYNC; ') + code[0]] + list(code[1:])
+            out.append((a, text, code, falls, nxt))
+        return out
 
     def emit_copy(self, items, mode, prefix):
         fn = self.fn
@@ -920,6 +1019,8 @@ class FuncGen:
         if fcc is not None:
             # fcom ... fnstsw ax; test ah, K; je/jne: branch on the compared values.
             e = fcc if cc == 'e' else '!(%s)' % fcc
+            if not self.live_out[n.addr]:
+                self.fcom_tests.add(ins.addr)   # does not read ah
         elif is_test:
             e = {
                 'e': 'r == 0', 'ne': 'r != 0', 's': '(%s)r < 0' % st, 'ns': '(%s)r >= 0' % st,
@@ -976,7 +1077,12 @@ class FuncGen:
             info = self.g.x87_info(p)
             if info is not None:
                 code = ' '.join(self.emit_x87(p, bytes(p.raw.bytes)))
-                return cond if 'FCOM(' in code else None
+                if 'FCOM(' in code:
+                    return cond
+                # Loads, stores and arithmetic in between leave the status word
+                # alone (the compared values were captured in fp_ca/fp_cb).
+                if any(k in code for k in ('fp_sw', 'SPILL', 'RELOAD', 'rt_f')):
+                    return None
             cur = p
         return None
 
@@ -1820,9 +1926,12 @@ class Generator:
         if fg.fmode != 'none':
             out.append('    uint32_t fp_sw = c->fsw;')
             voids.append('fp_sw')
-        if 'FCOM(' in text or 'fp_ca' in text:
+        if 'FCOM' in text or 'FSYNC' in text or 'fp_ca' in text:
             out.append('    x87_t fp_ca = 0.0, fp_cb = 0.0;')
             voids += ['fp_ca', 'fp_cb']
+        if 'FCOML(' in text or 'FSYNCL' in text:
+            out.append('    int fp_lz = 0;')
+            voids.append('fp_lz')
         regs = sorted(fg.fregs_used)
         if regs:
             out.append('    x87_t %s;' % ', '.join('fr%d = 0.0' % k for k in regs))
