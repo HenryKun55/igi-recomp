@@ -1,9 +1,11 @@
 /* Debug support of the hand-decompiled game functions (desktop only).
  *
- * IGI_NATIVE_DUMP=FN:PREFIX[:EVERY[:COUNT]] writes the guest registers, the x87
- * state and every non-zero page of guest memory at the entry of the native
- * function FN (hex guest address) to PREFIX_N.bin, for every EVERY-th call
- * (default 200) up to COUNT files (default 4). IGI_TERRAIN_DUMP=PREFIX[:...] is
+ * IGI_NATIVE_DUMP=FN:PREFIX[:EVERY[:COUNT[:SKIP]]] writes the guest registers,
+ * the x87 state and every non-zero page of guest memory at the entry of the
+ * native function FN (hex guest address) to PREFIX_N.bin, for every EVERY-th call
+ * (default 200) after the first SKIP ones, up to COUNT files (default 4). With
+ * IGI_NATIVE_DUMP_MIN_US=T a state is kept only when that call took at least T
+ * microseconds (e.g. objects that are drawn rather than culled). IGI_TERRAIN_DUMP=PREFIX[:...] is
  * the same for the terrain renderer (0x512C30). tools/recomp/nativebench.py
  * (and terrainbench.py for the terrain) replays such a file through the
  * recompiled and the native code and compares the results.
@@ -11,7 +13,8 @@
  * IGI_NATIVE_CHECK=N[:FN[:EVERY]] runs N calls (every EVERY-th, default 1) of
  * the native function FN (default: every native function) both natively and
  * with the recompiled code from the same state, and logs the differences:
- * guest memory below CHECK_TOP outside the dead stack, eax, ecx, edx, esp, the
+ * guest memory below CHECK_TOP (the dead stack below esp included: guest code
+ * reads uninitialised locals), eax, ecx, edx, esp, the
  * callee-saved registers and the x87 stack top and live registers. The
  * recompiled result is kept.
  *
@@ -25,10 +28,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 static char prefix[900];
 static uint32_t dump_fn;
-static unsigned every = 200, count = 4, calls, written;
+static unsigned every = 200, count = 4, skip, calls, written;
+static double min_us;
 
 static uint32_t check_fn, check_every = 1, check_calls;
 static unsigned check_left;
@@ -40,10 +45,9 @@ static void wr(FILE *f, uint32_t v)
     fwrite(&v, 4, 1, f);
 }
 
-static void capture(uint32_t fn, Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax)
+/* Writes the state (guest memory at mem, registers of c with esp, ecx, eax). */
+static void write_capture(uint32_t fn, const uint8_t *mem, const Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax)
 {
-    if (fn != dump_fn || written >= count || calls++ % every != every - 1)
-        return;
     char path[1000];
     snprintf(path, sizeof(path), "%s_%u.bin", prefix, written++);
     FILE *f = fopen(path, "wb");
@@ -69,11 +73,11 @@ static void capture(uint32_t fn, Ctx *c, uint32_t esp, uint32_t ecx, uint32_t ea
     static const uint8_t zero[4096];
     uint32_t pages = 0;
     for (uint32_t a = GUEST_NULL_GUARD; a < g_guest_mem_size && a >= GUEST_NULL_GUARD; a += 4096u) {
-        if (memcmp(g_mem + a, zero, 4096) == 0)
+        if (memcmp(mem + a, zero, 4096) == 0)
             continue;
         wr(f, a);
         wr(f, 4096);
-        fwrite(g_mem + a, 4096, 1, f);
+        fwrite(mem + a, 4096, 1, f);
         pages++;
     }
     wr(f, 0);
@@ -90,13 +94,44 @@ static void capture(uint32_t fn, Ctx *c, uint32_t esp, uint32_t ecx, uint32_t ea
     }
     wr(f, 0);
     fclose(f);
-    rt_log("capture: %s (%08X, %u pages, esp %08X)", path, fn, pages, esp);
+    rt_log("capture: %s (%08X call %u, %u pages, esp %08X)", path, fn, calls, pages, esp);
+}
+
+static double now_us(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1e6 + (double)ts.tv_nsec * 1e-3;
+}
+
+/* Returns -1 (continue) or 1 when the call ran here (IGI_NATIVE_DUMP_MIN_US: the
+ * state is kept only when the call took that long). */
+static int capture(uint32_t fn, Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret)
+{
+    if (fn != dump_fn || written >= count || calls++ < skip || (calls - skip) % every != 0)
+        return -1;
+    if (!min_us) {
+        write_capture(fn, g_mem, c, esp, ecx, eax);
+        return -1;
+    }
+    static uint8_t *dump_snap;
+    if (!dump_snap && !(dump_snap = malloc(g_guest_mem_size)))
+        return -1;
+    memcpy(dump_snap + GUEST_NULL_GUARD, g_mem + GUEST_NULL_GUARD, g_guest_mem_size - GUEST_NULL_GUARD);
+    Ctx c0 = *c;
+    checking = 1;
+    double t0 = now_us();
+    *ret = rt_call_indirect(c, fn, esp, ecx, eax);
+    double t = now_us() - t0;
+    checking = 0;
+    if (t >= min_us)
+        write_capture(fn, dump_snap, &c0, esp, ecx, eax);
+    return 1;
 }
 
 /* IGI_NATIVE_CHECK: run the native and the recompiled version from the same
  * guest state and log the differences. The recompiled result is kept. */
 #define CHECK_TOP 0x10000000u
-#define CHECK_STACK 0x40000u   /* dead stack below the entry esp, not compared */
 
 static int check(uint32_t fn, Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret)
 {
@@ -125,7 +160,8 @@ static int check(uint32_t fn, Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, 
     checking = 0;
 
     unsigned n = 0;
-    uint32_t lo = esp - CHECK_STACK;
+    /* The native terrain renderer does not reproduce its 5 KiB of dead locals. */
+    uint32_t lo = fn == 0x00512C30u ? esp - 0x40000u : esp;
     for (uint32_t a = GUEST_NULL_GUARD; a < CHECK_TOP; a += 4u) {
         if (a == lo)
             a = esp;
@@ -155,8 +191,8 @@ static int hook(uint32_t fn, Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, u
 {
     if (checking)
         return -1;
-    if (prefix[0])
-        capture(fn, c, esp, ecx, eax);
+    if (prefix[0] && capture(fn, c, esp, ecx, eax, ret) >= 0)
+        return 1;
     if (check_left && (!check_fn || fn == check_fn) && check_calls++ % check_every == check_every - 1)
         return check(fn, c, esp, ecx, eax, ret);
     return -1;
@@ -197,13 +233,19 @@ void capture_init(void)
     if (p) {
         *p++ = 0;
         every = (unsigned)strtoul(p, &p, 10);
-        if (*p == ':')
-            count = (unsigned)strtoul(p + 1, NULL, 10);
+        if (*p == ':') {
+            count = (unsigned)strtoul(p + 1, &p, 10);
+            if (*p == ':')
+                skip = (unsigned)strtoul(p + 1, NULL, 10);
+        }
     }
     if (!every)
         every = 1;
+    const char *m = getenv("IGI_NATIVE_DUMP_MIN_US");
+    if (m)
+        min_us = atof(m);
     g_native_hook = hook;
-    rt_log("capture: calls of %08X to %s_N.bin, every %u, up to %u", dump_fn, prefix, every, count);
+    rt_log("capture: calls of %08X to %s_N.bin, every %u after %u, up to %u", dump_fn, prefix, every, skip, count);
 }
 #else
 void capture_init(void)

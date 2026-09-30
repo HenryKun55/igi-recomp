@@ -6,7 +6,8 @@ This runs the function's entry (f_XXXXXXXX, which holds the native hook) in
 Unicorn ARM, built with the vitasdk compiler like the Vita build, from one guest
 state twice: with g_igi_native = 0 (recompiled code) and 1 (native), and
 compares
-  - guest memory, except the dead stack below the entry esp;
+  - all of guest memory, including the stack below the entry esp (the guest's
+    dead locals: guest code reads uninitialised locals left by earlier calls);
   - eax, ecx, edx, esp, ebx, ebp, esi, edi, the x87 top, condition codes and
     the x87 registers that were live at the entry;
   - every guest call made at any depth, in order: entries of generated functions
@@ -81,7 +82,9 @@ CALL_ARGS = {}
 GSTACK = 0x02EFF000          # entry esp of synthetic states
 EXTRA = 0x800000             # mapped above the guest memory: thunk table, lock buffer
 CTX_REGS = [(0, 'eax'), (4, 'ecx'), (8, 'edx'), (12, 'ebx'), (16, 'esp'), (20, 'ebp'), (24, 'esi'), (28, 'edi')]
-STACK_SCRATCH = terrainbench.STACK_SCRATCH
+# The whole guest stack is compared, including the "dead" part below the entry
+# esp: guest functions read uninitialised locals (garbage left by earlier calls),
+# so a native function leaves its frame as the guest code does.
 
 
 class State:
@@ -332,12 +335,10 @@ def run(exe, path, fn, state, native, prof_gen=None, trace=True):
 
 def compare(ra, rb, state):
     """Differences between two runs (empty: identical)."""
-    esp = state.esp
     a, b = ra[3], rb[3]
-    lo = esp - STACK_SCRATCH
     out = []
-    if a[:lo] != b[:lo] or a[esp:] != b[esp:]:
-        for base, end in ((0, lo), (esp, len(a))):
+    if a != b:
+        for base, end in ((0, len(a)),):
             for pg in range(base, end, 4096):
                 if a[pg:pg + 4096] == b[pg:pg + 4096]:
                     continue
@@ -374,7 +375,9 @@ def fmt_call(c):
 
 
 def cases(args, fn):
-    for p in args.capture:
+    import glob
+    paths = [q for p in args.capture for q in (sorted(glob.glob(p)) or [p])]
+    for p in paths:
         cfn, state = load_capture(p)
         if cfn != fn:
             sys.exit('%s is a capture of %08X, not %08X' % (p, cfn, fn))
@@ -420,9 +423,10 @@ def main():
     ap.add_argument('rest', nargs='*')
     ap.add_argument('--synth', type=int, default=0, help='number of synthetic states')
     ap.add_argument('--seed', type=int, default=1)
-    ap.add_argument('--capture', action='append', default=[])
+    ap.add_argument('--capture', action='append', default=[], help='captured state (file or glob pattern)')
     ap.add_argument('--native', type=int, choices=[0, 1], default=1)
     ap.add_argument('--profile', metavar='GEN_DIR')
+    ap.add_argument('--trace', type=int, default=0, help='run: print the first N guest calls')
     args = ap.parse_args()
     if args.mode == 'build':
         build(args.exe, args.elf, args.rest[0])
@@ -435,6 +439,9 @@ def main():
     print('%s: status %s, ARM instructions %d, guest calls %d' % (label, r[0], r[1], len(r[5])))
     for nm in sorted(r[2], key=lambda x: -r[2][x])[:25]:
         print('  %-32s %10d' % (nm, r[2][nm]))
+    if args.trace:
+        for c in r[5][:args.trace]:
+            print('  call ' + fmt_call(c))
 
 
 if __name__ == '__main__':

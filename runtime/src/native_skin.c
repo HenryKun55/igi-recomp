@@ -17,7 +17,9 @@
  * operations in the same order, so the results are bit-identical to the
  * recompiled code (tools/recomp/nativebench.py). The guest also leaves its
  * results in two argument slots of the caller's frame (the locked pointer and
- * the first index; the last weight with rigid == 0), and so does this.
+ * the first index; the last weight with rigid == 0), and so does this; and its
+ * dead frame (saved registers, call arguments, the last values of its locals)
+ * is reproduced too, since later guest code reads uninitialised locals.
  *
  * Assumed (the guest data always satisfies it): the locked vertex buffer, a
  * separate allocation, overlaps neither the mesh nor the skeleton. A mesh of
@@ -94,88 +96,120 @@ static inline const double *bone(const uint8_t *gm, BoneCache *bc, uint32_t skel
     return bc->m;
 }
 
+/* The guest's locals at esp + 0x10..0x30 (esp after all four pushes), E - 0x24 ..
+ * E - 0x04 for the entry esp E. Their last values stay on the stack, where later
+ * guest code may read them as uninitialised locals, so they are written back. */
+enum { L_XC, L_YC, L_ZC, L_X, L_Y, L_Z, L_NX, L_NY, L_NZ, L_COUNT };
+typedef struct Locals {
+    float v[L_COUNT];
+    uint32_t set;               /* bit k: v[k] was written */
+} Locals;
+
+static void write_locals(const Locals *l, uint32_t entry_esp)
+{
+    for (int k = 0; k < L_COUNT; k++)
+        if (l->set & (1u << k))
+            native_stf(entry_esp - 0x24u + 4u * (uint32_t)k, l->v[k]);
+}
+
 /* Normal rotated by the bone (both loops of the guest compute it the same way). */
-static inline void rotate_normal(uint8_t *gm, uint32_t v, uint32_t p, const double *m)
+static inline void rotate_normal(uint8_t *gm, uint32_t v, uint32_t p, const double *m, float *nrm)
 {
     double n0 = ldf(gm, v + V_NORMAL), n1 = ldf(gm, v + V_NORMAL + 4u), n2 = ldf(gm, v + V_NORMAL + 8u);
-    stf(gm, p + 0x0Cu, (m[4] * n1 + m[5] * n2) + n0 * m[3]);
-    stf(gm, p + 0x10u, (n2 * m[8] + n1 * m[7]) + n0 * m[6]);
-    stf(gm, p + 0x14u, (m[9] * n0 + m[11] * n2) + m[10] * n1);
+    nrm[0] = (float)((m[4] * n1 + m[5] * n2) + n0 * m[3]);
+    nrm[1] = (float)((n2 * m[8] + n1 * m[7]) + n0 * m[6]);
+    nrm[2] = (float)((m[9] * n0 + m[11] * n2) + m[10] * n1);
+    memcpy(gm + p + 0x0Cu, nrm, 12);
 }
 
 /* Rounding to float, as a store and reload of the x87 value. */
 static inline double f32(double v) { return (double)(float)v; }
 
 /* rigid == 0: position by the bone, scaled by the vertex weight. */
-static void skin_weighted(uint32_t verts, uint32_t n, uint32_t skel, uint32_t p)
+static void skin_weighted(uint32_t verts, uint32_t n, uint32_t skel, uint32_t p, Locals *l)
 {
     uint8_t *const gm = g_mem;
     BoneCache bc = { 0xFFFFFFFFu, { 0 } };
+    float px = 0, py = 0, pz = 0, ty = 0, tz = 0, nrm[3] = { 0, 0, 0 };
     for (uint32_t v = verts; n != 0; n--, v += VERT_SIZE, p += OUT_SIZE) {
         const double *m = bone(gm, &bc, skel, v);
         double w = ldf(gm, v + V_WEIGHT);
         double x = ldf(gm, v), y = ldf(gm, v + 4u), z = ldf(gm, v + 8u);
-        double px = f32((x * m[3] + z * m[5]) + y * m[4]);
-        double py = f32((x * m[6] + z * m[8]) + y * m[7]);
-        double pz = f32((z * m[11] + m[10] * y) + m[9] * x);
-        stf(gm, p, (px + m[0]) * w);
-        stf(gm, p + 4u, f32(py + m[1]) * w);
-        stf(gm, p + 8u, f32(pz + m[2]) * w);
+        px = (float)((x * m[3] + z * m[5]) + y * m[4]);
+        py = (float)((x * m[6] + z * m[8]) + y * m[7]);
+        pz = (float)((z * m[11] + m[10] * y) + m[9] * x);
+        ty = (float)((double)py + m[1]);
+        tz = (float)((double)pz + m[2]);
+        stf(gm, p, ((double)px + m[0]) * w);
+        stf(gm, p + 4u, (double)ty * w);
+        stf(gm, p + 8u, (double)tz * w);
         rt_st32(gm + p + 0x18u, rt_ld32(gm + v + V_UV));
         rt_st32(gm + p + 0x1Cu, rt_ld32(gm + v + V_UV + 4u));
-        rotate_normal(gm, v, p, m);
+        rotate_normal(gm, v, p, m, nrm);
     }
+    const float last[L_COUNT] = { px, ty, tz, px, py, pz, nrm[0], nrm[1], nrm[2] };
+    memcpy(l->v, last, sizeof(last));
+    l->set = 0x1FFu;
 }
 
 /* Extra influences: weighted positions added to vertices already written. The
  * guest keeps each weight in the skeleton argument's slot (arg_slot). Returns
  * the last destination vertex (the guest's final ecx). */
-static uint32_t skin_extra(uint32_t r, uint32_t n, uint32_t skel, uint32_t ptr_slot, uint32_t arg_slot)
+static uint32_t skin_extra(uint32_t r, uint32_t n, uint32_t skel, uint32_t ptr_slot, uint32_t arg_slot, Locals *l)
 {
     uint8_t *const gm = g_mem;
     BoneCache bc = { 0xFFFFFFFFu, { 0 } };
     uint32_t dst = 0;
+    float px = 0, py = 0, pz = 0, ty = 0, tz = 0;
     for (; n != 0; n--, r += VERT_SIZE) {
         const double *m = bone(gm, &bc, skel, r);
         uint32_t ptr = rt_ld32(gm + ptr_slot);
         double x = ldf(gm, r), y = ldf(gm, r + 4u), z = ldf(gm, r + 8u);
-        double px = f32((m[5] * z + m[4] * y) + m[3] * x);
-        double py = f32((m[8] * z + m[7] * y) + m[6] * x);
-        double pz = f32((m[11] * z + m[10] * y) + m[9] * x);
-        double tx = px + m[0];
-        double ty = f32(py + m[1]);
+        px = (float)((m[5] * z + m[4] * y) + m[3] * x);
+        py = (float)((m[8] * z + m[7] * y) + m[6] * x);
+        pz = (float)((m[11] * z + m[10] * y) + m[9] * x);
+        double tx = (double)px + m[0];
+        ty = (float)((double)py + m[1]);
         rt_st32(gm + arg_slot, rt_ld32(gm + r + V_WEIGHT));
         dst = ptr + rt_ld16(gm + r + V_VERTEX) * OUT_SIZE;
-        double tz = f32(pz + m[2]);
+        tz = (float)((double)pz + m[2]);
         double w = ldf(gm, arg_slot);
         stf(gm, dst, w * tx + ldf(gm, dst));
         stf(gm, dst + 4u, w * ty + ldf(gm, dst + 4u));
         stf(gm, dst + 8u, w * tz + ldf(gm, dst + 8u));
     }
+    const float last[6] = { px, ty, tz, px, py, pz };
+    memcpy(l->v, last, sizeof(last));
+    l->set |= 0x3Fu;
     return dst;
 }
 
 /* rigid != 0: position by the bone only. Returns the last vertex's v (the
  * guest's final ecx). */
-static uint32_t skin_rigid(uint32_t verts, uint32_t n, uint32_t skel, uint32_t p)
+static uint32_t skin_rigid(uint32_t verts, uint32_t n, uint32_t skel, uint32_t p, Locals *l)
 {
     uint8_t *const gm = g_mem;
     BoneCache bc = { 0xFFFFFFFFu, { 0 } };
     uint32_t last = 0;
+    float py = 0, pz = 0, nrm[3] = { 0, 0, 0 };
     for (uint32_t v = verts; n != 0; n--, v += VERT_SIZE, p += OUT_SIZE) {
         const double *m = bone(gm, &bc, skel, v);
         double x = ldf(gm, v), y = ldf(gm, v + 4u), z = ldf(gm, v + 8u);
         double sx = (x * m[3] + z * m[5]) + y * m[4];
-        double py = f32((x * m[6] + z * m[8]) + y * m[7]);
-        double pz = f32((z * m[11] + m[10] * y) + m[9] * x);
+        py = (float)((x * m[6] + z * m[8]) + y * m[7]);
+        pz = (float)((z * m[11] + m[10] * y) + m[9] * x);
         stf(gm, p, sx + m[0]);
-        stf(gm, p + 4u, py + m[1]);
-        stf(gm, p + 8u, pz + m[2]);
-        rotate_normal(gm, v, p, m);
+        stf(gm, p + 4u, (double)py + m[1]);
+        stf(gm, p + 8u, (double)pz + m[2]);
+        rotate_normal(gm, v, p, m, nrm);
         rt_st32(gm + p + 0x18u, rt_ld32(gm + v + V_UV));
         last = rt_ld32(gm + v + V_UV + 4u);
         rt_st32(gm + p + 0x1Cu, last);
     }
+    l->v[L_Y] = py;
+    l->v[L_Z] = pz;
+    memcpy(&l->v[L_NX], nrm, sizeof(nrm));
+    l->set = 0x1F0u;
     return last;
 }
 
@@ -190,6 +224,10 @@ int rt_native_skin_mesh(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64
     if ((int32_t)RD32(mesh + MESH_NVERTS) > MAX_VERTS)
         return 0;
     const uint64_t done = (uint64_t)(esp + 4u) << 32;
+    /* Registers saved by the prologue (the guest leaves them on its dead stack). */
+    WR32(esp - 0x28u, c->r[3]);
+    WR32(esp - 0x2Cu, c->r[6]);
+    WR32(esp - 0x30u, c->r[7]);
 
     /* Lock(vb, flags, &mesh_slot, 0): the locked pointer lands in the mesh argument's slot. */
     uint32_t n = RD32(mesh + MESH_NVERTS);
@@ -231,6 +269,8 @@ int rt_native_skin_mesh(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64
         return 1;
     }
 
+    WR32(sp - 4u, c->r[5]);   /* push ebp */
+    Locals l = { { 0 }, 0 };
     uint32_t rigid = RD32(rigid_slot);
     uint32_t cnt = RD32(mesh + MESH_NVERTS);
     uint32_t verts = RD32(mesh + MESH_VERTS);
@@ -238,7 +278,7 @@ int rt_native_skin_mesh(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64
     uint32_t ret_addr;
     if (rigid == 0) {
         if ((int32_t)cnt > 0) {
-            skin_weighted(verts, cnt, skel, ptr);
+            skin_weighted(verts, cnt, skel, ptr, &l);
             base = RD32(obj_slot);
         }
         uint32_t nextra = RD32(mesh + MESH_NEXTRA);
@@ -247,13 +287,13 @@ int rt_native_skin_mesh(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64
         ecx = verts;
         ret_addr = RET_UNLOCK_RIGID;   /* the guest shares the rigid path's Unlock without influences */
         if ((int32_t)nextra > 0) {
-            ecx = skin_extra(r, nextra, skel, mesh_slot, skel_slot);
+            ecx = skin_extra(r, nextra, skel, mesh_slot, skel_slot, &l);
             ret_addr = RET_UNLOCK_SKIN;
         }
     } else {
         ecx = cnt;
         if ((int32_t)cnt > 0)
-            ecx = skin_rigid(verts, cnt, skel, ptr);
+            ecx = skin_rigid(verts, cnt, skel, ptr, &l);
         ret_addr = RET_UNLOCK_RIGID;
     }
 
@@ -262,6 +302,7 @@ int rt_native_skin_mesh(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64
     vt = RD32(vb);
     WR32(sp - 8u, vb);
     c->r[2] = vt;
+    write_locals(&l, esp);
     native_call(c, RD32(vt + D3DVB_UNLOCK), sp - 8u, ret_addr, ecx, vb);
     *ret = done | base;
     return 1;
