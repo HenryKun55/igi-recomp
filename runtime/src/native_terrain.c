@@ -21,20 +21,12 @@
  *   - morph parents and colour offsets outside the patch's own tables read zero.
  * Unreferenced stack contents (the colour table rows of morph vertices, which the
  * guest never writes) read as zero too; they are counted and logged once. */
-#include "recomp.h"
-#include "runtime.h"
+#include "native.h"
 
 #if defined(__clang__)
 /* The guest rounds after every x87 operation: no fused multiply-add. */
 #pragma STDC FP_CONTRACT OFF
 #endif
-
-int g_igi_native = 1;
-/* Debug capture of the guest state at entry (runtime/src/capture.c, desktop). */
-void (*g_native_capture)(Ctx *c, uint32_t esp);
-/* Debug self-check that runs both implementations on the live frame (capture.c). */
-int (*g_native_check)(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
-int g_native_checking;
 
 /* ---- guest globals ------------------------------------------------------ */
 
@@ -1089,13 +1081,8 @@ static void flush_batches(const Frame *f)
 
 int rt_native_terrain_render(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret)
 {
-    (void)ecx;
-    (void)eax;
-    if (g_native_capture)
-        g_native_capture(c, esp);
-    if (g_native_check && !g_native_checking)
-        return g_native_check(c, esp, ecx, eax, ret);
-    if (!g_igi_native || !terrain_supported())
+    NATIVE_ENTRY(0x00512C30u);
+    if (!terrain_supported())
         return 0;
     Frame f;
     f.c = c;

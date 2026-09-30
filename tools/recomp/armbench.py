@@ -92,6 +92,11 @@ def default_list(exe):
 
 def compile_one(args):
     src, obj, incs = args
+    # Up to date: newer than the source and every header (the flags are checked in build).
+    deps = [src] + glob.glob(os.path.join(ROOT, 'runtime/include/*.h')) + \
+        glob.glob(os.path.join(os.path.dirname(src), '*.h'))
+    if os.path.exists(obj) and os.path.getmtime(obj) > max(os.path.getmtime(d) for d in deps):
+        return
     # The stub's memmove/memset must not be turned back into calls to themselves.
     extra = ['-fno-builtin', '-fno-tree-loop-distribute-patterns'] if src.endswith('stub.c') else []
     subprocess.check_call([TOOL + 'gcc'] + CFLAGS + extra + incs + ['-c', src, '-o', obj])
@@ -101,13 +106,21 @@ def build(exe, gen_dir, out, list_file=None):
     funcs = open(list_file).read().split() if list_file else default_list(exe)
     work = out + '.d'
     os.makedirs(work, exist_ok=True)
-    with open(os.path.join(work, 'stub.c'), 'w') as f:
-        f.write(STUB)
+    flags = os.path.join(work, 'flags')
+    if not os.path.exists(flags) or open(flags).read() != ' '.join(CFLAGS):
+        for o in glob.glob(os.path.join(work, '*.o')):
+            os.remove(o)
+        with open(flags, 'w') as f:
+            f.write(' '.join(CFLAGS))
+    stub = os.path.join(work, 'stub.c')
+    if not os.path.exists(stub) or open(stub).read() != STUB:
+        with open(stub, 'w') as f:
+            f.write(STUB)
     incs = ['-I' + os.path.join(ROOT, 'runtime/include'), '-I' + gen_dir]
     srcs = sorted(glob.glob(os.path.join(gen_dir, 'funcs_*.c'))) + [
         os.path.join(gen_dir, 'import_stubs.c'), os.path.join(gen_dir, 'dispatch_table.c'),
         os.path.join(ROOT, 'runtime/src/cpu.c'), os.path.join(ROOT, 'runtime/src/crt_hle.c'),
-        os.path.join(ROOT, 'runtime/src/native_terrain.c'), os.path.join(work, 'stub.c')]
+        os.path.join(work, 'stub.c')] + sorted(glob.glob(os.path.join(ROOT, 'runtime/src/native_*.c')))
     objs = [os.path.join(work, os.path.basename(s)[:-2] + '.o') for s in srcs]
     with multiprocessing.Pool() as pool:
         pool.map(compile_one, [(s, o, incs) for s, o in zip(srcs, objs)])
