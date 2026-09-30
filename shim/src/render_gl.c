@@ -581,7 +581,8 @@ void render_begin_frame(void)
     update_letterbox();
 }
 
-/* IGI_SHOT=N: save every Nth presented frame as shot_<frame>.bmp (debugging aid). */
+/* IGI_SHOT=N: save every Nth presented frame as shot_<frame>.bmp (debugging aid); the
+ * benchmark's screenshots go to bench_shot_<measured frame>.bmp. */
 static void maybe_screenshot(void)
 {
     static int every = -1;
@@ -592,17 +593,22 @@ static void maybe_screenshot(void)
     }
     frame++;
     int forced = g_trace_next_frame == 2;
-    if (!forced && (every <= 0 || frame % (unsigned)every))
+    int bench_shot = bench_shot_due();
+    if (!forced && bench_shot < 0 && (every <= 0 || frame % (unsigned)every))
         return;
     uint8_t *px = malloc((size_t)fb_w * (size_t)fb_h * 4u);
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
     glReadPixels(0, 0, fb_w, fb_h, GL_BGRA, GL_UNSIGNED_BYTE, px);
     char name[64];
 #if defined(__vita__)
-    snprintf(name, sizeof(name), "ux0:data/igi/shot_%05u.bmp", frame);
+    const char *dir = "ux0:data/igi/";
 #else
-    snprintf(name, sizeof(name), "shot_%05u.bmp", frame);
+    const char *dir = "";
 #endif
+    if (bench_shot >= 0)
+        snprintf(name, sizeof(name), "%sbench_shot_%05d.bmp", dir, bench_shot);
+    else
+        snprintf(name, sizeof(name), "%sshot_%05u.bmp", dir, frame);
     FILE *f = fopen(name, "wb");
     if (f) {
         uint32_t size = 54u + (uint32_t)fb_w * (uint32_t)fb_h * 4u;

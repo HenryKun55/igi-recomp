@@ -8,6 +8,7 @@
 #        GAME     game data directory (default gamedata/pc)
 #        TIMEOUT  seconds before giving up (default seconds + 180)
 #        IGI_VSYNC  default 0, so the swap does not wait for the display
+#        IGI_BENCH_SHOT  screenshot every N measured frames (bench_shot_*.bmp in the run directory)
 # The run happens in $BUILD/bench (igi.log, bench_result.txt, igi_profile.txt).
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -21,7 +22,7 @@ RUN=$BUILD/bench
 [ -x "$BUILD/igi" ] || { echo "no $BUILD/igi; build first" >&2; exit 1; }
 mkdir -p "$RUN" || exit 1
 cd "$RUN" || exit 1
-rm -f bench_result.txt
+rm -f bench_result.txt bench_shot_*.bmp
 touch .bench_start
 
 IGI_VSYNC=${IGI_VSYNC:-0} IGI_BENCH=$SECS "$BUILD/igi" "$GAME" > stdout.txt 2>&1 &

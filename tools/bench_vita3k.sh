@@ -10,6 +10,8 @@
 #        MHZ      emulated CPU clock for Vita3K (default 444)
 #        VITA3K   Vita3K binary (default the local source build)
 #        TIMEOUT  seconds before giving up (default seconds + 900)
+#        SHOT     screenshot every SHOT measured frames into ux0:data/igi/bench_shot_*.bmp
+#                 (for visual checks; the read backs slow those frames down)
 #
 # Only the instance started here is killed ("Vita3K -r PIGI00001"); other Vita3K
 # instances and other apps' data are left alone.
@@ -40,7 +42,8 @@ unzip -p "$BUILD/igi.vpk" eboot.bin > "$APP/eboot.bin" || exit 1
 echo "installed $BUILD/igi.vpk eboot.bin"
 rm -f "$DATA/bench_result.txt"
 touch "$DATA/.bench_start"
-echo "$SECS" > "$DATA/bench.txt"
+rm -f "$DATA"/bench_shot_*.bmp
+echo "$SECS ${SHOT:-0}" > "$DATA/bench.txt"
 
 stop() {
     pkill -9 -f "Vita3K -r PIGI00001" 2>/dev/null
@@ -72,5 +75,8 @@ fi
 if [ "$DATA/profile.txt" -nt "$DATA/.bench_start" ]; then
     echo "---- ux0:data/igi/profile.txt (top) ----"
     head -n 40 "$DATA/profile.txt"
+fi
+if [ "${SHOT:-0}" -gt 0 ]; then
+    echo "screenshots: $(ls "$DATA"/bench_shot_*.bmp 2>/dev/null | wc -l | tr -d ' ') in $DATA"
 fi
 cat "$DATA/bench_result.txt"
