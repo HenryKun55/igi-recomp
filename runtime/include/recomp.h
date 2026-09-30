@@ -192,23 +192,63 @@ void rt_x87_mismatch(Ctx *c, uint32_t addr, uint32_t expect);
 #define X87_CHECK(expect, addr) ((void)0)
 #endif
 
-/* Round according to the rounding-control field of the control word. */
+/* Round according to the rounding-control field of the control word. Round to
+ * nearest is inline: below 2^52, adding and subtracting 2^52 to the magnitude
+ * rounds to nearest-even in the host's default rounding mode (no libm call). */
 static inline double rt_fround(const Ctx *c, double v)
 {
     switch ((c->fcw >> 10) & 3u) {
     case 1: return floor(v);
     case 2: return ceil(v);
     case 3: return trunc(v);
-    default: return nearbyint(v);
+    default: {
+        double a = fabs(v);
+        if (a < 4503599627370496.0)
+            return copysign((a + 4503599627370496.0) - 4503599627370496.0, v);
+        return v + 0.0;                         /* integral, infinite or NaN (quieted) */
+    }
     }
 }
 
-/* fist: the common case (round to nearest, |v| < 2^31 - 1) is inline: adding and
- * subtracting 1.5 * 2^52 rounds to nearest-even in the host's default rounding
- * mode, and the conversion is then exact (one VCVT on ARM). Everything else goes
- * out of line (no libm rounding calls or __aeabi_d2lz for in-range values). */
-#define RT_FIST_NEAREST(c, v) (((c)->fcw & 0x0C00u) == 0 && fabs(v) < 2147483647.0)
+/* fscale: ST(0) * 2^trunc(ST(1)). Multiplying by the power of two when it is a
+ * normal double gives the same correctly rounded result as ldexp. */
+static inline double rt_fscale(double v, double s)
+{
+    if (s > -1022.0 && s < 1024.0) {
+        uint64_t b = (uint64_t)((int32_t)s + 1023) << 52;
+        double p;
+        memcpy(&p, &b, 8);
+        return v * p;
+    }
+    return ldexp(v, (int)trunc(s));
+}
+
+/* fild m64: int64 -> double without the library conversion when the value fits
+ * in 32 bits (both conversions are exact then). */
+static inline double rt_fild64(uint64_t v)
+{
+    int32_t lo = (int32_t)(uint32_t)v;
+    if ((int64_t)lo == (int64_t)v)
+        return (double)lo;
+    return (double)(int64_t)v;
+}
+
+/* fist: the common case (round to nearest, result representable) is inline. Adding
+ * 1.5 * 2^52 rounds to nearest-even in the host's default rounding mode, and while
+ * the sum stays in [2^52, 2^53) its low mantissa bits are the rounded integer in
+ * two's complement: no conversion instruction is needed. Everything else (other
+ * rounding modes, out of range, NaN) goes out of line. */
+#define RT_FIST_NEAREST(c) (((c)->fcw & 0x0C00u) == 0)
 #define RT_ROUND_MAGIC 6755399441055744.0
+#define RT_ROUND_MAGIC_BITS 0x4338000000000000ull
+
+static inline uint64_t rt_round_bits(double v)
+{
+    double t = v + RT_ROUND_MAGIC;
+    uint64_t b;
+    memcpy(&b, &t, 8);
+    return b;
+}
 
 int64_t rt_fist64_slow(const Ctx *c, double v);
 int32_t rt_fist32_slow(const Ctx *c, double v);
@@ -216,20 +256,29 @@ int16_t rt_fist16_slow(const Ctx *c, double v);
 
 static inline int64_t rt_fist64(Ctx *c, double v)
 {
-    if (RT_FIST_NEAREST(c, v))
-        return (int32_t)((v + RT_ROUND_MAGIC) - RT_ROUND_MAGIC);
+    uint64_t b = rt_round_bits(v);
+    if (RT_FIST_NEAREST(c) && (uint32_t)(b >> 52) == 0x433u)
+        return (int64_t)(b - RT_ROUND_MAGIC_BITS);
     return rt_fist64_slow(c, v);
 }
 
+/* In int32 range exactly when the high word of the difference is the sign
+ * extension of the low word (which also implies the sum's exponent is 2^52). */
 static inline int32_t rt_fist32(Ctx *c, double v)
 {
-    if (RT_FIST_NEAREST(c, v))
-        return (int32_t)((v + RT_ROUND_MAGIC) - RT_ROUND_MAGIC);
+    uint64_t b = rt_round_bits(v);
+    uint32_t lo = (uint32_t)b, hi = (uint32_t)(b >> 32) - 0x43380000u;
+    if (RT_FIST_NEAREST(c) && hi == (uint32_t)((int32_t)lo >> 31))
+        return (int32_t)lo;
     return rt_fist32_slow(c, v);
 }
 
 static inline int16_t rt_fist16(Ctx *c, double v)
 {
+    uint64_t b = rt_round_bits(v);
+    uint32_t lo = (uint32_t)b, hi = (uint32_t)(b >> 32) - 0x43380000u;
+    if (RT_FIST_NEAREST(c) && hi == (uint32_t)((int32_t)lo >> 31) && lo + 0x8000u < 0x10000u)
+        return (int16_t)lo;
     return rt_fist16_slow(c, v);
 }
 

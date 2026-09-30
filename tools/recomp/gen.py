@@ -1702,7 +1702,7 @@ class FuncGen:
                 0xFA: 'ST(0) = rt_fsqrt(ST(0));',
                 0xFB: '{ x87_t v = ST(0); ST(0) = sin(v); fpush(c, cos(v)); fp_sw &= ~0x400u; }',
                 0xFC: 'ST(0) = rt_fround(c, ST(0));',
-                0xFD: 'ST(0) = ldexp(ST(0), (int)trunc(ST(1)));',
+                0xFD: 'ST(0) = rt_fscale(ST(0), ST(1));',
                 0xFE: 'ST(0) = sin(ST(0)); fp_sw &= ~0x400u;',
                 0xFF: 'ST(0) = cos(ST(0)); fp_sw &= ~0x400u;',
             }
@@ -1756,7 +1756,7 @@ class FuncGen:
                 if reg in (2, 3):
                     return ['PWR16(%s, (uint16_t)rt_fist16(c, ST(0)));%s' % (ep, ' fpop(c);' if reg == 3 else '')]
                 if reg == 5:
-                    return ['fpush(c, (x87_t)(int64_t)PRD64(%s));' % ep]
+                    return ['fpush(c, rt_fild64(PRD64(%s)));' % ep]
                 if reg == 7:
                     return ['PWR64(%s, (uint64_t)rt_fist64(c, ST(0))); fpop(c);' % ep]
                 raise Unsupported('DF /%d' % reg)
