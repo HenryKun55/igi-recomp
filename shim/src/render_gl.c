@@ -509,8 +509,20 @@ static uint32_t *conv(size_t n)
     return conv_buf;
 }
 
+#if defined(__vita__) && defined(IGI_PROFILE)
+/* Phase markers inside a private vitaGL built with PROF_HOOKS=1 (absent otherwise). */
+extern volatile uint32_t *vgl_prof_slot __attribute__((weak));
+extern uint32_t vgl_prof_base __attribute__((weak));
+#endif
+
 void render_init(int w, int h)
 {
+#if defined(__vita__) && defined(IGI_PROFILE)
+    if (&vgl_prof_slot && &vgl_prof_base) {
+        vgl_prof_base = PROF_H_VGL;
+        vgl_prof_slot = &rt_prof_cur;
+    }
+#endif
     rt_w = w;
     rt_h = h;
     update_letterbox();

@@ -88,8 +88,19 @@ if(VITA)
     else()
         message(STATUS "deps/vita FFmpeg not built: AVI cutscenes will be skipped (tools/build_ffmpeg_vita.sh)")
     endif()
+    # vitaGL: the private build from tools/build_vitagl_vita.sh (pinned commit plus
+    # tools/vitagl/*.patch) when present, else the SDK's.
+    set(IGI_VITAGL_DIR "${CMAKE_SOURCE_DIR}/deps/vita" CACHE PATH "Prefix of the private vitaGL build")
+    if(EXISTS "${IGI_VITAGL_DIR}/lib/libvitaGL.a")
+        message(STATUS "Using the private vitaGL in ${IGI_VITAGL_DIR}")
+        target_include_directories(igi BEFORE PRIVATE "${IGI_VITAGL_DIR}/include")
+        set(IGI_VITAGL_LIB "${IGI_VITAGL_DIR}/lib/libvitaGL.a")
+    else()
+        message(STATUS "Private vitaGL not built: using the SDK's (tools/build_vitagl_vita.sh)")
+        set(IGI_VITAGL_LIB vitaGL)
+    endif()
     target_link_libraries(igi PRIVATE igi_recomp
-        SDL2 vitaGL vitashark SceShaccCgExt mathneon taihen_stub
+        SDL2 ${IGI_VITAGL_LIB} vitashark SceShaccCgExt mathneon taihen_stub
         SceShaccCg_stub SceKernelDmacMgr_stub SceCtrl_stub SceTouch_stub SceHid_stub SceMotion_stub
         SceAudio_stub SceAudioIn_stub SceDisplay_stub SceGxm_stub SceCommonDialog_stub SceSysmodule_stub
         ScePower_stub SceAppMgr_stub SceAppUtil_stub SceIme_stub SceLibKernel_stub SceProcessmgr_stub

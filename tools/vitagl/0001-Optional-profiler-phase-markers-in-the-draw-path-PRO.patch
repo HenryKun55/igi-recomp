@@ -1,0 +1,274 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: HenryKun55 <henriqueflavio55@gmail.com>
+Date: Wed, 30 Sep 2026 13:58:36 -0300
+Subject: [PATCH 1/2] Optional profiler phase markers in the draw path
+ (PROF_HOOKS=1)
+
+---
+ Makefile        |  4 ++++
+ source/draw.c   | 40 ++++++++++++++++++++++++++++++++--------
+ source/ffp.c    | 11 +++++++++++
+ source/shared.h | 14 ++++++++++++++
+ 4 files changed, 61 insertions(+), 8 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index 9732f33..7f9fb97 100644
+--- a/Makefile
++++ b/Makefile
+@@ -20,6 +20,10 @@ ifeq ($(SOFTFP_ABI),1)
+ CFLAGS += -mfloat-abi=softfp -DHAVE_SOFTFP_ABI
+ endif
+ 
++ifeq ($(PROF_HOOKS),1)
++CFLAGS += -DVGL_PROF_HOOKS
++endif
++
+ ifeq ($(NO_DEBUG),1)
+ CFLAGS += -DSKIP_ERROR_HANDLING
+ endif
+diff --git a/source/draw.c b/source/draw.c
+index b878101..59c1bdc 100644
+--- a/source/draw.c
++++ b/source/draw.c
+@@ -24,6 +24,11 @@
+ #include "vitaGL.h"
+ 
+ GLboolean prim_is_non_native = GL_FALSE; // Flag for when a primitive not supported natively by sceGxm is used
++#ifdef VGL_PROF_HOOKS
++static volatile uint32_t vgl_prof_dummy;
++volatile uint32_t *vgl_prof_slot = &vgl_prof_dummy;
++uint32_t vgl_prof_base;
++#endif
+ 
+ #ifndef INDICES_DRAW_SPEEDHACK
+ #define setup_elements_indices(type_t) \
+@@ -154,6 +159,8 @@ GLboolean prim_is_non_native = GL_FALSE; // Flag for when a primitive not suppor
+ 
+ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
+ 	THREAD_SAFE()
++	VGL_PROF_SAVE;
++	VGL_PROF(0);
+ 
+ #ifdef HAVE_DLISTS
+ 	// Enqueueing function to a display list if one is being compiled
+@@ -176,7 +183,7 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
+ 		is_draw_legal = _glDrawArrays_CustomShadersIMPL(first, count, GL_FALSE);
+ 	else {
+ 		if (!(ffp_vertex_attrib_state & (1 << 0)))
+-			return;
++			{ VGL_PROF_RESTORE; return; }
+ 		_glDrawArrays_FixedFunctionIMPL(first, count);
+ 	}
+ 
+@@ -211,9 +218,11 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
+ 			vgl_log("%s:%d Attempting to draw a model with glDrawArrays which is too big! Consider increasing MAX_IDX_NUMBER value... (Max requested index: %d)\n", __FILE__, __LINE__, count - 1);
+ 		}
+ #endif
++		VGL_PROF(8);
+ 		sceGxmDraw(gxm_context, gxm_p, SCE_GXM_INDEX_FORMAT_U16, ptr, count);
+ 	}
+ 	restore_polygon_mode(gxm_p);
++	VGL_PROF_RESTORE;
+ }
+ 
+ void glMultiDrawArrays(GLenum mode, const GLint *first, const GLsizei *count, GLsizei drawcount) {
+@@ -330,6 +339,8 @@ void glDrawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLsizei prim
+ 
+ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *gl_indices) {
+ 	THREAD_SAFE()
++	VGL_PROF_SAVE;
++	VGL_PROF(0);
+ 
+ #ifdef HAVE_DLISTS
+ 	// Enqueueing function to a display list if one is being compiled
+@@ -368,7 +379,7 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *gl_in
+ 		is_draw_legal = _glDrawElements_CustomShadersIMPL(src, count, 0, 0, type != GL_UNSIGNED_INT ? SCE_GXM_INDEX_SOURCE_INDEX_16BIT : SCE_GXM_INDEX_SOURCE_INDEX_32BIT);
+ 	else {
+ 		if (!(ffp_vertex_attrib_state & (1 << 0)))
+-			return;
++			{ VGL_PROF_RESTORE; return; }
+ 		_glDrawElements_FixedFunctionIMPL(src, count, 0, 0, type != GL_UNSIGNED_INT ? SCE_GXM_INDEX_SOURCE_INDEX_16BIT : SCE_GXM_INDEX_SOURCE_INDEX_32BIT);
+ 	}
+ 
+@@ -377,17 +388,23 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *gl_in
+ #endif
+ 	{
+ 		if (type == GL_UNSIGNED_SHORT) {
++			VGL_PROF(7);
+ 			setup_elements_indices(uint16_t);
+-			sceGxmDraw(gxm_context, gxm_p, SCE_GXM_INDEX_FORMAT_U16, ptr, count);
++			VGL_PROF(8);
++		sceGxmDraw(gxm_context, gxm_p, SCE_GXM_INDEX_FORMAT_U16, ptr, count);
+ 		} else if (type == GL_UNSIGNED_INT) {
++			VGL_PROF(7);
+ 			setup_elements_indices(uint32_t);
+-			sceGxmDraw(gxm_context, gxm_p, SCE_GXM_INDEX_FORMAT_U32, ptr, count);
++			VGL_PROF(8);
++		sceGxmDraw(gxm_context, gxm_p, SCE_GXM_INDEX_FORMAT_U32, ptr, count);
+ 		} else {
+ 			setup_8bit_elements_indices();
+-			sceGxmDraw(gxm_context, gxm_p, SCE_GXM_INDEX_FORMAT_U16, ptr, count);
++			VGL_PROF(8);
++		sceGxmDraw(gxm_context, gxm_p, SCE_GXM_INDEX_FORMAT_U16, ptr, count);
+ 		}
+ 	}
+ 	restore_polygon_mode(gxm_p);
++	VGL_PROF_RESTORE;
+ }
+ 
+ void glDrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, const GLvoid *gl_indices, GLint baseVertex) {
+@@ -437,6 +454,8 @@ void glDrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, const GLv
+ 
+ void glDrawRangeElements(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void *gl_indices) {
+ 	THREAD_SAFE()
++	VGL_PROF_SAVE;
++	VGL_PROF(0);
+ 
+ #ifndef SKIP_ERROR_HANDLING
+ 	if (type != GL_UNSIGNED_SHORT && type != GL_UNSIGNED_INT) {
+@@ -461,7 +480,7 @@ void glDrawRangeElements(GLenum mode, GLuint start, GLuint end, GLsizei count, G
+ 		is_draw_legal = _glDrawElements_CustomShadersIMPL(src, count, end + 1, 0, type == GL_UNSIGNED_SHORT ? SCE_GXM_INDEX_SOURCE_INDEX_16BIT : SCE_GXM_INDEX_SOURCE_INDEX_32BIT);
+ 	else {
+ 		if (!(ffp_vertex_attrib_state & (1 << 0)))
+-			return;
++			{ VGL_PROF_RESTORE; return; }
+ 		_glDrawElements_FixedFunctionIMPL(src, count, end + 1, 0, type == GL_UNSIGNED_SHORT ? SCE_GXM_INDEX_SOURCE_INDEX_16BIT : SCE_GXM_INDEX_SOURCE_INDEX_32BIT);
+ 	}
+ 
+@@ -470,16 +489,21 @@ void glDrawRangeElements(GLenum mode, GLuint start, GLuint end, GLsizei count, G
+ #endif
+ 	{
+ 		if (type == GL_UNSIGNED_INT) {
++			VGL_PROF(7);
+ 			setup_elements_indices(uint32_t);
+-			sceGxmDraw(gxm_context, gxm_p, SCE_GXM_INDEX_FORMAT_U32, ptr, count);
++			VGL_PROF(8);
++		sceGxmDraw(gxm_context, gxm_p, SCE_GXM_INDEX_FORMAT_U32, ptr, count);
+ 		}
+ 		else
+ 		{
++			VGL_PROF(7);
+ 			setup_elements_indices(uint16_t);
+-			sceGxmDraw(gxm_context, gxm_p, SCE_GXM_INDEX_FORMAT_U16, ptr, count);
++			VGL_PROF(8);
++		sceGxmDraw(gxm_context, gxm_p, SCE_GXM_INDEX_FORMAT_U16, ptr, count);
+ 		}
+ 	}
+ 	restore_polygon_mode(gxm_p);
++	VGL_PROF_RESTORE;
+ }
+ 
+ void glDrawRangeElementsBaseVertex(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, void *gl_indices, GLint baseVertex) {
+diff --git a/source/ffp.c b/source/ffp.c
+index 571e624..693acae 100644
+--- a/source/ffp.c
++++ b/source/ffp.c
+@@ -420,6 +420,7 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
+ #ifdef HAVE_PROFILING
+ 	uint32_t reload_ffp_shaders_start = sceKernelGetProcessTimeLow();
+ #endif
++	VGL_PROF(1);
+ 	// Checking if mask changed
+ 	GLboolean ffp_dirty_frag_blend = ffp_blend_info.raw != blend_info.raw;
+ 	shader_mask mask = {.raw = 0};
+@@ -695,6 +696,7 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
+ 		ffp_dirty_vert = GL_FALSE;
+ 	}
+ 
++	VGL_PROF(2);
+ 	// Not going for the vertex config setup if we have aligned datas
+ 	if (!attrs && mask.num_textures == 1 && mask.lights_num == 0) {
+ 		attrs = ffp_vertex_attrib_config;
+@@ -835,9 +837,11 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
+ 	}
+ #endif
+ 
++	VGL_PROF(3);
+ 	// Creating patched vertex shader
+ 	patch_vertex_program(gxm_shader_patcher, ffp_vertex_program_id, attrs, ffp_vertex_num_params, streams, ffp_vertex_num_params, &ffp_vertex_program_patched);
+ 
++	VGL_PROF(4);
+ 	// Checking if fragment shader requires a recompilation
+ 	if (ffp_dirty_frag) {
+ 		char fname[256];
+@@ -1015,6 +1019,7 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
+ 	sceGxmSetVertexProgram(gxm_context, ffp_vertex_program_patched);
+ 	sceGxmSetFragmentProgram(gxm_context, ffp_fragment_program_patched);
+ 
++	VGL_PROF(5);
+ 	// Recalculating MVP matrix if necessary
+ 	if (mvp_modified) {
+ #ifndef HAVE_WVP_ON_GPU
+@@ -1154,6 +1159,7 @@ void _glDrawArrays_FixedFunctionIMPL(GLint first, GLsizei count) {
+ #ifdef HAVE_PROFILING
+ 	uint32_t draw_start = sceKernelGetProcessTimeLow();
+ #endif
++	VGL_PROF(6);
+ 	// Uploading textures on relative texture units
+ 	for (int i = 0; i < ffp_mask.num_textures; i++) {
+ 		texture *tex = &texture_slots[texture_units[base_texture_id + i].tex_id[texture_units[base_texture_id + i].state > 1 ? 0 : 1]];
+@@ -1182,6 +1188,7 @@ void _glDrawArrays_FixedFunctionIMPL(GLint first, GLsizei count) {
+ 		sceGxmSetFragmentTexture(gxm_context, i, &tex->gxm_tex);
+ 	}
+ 	
++	VGL_PROF(9);
+ 	// Preparing materials temp buffer if lights are enabled
+ 	float *materials;
+ 	if (ffp_lighting_streams) {
+@@ -1287,6 +1294,7 @@ void _glMultiDrawArrays_FixedFunctionIMPL(SceGxmPrimitiveType gxm_p, uint16_t *i
+ #ifdef HAVE_PROFILING
+ 	uint32_t draw_start = sceKernelGetProcessTimeLow();
+ #endif
++	VGL_PROF(6);
+ 	// Uploading textures on relative texture units
+ 	for (int i = 0; i < ffp_mask.num_textures; i++) {
+ 		texture *tex = &texture_slots[texture_units[base_texture_id + i].tex_id[texture_units[base_texture_id + i].state > 1 ? 0 : 1]];
+@@ -1315,6 +1323,7 @@ void _glMultiDrawArrays_FixedFunctionIMPL(SceGxmPrimitiveType gxm_p, uint16_t *i
+ 		sceGxmSetFragmentTexture(gxm_context, i, &tex->gxm_tex);
+ 	}
+ 	
++	VGL_PROF(9);
+ 	// Preparing materials temp buffer if lights are enabled
+ 	float *materials;
+ 	if (ffp_lighting_streams) {
+@@ -1494,6 +1503,7 @@ void _glDrawElements_FixedFunctionIMPL(uint16_t *idx_buf, GLsizei count, uint32_
+ 	}
+ #endif
+ 
++	VGL_PROF(6);
+ 	// Uploading textures on relative texture units
+ 	for (int i = 0; i < ffp_mask.num_textures; i++) {
+ 		texture *tex = &texture_slots[texture_units[base_texture_id + i].tex_id[texture_units[base_texture_id + i].state > 1 ? 0 : 1]];
+@@ -1522,6 +1532,7 @@ void _glDrawElements_FixedFunctionIMPL(uint16_t *idx_buf, GLsizei count, uint32_
+ 		sceGxmSetFragmentTexture(gxm_context, i, &tex->gxm_tex);
+ 	}
+ 
++	VGL_PROF(9);
+ 	// Preparing materials temp buffer if lights are enabled
+ 	float *materials;
+ 	if (ffp_lighting_streams) {
+diff --git a/source/shared.h b/source/shared.h
+index 903e59b..65109aa 100644
+--- a/source/shared.h
++++ b/source/shared.h
+@@ -469,6 +469,20 @@ extern GLboolean prim_is_non_native; // Flag for when a primitive not supported
+ #define patch_fragment_program sceGxmShaderPatcherCreateFragmentProgram
+ #endif
+ 
++// Optional phase markers for an external sampling profiler (VGL_PROF_HOOKS builds):
++// the application points vgl_prof_slot at the word its sampler reads.
++#ifdef VGL_PROF_HOOKS
++extern volatile uint32_t *vgl_prof_slot;
++extern uint32_t vgl_prof_base;
++#define VGL_PROF(n) (*vgl_prof_slot = vgl_prof_base + (n))
++#define VGL_PROF_SAVE uint32_t vgl_prof_prev = *vgl_prof_slot
++#define VGL_PROF_RESTORE (*vgl_prof_slot = vgl_prof_prev)
++#else
++#define VGL_PROF(n) ((void)0)
++#define VGL_PROF_SAVE
++#define VGL_PROF_RESTORE ((void)0)
++#endif
++
+ #define recalculate_normal_matrix() \
+ 	matrix3x3 inverted; \
+ 	matrix3x3 top_modelview_matrix; \
