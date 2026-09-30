@@ -34,10 +34,22 @@ STUB = r'''
 #include "recomp.h"
 #include "runtime.h"
 /* COM methods of the fake Direct3D objects: stdcall, pop 4 * k bytes of arguments
- * (k from the thunk address), return 0 (S_OK). */
+ * (thunk address: THUNK_BASE + vtable slot / 4 * 0x80 + 4 * k), return 0 (S_OK).
+ * Every call is appended to the log at guest address g_com_log (when set): count,
+ * then per call the vtable slot, k and the k arguments. */
+uint32_t g_com_log;
 static void com_stub(Ctx *c)
 {
-    uint32_t k = (g_current_thunk - THUNK_BASE) / 4u;
+    uint32_t off = g_current_thunk - THUNK_BASE;
+    uint32_t k = (off & 0x7Fu) / 4u;
+    if (g_com_log) {
+        uint32_t n = RD32(g_com_log), p = g_com_log + 4u + 4u * n;
+        WR32(p, (off >> 7) * 4u);
+        WR32(p + 4u, k);
+        for (uint32_t i = 0; i < k; i++)
+            WR32(p + 8u + 4u * i, RD32(c->r[4] + 4u + 4u * i));
+        WR32(g_com_log, n + 2u + k);
+    }
     c->r[4] += 4u + 4u * k;
     c->r[0] = 0;
 }
@@ -82,6 +94,7 @@ THUNK_BASE = 0xFE000000
 SLOTS = {0x0C: 0x10, 0x10: 4, 0x2C: 0xC, 0x34: 8, 0x50: 0xC, 0x80: 0x20, 0x8C: 0xC, 0x94: 0x10}
 
 SCENE = 0x02100000
+COM_LOG_SIZE = 0x40000
 
 
 class Mem:
@@ -128,7 +141,7 @@ def scene(npatch=12, seed=1):
     # Fake COM objects sharing one vtable.
     vt = al(0x100)
     for s in range(0, 0x100, 4):
-        m.u32(vt + s, THUNK_BASE + SLOTS.get(s, 0xC))
+        m.u32(vt + s, THUNK_BASE + s // 4 * 0x80 + SLOTS.get(s, 0xC))
     dev = al(16)
     m.u32(dev, vt)
     vb = al(16)
@@ -329,7 +342,8 @@ def funcs_of(path):
 
 class Frame:
     """Guest state at the entry of f_00512C30."""
-    def __init__(self, mem, esp, regs=None, fcw=0x27F, gsize=None):
+    def __init__(self, mem, esp, regs=None, fcw=0x27F, gsize=None, com_log=0x02F80000):
+        self.com_log = com_log      # COM call log (compared like the rest of guest memory)
         self.mem = mem
         self.esp = esp
         self.regs = regs or [0x11111111, 0x22222222, 0x33333333, 0x44444444, esp, 0x55555555, 0x66666666,
@@ -360,7 +374,7 @@ def load_frame(path):
     al = Alloc((top + 0xFFFF) & ~0xFFFF)
     vt = al(0x100)
     for s in range(0, 0x100, 4):
-        m.u32(vt + s, THUNK_BASE + SLOTS.get(s, 0xC))
+        m.u32(vt + s, THUNK_BASE + s // 4 * 0x80 + SLOTS.get(s, 0xC))
     dev = al(16)
     m.u32(dev, vt)
     vb = al(16)
@@ -368,8 +382,9 @@ def load_frame(path):
     m.u32(0x5CA114, dev)
     m.u32(0xA7F890, vb)
     m.u32(0xA7F89C, al(0x400000))
+    log = al(COM_LOG_SIZE)
     gsize = (al.p + 0xFFFFF) & ~0xFFFFF
-    return Frame(m, esp, regs, fcw, gsize)
+    return Frame(m, esp, regs, fcw, gsize, log)
 
 
 def run(exe, path, npatch, seed, prof_gen=None, prof_func='f_00512C30', native=None, frame=None, setup=None):
@@ -400,6 +415,7 @@ def run(exe, path, npatch, seed, prof_gen=None, prof_func='f_00512C30', native=N
         uc.mem_write(ab.GMEM + a, b)
     if native is not None:
         uc.mem_write(syms['g_igi_native'], struct.pack('<i', native))
+    uc.mem_write(syms['g_com_log'], struct.pack('<I', frame.com_log))
     uc.mem_write(ab.GMEM + esp, struct.pack('<I', 0xFDFDFD00))
     regs = list(frame.regs)
     regs[4] = esp

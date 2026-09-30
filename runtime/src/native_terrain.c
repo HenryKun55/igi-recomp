@@ -32,6 +32,9 @@
 int g_igi_native = 1;
 /* Debug capture of the guest state at entry (runtime/src/capture.c, desktop). */
 void (*g_native_capture)(Ctx *c, uint32_t esp);
+/* Debug self-check that runs both implementations on the live frame (capture.c). */
+int (*g_native_check)(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
+int g_native_checking;
 
 /* ---- guest globals ------------------------------------------------------ */
 
@@ -98,7 +101,7 @@ void (*g_native_capture)(Ctx *c, uint32_t esp);
 
 /* Guest functions. */
 #define FN_GET_BATCH     0x00514680u   /* batch(material, kind) */
-#define FN_TERRAIN_FLUSH 0x005144E0u
+#define FN_KIND_STATES   0x005144E0u   /* render states for batches of a kind */
 #define FN_FREE_BATCH    0x004AF960u
 
 /* COM vtable offsets. */
@@ -1047,9 +1050,8 @@ static void flush_batches(const Frame *f)
 {
     uint32_t vb = RD32(G_VBUF);
     com_call(f, vb, D3DVB_UNLOCK, 0, NULL);
-    uint32_t zero = 0;
-    guest_call_args(f->c, f->sp, FN_TERRAIN_FLUSH, 1, &zero);
     for (uint32_t kind = 0; kind < 3; kind++) {
+        guest_call_args(f->c, f->sp, FN_KIND_STATES, 1, &kind);
         for (uint32_t n = RD32(G_BATCH_COUNT); n != 0;) {
             uint32_t b = RD32(RD32(G_BATCH_INDEX) + 4u * (n - 1u));
             n--;
@@ -1091,6 +1093,8 @@ int rt_native_terrain_render(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, u
     (void)eax;
     if (g_native_capture)
         g_native_capture(c, esp);
+    if (g_native_check && !g_native_checking)
+        return g_native_check(c, esp, ecx, eax, ret);
     if (!g_igi_native || !terrain_supported())
         return 0;
     Frame f;
