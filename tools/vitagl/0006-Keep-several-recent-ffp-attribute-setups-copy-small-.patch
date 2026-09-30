@@ -5,16 +5,21 @@ Subject: [PATCH] Keep several recent ffp attribute setups; copy small blocks
  locally instead of through SceLibKernel; no per-draw memset
 
 ---
- source/ffp.c             | 91 +++++++++++++++++++++++++++++-----------
+ source/ffp.c             | 96 +++++++++++++++++++++++++++++-----------
  source/utils/mem_utils.c | 15 +++++++
  source/utils/mem_utils.h |  4 +-
- 3 files changed, 85 insertions(+), 25 deletions(-)
+ 3 files changed, 88 insertions(+), 27 deletions(-)
 
 diff --git a/source/ffp.c b/source/ffp.c
-index a6326e6..9e0efe2 100644
+index a6326e6..d41afe0 100644
 --- a/source/ffp.c
 +++ b/source/ffp.c
-@@ -582,12 +582,26 @@ typedef struct {
+@@ -578,16 +578,30 @@ typedef struct {
+ 	uint16_t attrib_state;
+ 	uint16_t color_material;
+ 	GLenum color_material_mode;
+-	SceGxmIndexSource index_type;
++	uint32_t index_type; // not the enum type: no padding bytes in the key
  	SceGxmVertexAttribute attrib_config[FFP_VERTEX_ATTRIBS_NUM];
  	SceGxmVertexStream stream_config[FFP_VERTEX_ATTRIBS_NUM];
  } ffp_binding_key;
@@ -33,7 +38,7 @@ index a6326e6..9e0efe2 100644
 +	SceGxmVertexStream *lighting_streams;
 +	int num_params;
 +	SceGxmVertexProgram *patched;
-+	SceGxmVertexAttribute attribute[FFP_VERTEX_ATTRIBS_NUM]; // ffp_vertex_attribute/stream contents
++	SceGxmVertexAttribute attribute[FFP_VERTEX_ATTRIBS_NUM]; // attrs/streams contents
 +	SceGxmVertexStream stream[FFP_VERTEX_ATTRIBS_NUM];
 +} ffp_binding_entry;
 +static ffp_binding_entry ffp_binding_cache[FFP_BINDING_CACHE_SIZE];
@@ -47,18 +52,25 @@ index a6326e6..9e0efe2 100644
  
  static inline void ffp_binding_make_key(ffp_binding_key *k, SceGxmVertexAttribute *attrs, SceGxmVertexStream *streams, uint32_t mask, SceGxmIndexSource index_type) {
  	k->attrs_in = attrs;
-@@ -600,8 +614,8 @@ static inline void ffp_binding_make_key(ffp_binding_key *k, SceGxmVertexAttribut
+@@ -599,9 +613,14 @@ static inline void ffp_binding_make_key(ffp_binding_key *k, SceGxmVertexAttribut
+ 	k->attrib_state = ffp_vertex_attrib_state;
  	k->color_material = color_material_state;
  	k->color_material_mode = color_material_mode;
- 	k->index_type = index_type;
+-	k->index_type = index_type;
 -	memcpy(k->attrib_config, ffp_vertex_attrib_config, sizeof(k->attrib_config));
 -	memcpy(k->stream_config, ffp_vertex_stream_config, sizeof(k->stream_config));
++	k->index_type = (uint32_t)index_type;
 +	vgl_fast_memcpy(k->attrib_config, ffp_vertex_attrib_config, sizeof(k->attrib_config));
 +	vgl_fast_memcpy(k->stream_config, ffp_vertex_stream_config, sizeof(k->stream_config));
++	// Outputs of the setup when it works in place on the configs (immediate path)
++	for (int i = 0; i < FFP_VERTEX_ATTRIBS_NUM; i++) {
++		k->attrib_config[i].regIndex = 0;
++		k->stream_config[i].indexSource = 0;
++	}
  }
  
  uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *streams, SceGxmIndexSource index_type) {
-@@ -871,7 +885,7 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
+@@ -871,7 +890,7 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
  			sceGxmShaderPatcherForceUnregisterProgram(gxm_shader_patcher, vert_shader_cache[vert_shader_cache_idx].id);
  			vgl_invalidate_bound_programs();
  			ffp_patch_cache_reset();
@@ -67,7 +79,7 @@ index a6326e6..9e0efe2 100644
  			ffp_frag_patch_cache_reset();
  			vgl_free(vert_shader_cache[vert_shader_cache_idx].prog);
  			vgl_free(vert_shader_cache[vert_shader_cache_idx].unif_buf);
-@@ -892,11 +906,29 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
+@@ -892,11 +911,27 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
  	VGL_PROF(2);
  	ffp_binding_key binding_key;
  	ffp_binding_make_key(&binding_key, attrs, streams, mask.raw, index_type);
@@ -84,11 +96,9 @@ index a6326e6..9e0efe2 100644
 +			if (!memcmp(&binding_key, &ffp_binding_cache[i].key, sizeof(binding_key))) {
 +				hit = &ffp_binding_cache[i];
 +				ffp_binding_last = i;
-+				// The arrays hold another setup: restore this one
-+				if (hit->attrs == ffp_vertex_attribute) {
-+					vgl_fast_memcpy(ffp_vertex_attribute, hit->attribute, hit->num_params * sizeof(SceGxmVertexAttribute));
-+					vgl_fast_memcpy(ffp_vertex_stream, hit->stream, hit->num_params * sizeof(SceGxmVertexStream));
-+				}
++				// The arrays may hold another setup: restore this one
++				vgl_fast_memcpy(hit->attrs, hit->attribute, hit->num_params * sizeof(SceGxmVertexAttribute));
++				vgl_fast_memcpy(hit->streams, hit->stream, hit->num_params * sizeof(SceGxmVertexStream));
 +				break;
 +			}
 +		}
@@ -102,7 +112,7 @@ index a6326e6..9e0efe2 100644
  	} else {
  	// Not going for the vertex config setup if we have aligned datas
  	if (!attrs && mask.num_textures == 1 && mask.lights_num == 0) {
-@@ -1042,13 +1074,24 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
+@@ -1042,13 +1077,22 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
  	// Creating patched vertex shader
  	ffp_patch_vertex_program(ffp_vertex_program_id, attrs, streams, ffp_vertex_num_params, &ffp_vertex_program_patched);
  
@@ -122,10 +132,8 @@ index a6326e6..9e0efe2 100644
 +		e->lighting_streams = ffp_lighting_streams;
 +		e->num_params = ffp_vertex_num_params;
 +		e->patched = ffp_vertex_program_patched;
-+		if (attrs == ffp_vertex_attribute) {
-+			vgl_fast_memcpy(e->attribute, ffp_vertex_attribute, ffp_vertex_num_params * sizeof(SceGxmVertexAttribute));
-+			vgl_fast_memcpy(e->stream, ffp_vertex_stream, ffp_vertex_num_params * sizeof(SceGxmVertexStream));
-+		}
++		vgl_fast_memcpy(e->attribute, attrs, ffp_vertex_num_params * sizeof(SceGxmVertexAttribute));
++		vgl_fast_memcpy(e->stream, streams, ffp_vertex_num_params * sizeof(SceGxmVertexStream));
 +		ffp_binding_last = ffp_binding_next;
 +		ffp_binding_next = (ffp_binding_next + 1) % FFP_BINDING_CACHE_SIZE;
 +		if (ffp_binding_num < FFP_BINDING_CACHE_SIZE)
@@ -134,7 +142,7 @@ index a6326e6..9e0efe2 100644
  	}
  
  	VGL_PROF(4);
-@@ -1314,7 +1357,7 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
+@@ -1314,7 +1358,7 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
  					}
  				}
  			}
@@ -143,7 +151,7 @@ index a6326e6..9e0efe2 100644
  		}
  		dirty_frag_unifs = 0;
  	}
-@@ -1363,7 +1406,7 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
+@@ -1363,7 +1407,7 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
  				}
  			}
  		}
@@ -152,7 +160,7 @@ index a6326e6..9e0efe2 100644
  		dirty_vert_unifs = 0;
  	}
  #ifdef HAVE_PROFILING
-@@ -1677,7 +1720,7 @@ void _glDrawElements_FixedFunctionIMPL(uint16_t *idx_buf, GLsizei count, uint32_
+@@ -1677,7 +1721,7 @@ void _glDrawElements_FixedFunctionIMPL(uint16_t *idx_buf, GLsizei count, uint32_
  #ifdef HAVE_PROFILING
  	uint32_t draw_start = sceKernelGetProcessTimeLow();
  #endif
