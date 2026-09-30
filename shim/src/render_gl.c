@@ -230,8 +230,23 @@ static void c_clientactivetexture(GLenum u)
     }
 }
 
+/* Combiner setup last sent to each texture unit by apply_stages (see there). */
+static struct {
+    int valid;
+    uint32_t colorop, colorarg1, colorarg2, alphaop, alphaarg1, alphaarg2, factor;
+} stage_env[MAX_STAGES];
+static int in_stage_env;   /* apply_stages is sending a combiner setup */
+
+static void stage_env_touched(void)
+{
+    uint32_t u = (uint32_t)(cur_unit - GL_TEXTURE0);
+    if (!in_stage_env && u < MAX_STAGES)
+        stage_env[u].valid = 0;
+}
+
 static void c_texenvi(GLenum target, GLenum pname, GLint value)
 {
+    stage_env_touched();
     float v = (float)value;
     if (cache_set(0x40000000u ^ ((uint32_t)(cur_unit - GL_TEXTURE0) << 20) ^ pname, &v, 1))
         (glTexEnvi)(target, pname, value);
@@ -239,6 +254,7 @@ static void c_texenvi(GLenum target, GLenum pname, GLint value)
 
 static void c_texenvfv(GLenum target, GLenum pname, const GLfloat *value)
 {
+    stage_env_touched();
     if (cache_set(0x40000000u ^ ((uint32_t)(cur_unit - GL_TEXTURE0) << 20) ^ pname, value, 4)) {
         GLfloat v[4];   /* vitaGL takes a non-const pointer */
         memcpy(v, value, sizeof(v));
@@ -1385,11 +1401,28 @@ static int apply_stages(int ntex)
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wt);
             }
         }
-        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);
-        glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, tf);
-        setup_combiner(0, st->colorop, st->colorarg1, st->colorarg2);
-        setup_combiner(1, st->alphaop == 1u ? 3u : st->alphaop, st->alphaarg1,
-                       st->alphaop == 1u ? 1u : st->alphaarg2);
+        /* The combiner setup is a dozen texenv calls: skipped while this unit's
+         * inputs are the ones it was last sent with. */
+        if (!stage_env[i].valid || stage_env[i].colorop != st->colorop || stage_env[i].colorarg1 != st->colorarg1 ||
+            stage_env[i].colorarg2 != st->colorarg2 || stage_env[i].alphaop != st->alphaop ||
+            stage_env[i].alphaarg1 != st->alphaarg1 || stage_env[i].alphaarg2 != st->alphaarg2 ||
+            stage_env[i].factor != g_rs.rs[60]) {
+            in_stage_env = 1;
+            glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);
+            glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, tf);
+            setup_combiner(0, st->colorop, st->colorarg1, st->colorarg2);
+            setup_combiner(1, st->alphaop == 1u ? 3u : st->alphaop, st->alphaarg1,
+                           st->alphaop == 1u ? 1u : st->alphaarg2);
+            in_stage_env = 0;
+            stage_env[i].valid = 1;
+            stage_env[i].colorop = st->colorop;
+            stage_env[i].colorarg1 = st->colorarg1;
+            stage_env[i].colorarg2 = st->colorarg2;
+            stage_env[i].alphaop = st->alphaop;
+            stage_env[i].alphaarg1 = st->alphaarg1;
+            stage_env[i].alphaarg2 = st->alphaarg2;
+            stage_env[i].factor = g_rs.rs[60];
+        }
         (void)ntex;
     }
     glActiveTexture(GL_TEXTURE0);
