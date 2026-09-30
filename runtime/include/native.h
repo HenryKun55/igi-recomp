@@ -102,6 +102,7 @@ static inline void native_fsw_sync(NativeFsw *f, const Ctx *c)
 {
     f->sw = c->fsw;
     f->pending = 0;
+    f->a = f->b = 0.0;
 }
 
 static inline void native_fcom(NativeFsw *f, double a, double b)

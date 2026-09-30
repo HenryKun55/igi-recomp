@@ -88,6 +88,10 @@ NATIVE = {
     0x004A1570: ('rt_native_mesh_draw', [
         (0x004A1570, 3674, 'd92fcea1520b922a0f5cf1b176415cce29a3707f'),
     ]),
+    # Terrain octree walk building the patch list (runtime/src/native_quadtree.c).
+    0x004D14E0: ('rt_native_terrain_collect', [
+        (0x004D14E0, 4181, '539333ef86b2329a05cbc5d9c8c72010b388de9a'),
+    ]),
 }
 
 # Instruction emitters produce C with a few tokens that are expanded per code copy

@@ -31,6 +31,7 @@ VITASDK (default ~/vitasdk).
 """
 import argparse
 import bisect
+import math
 import os
 import random
 import struct
@@ -81,6 +82,7 @@ KIND = {'lock': 1, 'lockfail': 2, 'locknull': 3}
 CALL_ARGS = {}
 
 GSTACK = 0x02EFF000          # entry esp of synthetic states
+LIMIT = 40_000_000           # ARM instructions per run (a whole frame's terrain walk takes about 1M)
 EXTRA = 0x800000             # mapped above the guest memory: thunk table, lock buffer
 CTX_REGS = [(0, 'eax'), (4, 'ecx'), (8, 'edx'), (12, 'ebx'), (16, 'esp'), (20, 'ebp'), (24, 'esi'), (28, 'edi')]
 # The whole guest stack is compared, including the "dead" part below the entry
@@ -289,7 +291,46 @@ def synth_mesh(seed, bases):
     return st
 
 
-SYNTH = {0x0049B700: synth_skin, 0x004A1570: synth_mesh}
+def synth_tree(seed, bases):
+    """0x4D14E0: a captured frame with the camera moved and turned (a little or
+    anywhere), the field of view, frame counter (stale caches: new patch requests
+    and evictions), level-of-detail distance, height limit and the stale locals
+    randomised."""
+    rnd = random.Random(seed)
+    st = base_state(rnd, bases, 0x004D14E0)
+    m, pk = st.mem, Peek(st.mem)
+    move = rnd.choice([0.0, 1.0, 50.0, 2000.0])
+    for i in range(3):
+        m.f64(0xBCAB08 + 8 * i, pk.f64(0xBCAB08 + 8 * i) + rnd.uniform(-move, move))
+    if rnd.random() < 0.5:
+        yaw, pitch, roll = (rnd.uniform(-math.pi, math.pi) for _ in range(3))
+        cy, sy, cp, sp, cr, sr = math.cos(yaw), math.sin(yaw), math.cos(pitch), math.sin(pitch), math.cos(roll), \
+            math.sin(roll)
+        rows = [(cy * cr + sy * sp * sr, cp * sr, -sy * cr + cy * sp * sr),
+                (-cy * sr + sy * sp * cr, cp * cr, sy * sr + cy * sp * cr),
+                (sy * cp, -sp, cy * cp)]
+        for r_, row in enumerate(rows):
+            for k, v in enumerate(row):
+                m.f32(0xBCAAE0 + 12 * r_ + 4 * k, v)
+    for a in (0xBCAB20, 0xBCAB24):
+        m.f32(a, pk.f32(a) * rnd.choice([1.0, 0.5, 1.3, 2.0]))
+    fr = pk.u32(0xC10380)
+    m.u32(0xC10380, rnd.choice([fr, fr, fr + 1, fr + 7, rnd.getrandbits(16)]))
+    lod = pk.u32(0xB16C6C)
+    m.u32(0xB16C6C, rnd.choice([lod, lod // 2, lod + lod // 2, rnd.randrange(0, 64)]))
+    settings = pk.u32(0xA44344)
+    if settings and rnd.random() < 0.3:
+        lim = pk.u32(settings + 0xDFC)
+        if lim:
+            m.f64(lim, rnd.uniform(-5e8, 5e8))
+    S = ((st.esp - 4) & ~7) - 0x640
+    if rnd.random() < 0.5:
+        for off in range(0x0C, 0x100, 4):
+            m.u32(S + off, rnd.getrandbits(32))
+    return st
+
+
+SYNTH = {0x0049B700: synth_skin, 0x004A1570: synth_mesh, 0x004D14E0: synth_tree}
 
 
 # ---- running -----------------------------------------------------------------
@@ -312,7 +353,28 @@ def build(exe, gen_dir, out):
     armbench.build(exe, gen_dir, out, lst)
 
 
-def run(exe, path, fn, state, native, prof_gen=None, trace=True):
+def hot_lines(path, addrs, blocks, top=40):
+    """Executed ARM instructions per source line (host code, e.g. a native function)."""
+    import subprocess
+    cnt = {}
+    for (a, sz), n in blocks.items():
+        i0 = bisect.bisect_left(addrs, a)
+        i1 = bisect.bisect_left(addrs, a + sz)
+        for x in addrs[i0:i1]:
+            cnt[x] = cnt.get(x, 0) + n
+    xs = sorted(cnt)
+    out = subprocess.check_output([armbench.TOOL + 'addr2line', '-e', path] + ['%x' % x for x in xs],
+                                  text=True).split('\n')
+    per = {}
+    for x, line in zip(xs, out):
+        key = os.path.basename(line.split(' ')[0])
+        per[key] = per.get(key, 0) + cnt[x]
+    tot = sum(per.values())
+    for k in sorted(per, key=lambda k: -per[k])[:top]:
+        print('  %-40s %9d %5.1f%%' % (k, per[k], 100.0 * per[k] / max(1, tot)))
+
+
+def run(exe, path, fn, state, native, prof_gen=None, trace=True, hot=None):
     """(status, ARM instructions, per host function, guest memory, context, trace)."""
     ab = armbench
     from unicorn import Uc, UcError, UC_ARCH_ARM, UC_MODE_THUMB, UC_HOOK_BLOCK
@@ -399,7 +461,7 @@ def run(exe, path, fn, state, native, prof_gen=None, trace=True):
         k = bisect.bisect_right(starts, addr) - 1
         name = fsyms[k][2] if k >= 0 and addr < fsyms[k][0] + fsyms[k][1] + 4 else '?'
         per[name] = per.get(name, 0) + n
-        if name == prof_func:
+        if name == (hot or prof_func):
             blocks[(addr, size)] = blocks.get((addr, size), 0) + 1
         if not trace:
             return
@@ -415,7 +477,7 @@ def run(exe, path, fn, state, native, prof_gen=None, trace=True):
     uc.hook_add(UC_HOOK_BLOCK, hook)
     status = 'ok'
     try:
-        uc.emu_start(syms[prof_func] | 1, ab.STOP, count=400_000_000)
+        uc.emu_start(syms[prof_func] | 1, ab.STOP, count=LIMIT)
     except UcError as e:
         pc = uc.reg_read(A.UC_ARM_REG_PC)
         status = 'fault %s pc=%08X' % (e, pc)
@@ -428,7 +490,9 @@ def run(exe, path, fn, state, native, prof_gen=None, trace=True):
     out = bytearray(uc.mem_read(ab.CTX, len(ctx)))
     struct.pack_into('<I', out, 0, uc.reg_read(A.UC_ARM_REG_R0))
     struct.pack_into('<I', out, 16, uc.reg_read(A.UC_ARM_REG_R1))
-    if prof_gen:
+    if hot:
+        hot_lines(path, addrs, blocks)
+    elif prof_gen:
         terrainbench.profile(path, prof_gen, addrs, blocks)
     return status, tot[0], per, mem, bytes(out), calls
 
@@ -531,6 +595,7 @@ def main():
     ap.add_argument('--native', type=int, choices=[0, 1], default=1)
     ap.add_argument('--profile', metavar='GEN_DIR')
     ap.add_argument('--trace', type=int, default=0, help='run: print the first N guest calls')
+    ap.add_argument('--hot', metavar='FUNC', help='run: executed instructions per source line of host function FUNC')
     args = ap.parse_args()
     if args.mode == 'build':
         build(args.exe, args.elf, args.rest[0])
@@ -539,7 +604,7 @@ def main():
     if args.mode == 'diff':
         sys.exit(0 if diff_mode(args, fn) else 1)
     label, state = next(cases(args, fn))
-    r = run(args.exe, args.elf, fn, state, args.native, args.profile)
+    r = run(args.exe, args.elf, fn, state, args.native, args.profile, hot=args.hot)
     print('%s: status %s, ARM instructions %d, guest calls %d' % (label, r[0], r[1], len(r[5])))
     for nm in sorted(r[2], key=lambda x: -r[2][x])[:25]:
         print('  %-32s %10d' % (nm, r[2][nm]))
