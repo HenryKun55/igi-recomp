@@ -63,6 +63,9 @@ static inline void stdcall_ret(Ctx *c, uint32_t value, int nargs)
     c->r[4] += 4u + 4u * (uint32_t)nargs;
 }
 
+/* Guest state capture for offline tests (IGI_TERRAIN_DUMP, runtime/src/capture.c). */
+void capture_init(void);
+
 void rt_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void rt_fatal(Ctx *c, const char *fmt, ...) __attribute__((format(printf, 2, 3), noreturn));
 void rt_missing_import(Ctx *c, const char *name);

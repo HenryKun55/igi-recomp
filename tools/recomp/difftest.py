@@ -272,6 +272,7 @@ def main():
     per_form = int(sys.argv[3]) if len(sys.argv) > 3 else 3
     runs = int(sys.argv[4]) if len(sys.argv) > 4 else 20
     os.makedirs(work, exist_ok=True)
+    os.environ['IGI_NATIVE'] = '0'   # test the recompiled code, not native replacements
     g = Generator(exe)
     an = g.an
     tests = collect_forms(an, g.funcs, per_form)

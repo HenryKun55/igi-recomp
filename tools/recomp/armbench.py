@@ -53,6 +53,7 @@ STUB = r'''
 GuestFn thunk_lookup(uint32_t a) { (void)a; return NULL; }
 void rt_fatal(Ctx *c, const char *fmt, ...) { (void)c; (void)fmt; for (;;) __asm__ volatile("udf #1"); }
 void rt_probe(Ctx *c, uint32_t f) { (void)c; (void)f; }
+void rt_log(const char *fmt, ...) { (void)fmt; }
 void rt_missing_import(Ctx *c, const char *n) { (void)c; (void)n; __asm__ volatile("udf #2"); }
 int *__errno(void) { static int e; return &e; }
 void *memmove(void *d, const void *s, size_t n)
@@ -105,7 +106,8 @@ def build(exe, gen_dir, out, list_file=None):
     incs = ['-I' + os.path.join(ROOT, 'runtime/include'), '-I' + gen_dir]
     srcs = sorted(glob.glob(os.path.join(gen_dir, 'funcs_*.c'))) + [
         os.path.join(gen_dir, 'import_stubs.c'), os.path.join(gen_dir, 'dispatch_table.c'),
-        os.path.join(ROOT, 'runtime/src/cpu.c'), os.path.join(ROOT, 'runtime/src/crt_hle.c'), os.path.join(work, 'stub.c')]
+        os.path.join(ROOT, 'runtime/src/cpu.c'), os.path.join(ROOT, 'runtime/src/crt_hle.c'),
+        os.path.join(ROOT, 'runtime/src/native_terrain.c'), os.path.join(work, 'stub.c')]
     objs = [os.path.join(work, os.path.basename(s)[:-2] + '.o') for s in srcs]
     with multiprocessing.Pool() as pool:
         pool.map(compile_one, [(s, o, incs) for s, o in zip(srcs, objs)])
