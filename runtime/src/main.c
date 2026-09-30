@@ -245,6 +245,7 @@ int main(int argc, char **argv)
 
     mem_init();
     native_setting();
+    capture_init();
     char exe[1100];
     snprintf(exe, sizeof(exe), "%s/IGI.exe", g_game_dir);
     uint32_t entry = load_exe(exe);

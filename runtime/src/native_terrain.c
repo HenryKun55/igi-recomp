@@ -30,6 +30,8 @@
 #endif
 
 int g_igi_native = 1;
+/* Debug capture of the guest state at entry (runtime/src/capture.c, desktop). */
+void (*g_native_capture)(Ctx *c, uint32_t esp);
 
 /* ---- guest globals ------------------------------------------------------ */
 
@@ -1063,6 +1065,8 @@ int rt_native_terrain_render(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, u
 {
     (void)ecx;
     (void)eax;
+    if (g_native_capture)
+        g_native_capture(c, esp);
     if (!g_igi_native || !terrain_supported())
         return 0;
     Frame f;

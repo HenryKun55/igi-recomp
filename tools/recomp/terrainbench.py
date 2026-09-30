@@ -327,9 +327,56 @@ def funcs_of(path):
     return syms
 
 
+class Frame:
+    """Guest state at the entry of f_00512C30."""
+    def __init__(self, mem, esp, regs=None, fcw=0x27F, gsize=None):
+        self.mem = mem
+        self.esp = esp
+        self.regs = regs or [0x11111111, 0x22222222, 0x33333333, 0x44444444, esp, 0x55555555, 0x66666666,
+                             0x77777777]
+        self.fcw = fcw
+        self.gsize = gsize or armbench.GSIZE
+
+
+def load_frame(path):
+    """A frame captured from the game with IGI_TERRAIN_DUMP (runtime/src/capture.c).
+    The Direct3D objects are replaced by the stub ones and the vertex buffer by a
+    fresh area above the captured memory."""
+    data = open(path, 'rb').read()
+    magic, ver, esp, eax, ecx, fcw = struct.unpack_from('<6I', data, 0)
+    assert magic == 0x44544749 and ver == 1, path
+    regs = list(struct.unpack_from('<8I', data, 24))
+    m = Mem()
+    off = 56
+    top = 0
+    while True:
+        a, n = struct.unpack_from('<II', data, off)
+        off += 8
+        if not n:
+            break
+        m.raw(a, data[off:off + n])
+        off += n
+        top = max(top, a + n)
+    al = Alloc((top + 0xFFFF) & ~0xFFFF)
+    vt = al(0x100)
+    for s in range(0, 0x100, 4):
+        m.u32(vt + s, THUNK_BASE + SLOTS.get(s, 0xC))
+    dev = al(16)
+    m.u32(dev, vt)
+    vb = al(16)
+    m.u32(vb, vt)
+    m.u32(0x5CA114, dev)
+    m.u32(0xA7F890, vb)
+    m.u32(0xA7F89C, al(0x400000))
+    gsize = (al.p + 0xFFFFF) & ~0xFFFFF
+    return Frame(m, esp, regs, fcw, gsize)
+
+
 def run(exe, path, npatch, seed, prof_gen=None, prof_func='f_00512C30', native=None, frame=None, setup=None):
-    """Runs f_00512C30 on a synthetic scene (or `frame`: (Mem, esp) of a captured
-    frame). native: value for g_igi_native (None leaves the ELF's default)."""
+    """Runs f_00512C30 on a synthetic scene (or a Frame, e.g. a captured one).
+    native: value for g_igi_native (None leaves the ELF's default)."""
+    if frame is None:
+        frame = Frame(scene(npatch, seed), 0x02EFF000)
     ab = armbench
     from unicorn import Uc, UcError, UC_ARCH_ARM, UC_MODE_THUMB, UC_HOOK_BLOCK
     from unicorn import arm_const as A
@@ -345,17 +392,18 @@ def run(exe, path, npatch, seed, prof_gen=None, prof_func='f_00512C30', native=N
     uc.mem_map(ab.HSTACK - 0x100000, 0x100000)
     uc.mem_map(ab.CTX, 0x1000)
     uc.mem_map(ab.STOP, 0x1000)
-    uc.mem_map(ab.GMEM, ab.GSIZE)
+    uc.mem_map(ab.GMEM, frame.gsize)
     uc.mem_write(ab.GMEM + 0x400000, ab.guest_image(exe))
     uc.mem_write(syms['g_mem'], struct.pack('<I', ab.GMEM))
-    m, esp = frame if frame is not None else (scene(npatch, seed), 0x02EFF000)
+    m, esp = frame.mem, frame.esp
     for a, b in m.w.items():
         uc.mem_write(ab.GMEM + a, b)
     if native is not None:
         uc.mem_write(syms['g_igi_native'], struct.pack('<i', native))
     uc.mem_write(ab.GMEM + esp, struct.pack('<I', 0xFDFDFD00))
-    regs = [0x11111111, 0x22222222, 0x33333333, 0x44444444, esp, 0x55555555, 0x66666666, 0x77777777]
-    ctx = struct.pack('<8I3I4x8dIII', *regs, 0, 0, 0x00020000, *([0.0] * 8), 0, 0x27F, 0)
+    regs = list(frame.regs)
+    regs[4] = esp
+    ctx = struct.pack('<8I3I4x8dIII', *regs, 0, 0, 0x00020000, *([0.0] * 8), 0, frame.fcw, 0)
     uc.mem_write(ab.CTX, ctx)
     uc.reg_write(A.UC_ARM_REG_C1_C0_2, uc.reg_read(A.UC_ARM_REG_C1_C0_2) | (0xF << 20))
     uc.reg_write(A.UC_ARM_REG_FPEXC, 0x40000000)
@@ -390,7 +438,7 @@ def run(exe, path, npatch, seed, prof_gen=None, prof_func='f_00512C30', native=N
         status = 'fault %s pc=%08X' % (e, uc.reg_read(A.UC_ARM_REG_PC))
     if status == 'ok' and uc.reg_read(A.UC_ARM_REG_PC) & ~1 != ab.STOP:
         status = 'limit'
-    mem = bytes(uc.mem_read(ab.GMEM, ab.GSIZE))
+    mem = bytes(uc.mem_read(ab.GMEM, frame.gsize))
     out = bytearray(uc.mem_read(ab.CTX, len(ctx)))
     struct.pack_into('<I', out, 0, uc.reg_read(A.UC_ARM_REG_R0))
     struct.pack_into('<I', out, 16, uc.reg_read(A.UC_ARM_REG_R1))
@@ -480,21 +528,23 @@ def compare(ra, rb, esp):
 
 def diff_mode(args):
     """Recompiled (g_igi_native = 0) against native (1) on several scenes."""
-    seeds = range(args.seed, args.seed + args.count)
+    cases = [('frame %s' % os.path.basename(p), p) for p in args.frame] or \
+        [('seed %3d' % seed, seed) for seed in range(args.seed, args.seed + args.count)]
     fails = 0
     tot = [0, 0]
-    for seed in seeds:
-        res = [run(args.exe, args.files[0], args.patches, seed, native=k) for k in (0, 1)]
+    for label, case in cases:
+        frame = load_frame(case) if isinstance(case, str) else Frame(scene(args.patches, case), 0x02EFF000)
+        res = [run(args.exe, args.files[0], 0, 0, native=k, frame=frame) for k in (0, 1)]
         mem = res[0][3]
         verts = struct.unpack_from('<I', mem, 0xA7E078)[0]
         clips = struct.unpack_from('<I', mem, 0xA7E070)[0]
-        d = compare(res[0], res[1], 0x02EFF000)
+        d = compare(res[0], res[1], frame.esp)
         tot[0] += res[0][1]
         tot[1] += res[1][1]
         ok = not d and res[0][0] == 'ok' and res[1][0] == 'ok'
         fails += not ok
-        print('seed %3d: %s  vertices %5d clip counter %4d  ARM insns %10d -> %9d (%.1fx)%s' % (
-            seed, 'same' if ok else 'DIFFERENT', verts, clips, res[0][1], res[1][1],
+        print('%s: %s  vertices %5d clip counter %4d  ARM insns %10d -> %9d (%.1fx)%s' % (
+            label, 'same' if ok else 'DIFFERENT', verts, clips, res[0][1], res[1][1],
             res[0][1] / max(1, res[1][1]), '' if res[0][0] == res[1][0] == 'ok' else
             ' status %s / %s' % (res[0][0], res[1][0])))
         for line in d[:12]:
@@ -502,7 +552,7 @@ def diff_mode(args):
         if len(d) > 12:
             print('    ... %d differences' % len(d))
     print('%d/%d scenes identical; ARM instructions %d -> %d (%.2fx)' % (
-        len(seeds) - fails, len(seeds), tot[0], tot[1], tot[0] / max(1, tot[1])))
+        len(cases) - fails, len(cases), tot[0], tot[1], tot[0] / max(1, tot[1])))
     sys.exit(1 if fails else 0)
 
 
@@ -515,6 +565,7 @@ def main():
     ap.add_argument('--seed', type=int, default=1)
     ap.add_argument('--count', type=int, default=20, help='diff: number of scenes (seeds from --seed)')
     ap.add_argument('--native', type=int, choices=[0, 1], help='run: g_igi_native value')
+    ap.add_argument('--frame', action='append', default=[], help='diff: captured frame (IGI_TERRAIN_DUMP file)')
     ap.add_argument('--profile', metavar='GEN_DIR')
     ap.add_argument('--func', default='f_00512C30')
     args = ap.parse_args()
@@ -524,8 +575,9 @@ def main():
     if args.mode == 'diff':
         diff_mode(args)
         return
-    res = [run(args.exe, e, args.patches, args.seed, args.profile if k == 0 else None, args.func, args.native)
-           for k, e in enumerate(args.files)]
+    frame = load_frame(args.frame[0]) if args.frame else None
+    res = [run(args.exe, e, args.patches, args.seed, args.profile if k == 0 else None, args.func, args.native,
+               frame) for k, e in enumerate(args.files)]
     names = set()
     for r in res:
         names |= set(r[2])
@@ -536,7 +588,7 @@ def main():
             continue
         print('%-28s' % nm + ''.join('%12d' % r[2].get(nm, 0) for r in res))
     if len(res) == 2:
-        d = compare(res[0], res[1], 0x02EFF000)
+        d = compare(res[0], res[1], frame.esp if frame else 0x02EFF000)
         print('guest memory and context: identical' if not d else 'DIFFERENT: %d, first: %s' % (len(d), d[0]))
         sys.exit(1 if d else 0)
 
