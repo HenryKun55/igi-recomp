@@ -17,6 +17,8 @@
 #define NODE_STATE_OFFSET 0xCu       /* argument passed to the per-node setup */
 
 static uint32_t cutscene_window;     /* window object seen in the cutscene state */
+static uint32_t ui_window, ui_state = IGI_UI_NONE;   /* last UI window rendered and its state */
+static uint32_t ui_frames;           /* frames presented since a UI window was last rendered */
 static uint32_t flushing_state;      /* node state of the 2D queue entry being drawn */
 
 int igi_skip_untextured_2d(void)
@@ -31,6 +33,13 @@ int igi_skip_untextured_2d(void)
 void igi_end_frame(void)
 {
     flushing_state = 0;
+    if (++ui_frames > 2u)
+        ui_state = IGI_UI_NONE;   /* no UI window drawn lately (videos, loading) */
+}
+
+uint32_t igi_ui_state(void)
+{
+    return ui_state;
 }
 
 void rt_probe(Ctx *c, uint32_t func)
@@ -39,8 +48,17 @@ void rt_probe(Ctx *c, uint32_t func)
     switch (func) {
     case 0x00418970u: {
         uint32_t obj = RD32(sp + 4u);
-        if (RD32(obj + 0x28u) == WINDOW_STATE_CUTSCENE)
+        uint32_t state = RD32(obj + 0x28u);
+        if (state == WINDOW_STATE_CUTSCENE)
             cutscene_window = obj;
+        static int log_states = -1;
+        if (log_states < 0)
+            log_states = getenv("IGI_STATE_LOG") != NULL;
+        if (log_states && (obj != ui_window || state != ui_state))
+            rt_log("ui window %08X state %u", obj, state);
+        ui_window = obj;
+        ui_state = state;
+        ui_frames = 0;
         break;
     }
     case 0x00497700u:
