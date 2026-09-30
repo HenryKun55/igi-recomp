@@ -12,6 +12,9 @@
 #include <setjmp.h>
 #include <stdint.h>
 #include <string.h>
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
+#endif
 
 typedef struct Ctx {
     uint32_t r[8];          /* eax ecx edx ebx esp ebp esi edi */
@@ -170,6 +173,14 @@ static inline uint32_t rt_fcom(uint32_t sw, double a, double b)
 /* The operands are kept in fp_ca/fp_cb so that a following `fnstsw ax; test ah, K;
  * jcc` can branch on them directly (FuncGen.fcom_test). */
 #define FCOM(a, b) (fp_ca = (a), fp_cb = (b), fp_sw = rt_fcom(fp_sw, fp_ca, fp_cb))
+/* Lazy compare: only the operands are kept, for the tests that branch on them. */
+#define FCOMX(a, b) (fp_ca = (a), fp_cb = (b))
+/* Brings the condition codes up to date after FCOMX compares, before the status word is read. */
+#define FSYNC (fp_sw = rt_fcom(fp_sw, fp_ca, fp_cb))
+/* The same where only some paths leave the update pending (flag fp_lz). */
+#define FCOML(a, b) (fp_ca = (a), fp_cb = (b), fp_lz = 1)
+#define FCOME(a, b) (FCOM(a, b), fp_lz = 0)
+#define FSYNCL do { if (fp_lz) { FSYNC; fp_lz = 0; } } while (0)
 
 static inline uint32_t rt_fstsw(uint32_t sw, uint32_t top) { return (sw & ~0x3800u) | ((top & 7u) << 11); }
 
@@ -184,23 +195,62 @@ void rt_x87_mismatch(Ctx *c, uint32_t addr, uint32_t expect);
 #define X87_CHECK(expect, addr) ((void)0)
 #endif
 
-/* Round according to the rounding-control field of the control word. */
+/* Round according to the rounding-control field of the control word. Round to
+ * nearest is inline: below 2^52, adding and subtracting 2^52 to the magnitude
+ * rounds to nearest-even in the host's default rounding mode (no libm call). */
 static inline double rt_fround(const Ctx *c, double v)
 {
-    switch ((c->fcw >> 10) & 3u) {
-    case 1: return floor(v);
-    case 2: return ceil(v);
-    case 3: return trunc(v);
-    default: return nearbyint(v);
+    if (__builtin_expect((c->fcw & 0x0C00u) == 0, 1)) {
+        double a = fabs(v);
+        if (a < 4503599627370496.0)
+            return copysign((a + 4503599627370496.0) - 4503599627370496.0, v);
+        return v + 0.0;                         /* integral, infinite or NaN (quieted) */
     }
+    uint32_t rc = (c->fcw >> 10) & 3u;
+    if (rc == 1)
+        return floor(v);
+    return rc == 2 ? ceil(v) : trunc(v);
 }
 
-/* fist: the common case (round to nearest, |v| < 2^31 - 1) is inline: adding and
- * subtracting 1.5 * 2^52 rounds to nearest-even in the host's default rounding
- * mode, and the conversion is then exact (one VCVT on ARM). Everything else goes
- * out of line (no libm rounding calls or __aeabi_d2lz for in-range values). */
-#define RT_FIST_NEAREST(c, v) (((c)->fcw & 0x0C00u) == 0 && fabs(v) < 2147483647.0)
+/* fscale: ST(0) * 2^trunc(ST(1)). Multiplying by the power of two when it is a
+ * normal double gives the same correctly rounded result as ldexp. */
+static inline double rt_fscale(double v, double s)
+{
+    if (s > -1022.0 && s < 1024.0) {
+        uint64_t b = (uint64_t)((int32_t)s + 1023) << 52;
+        double p;
+        memcpy(&p, &b, 8);
+        return v * p;
+    }
+    return ldexp(v, (int)trunc(s));
+}
+
+/* fild m64: int64 -> double without the library conversion when the value fits
+ * in 32 bits (both conversions are exact then). */
+static inline double rt_fild64(uint64_t v)
+{
+    int32_t lo = (int32_t)(uint32_t)v;
+    if ((int64_t)lo == (int64_t)v)
+        return (double)lo;
+    return (double)(int64_t)v;
+}
+
+/* fist: the common case (round to nearest, result representable) is inline. Adding
+ * 1.5 * 2^52 rounds to nearest-even in the host's default rounding mode, and while
+ * the sum stays in [2^52, 2^53) its low mantissa bits are the rounded integer in
+ * two's complement: no conversion instruction is needed. Everything else (other
+ * rounding modes, out of range, NaN) goes out of line. */
+#define RT_FIST_NEAREST(c) (((c)->fcw & 0x0C00u) == 0)
 #define RT_ROUND_MAGIC 6755399441055744.0
+#define RT_ROUND_MAGIC_BITS 0x4338000000000000ull
+
+static inline uint64_t rt_round_bits(double v)
+{
+    double t = v + RT_ROUND_MAGIC;
+    uint64_t b;
+    memcpy(&b, &t, 8);
+    return b;
+}
 
 int64_t rt_fist64_slow(const Ctx *c, double v);
 int32_t rt_fist32_slow(const Ctx *c, double v);
@@ -208,20 +258,29 @@ int16_t rt_fist16_slow(const Ctx *c, double v);
 
 static inline int64_t rt_fist64(Ctx *c, double v)
 {
-    if (RT_FIST_NEAREST(c, v))
-        return (int32_t)((v + RT_ROUND_MAGIC) - RT_ROUND_MAGIC);
+    uint64_t b = rt_round_bits(v);
+    if (RT_FIST_NEAREST(c) && (uint32_t)(b >> 52) == 0x433u)
+        return (int64_t)(b - RT_ROUND_MAGIC_BITS);
     return rt_fist64_slow(c, v);
 }
 
+/* In int32 range exactly when the high word of the difference is the sign
+ * extension of the low word (which also implies the sum's exponent is 2^52). */
 static inline int32_t rt_fist32(Ctx *c, double v)
 {
-    if (RT_FIST_NEAREST(c, v))
-        return (int32_t)((v + RT_ROUND_MAGIC) - RT_ROUND_MAGIC);
+    uint64_t b = rt_round_bits(v);
+    uint32_t lo = (uint32_t)b, hi = (uint32_t)(b >> 32) - 0x43380000u;
+    if (RT_FIST_NEAREST(c) && hi == (uint32_t)((int32_t)lo >> 31))
+        return (int32_t)lo;
     return rt_fist32_slow(c, v);
 }
 
 static inline int16_t rt_fist16(Ctx *c, double v)
 {
+    uint64_t b = rt_round_bits(v);
+    uint32_t lo = (uint32_t)b, hi = (uint32_t)(b >> 32) - 0x43380000u;
+    if (RT_FIST_NEAREST(c) && hi == (uint32_t)((int32_t)lo >> 31) && lo + 0x8000u < 0x10000u)
+        return (int16_t)lo;
     return rt_fist16_slow(c, v);
 }
 
@@ -253,14 +312,62 @@ RtScas rt_scasb_fwd(const uint8_t *gm, uint32_t n, uint32_t di, uint32_t al);
 RtStr rt_rep_movs_slow(uint8_t *gm, uint32_t df, uint32_t n, uint32_t si, uint32_t di, uint32_t size);
 RtStr rt_rep_stos_slow(uint8_t *gm, uint32_t df, uint32_t n, uint32_t di, uint32_t v, uint32_t size);
 
-static inline RtStr rt_rep_movs(uint8_t *gm, uint32_t df, uint32_t n, uint32_t si, uint32_t di, uint32_t size)
+/* Copy of a small constant number of bytes (a multiple of 4, at most 64) that
+ * reads the whole source before writing: the result equals an element-by-element
+ * forward copy whenever the destination does not start inside the source. With
+ * NEON, unaligned 16- and 8-byte vector loads and stores. */
+static inline __attribute__((always_inline)) void rt_move_small(uint8_t *d, const uint8_t *s, uint32_t b)
+{
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+    uint8x16_t q0 = vdupq_n_u8(0), q1 = q0, q2 = q0, q3 = q0;
+    uint8x8_t h = vdup_n_u8(0);
+    uint32_t w = 0;
+    if (b >= 16u) q0 = vld1q_u8(s);
+    if (b >= 32u) q1 = vld1q_u8(s + 16);
+    if (b >= 48u) q2 = vld1q_u8(s + 32);
+    if (b >= 64u) q3 = vld1q_u8(s + 48);
+    if (b & 8u) h = vld1_u8(s + (b & ~15u));
+    if (b & 4u) w = rt_ld32(s + (b & ~7u));
+    if (b >= 16u) vst1q_u8(d, q0);
+    if (b >= 32u) vst1q_u8(d + 16, q1);
+    if (b >= 48u) vst1q_u8(d + 32, q2);
+    if (b >= 64u) vst1q_u8(d + 48, q3);
+    if (b & 8u) vst1_u8(d + (b & ~15u), h);
+    if (b & 4u) rt_st32(d + (b & ~7u), w);
+#else
+    uint8_t t[64];
+    memcpy(t, s, b);
+    memcpy(d, t, b);
+#endif
+}
+
+/* Store of a small constant number of copies of a 32-bit value (b as above). */
+static inline __attribute__((always_inline)) void rt_fill_small(uint8_t *d, uint32_t v, uint32_t b)
+{
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+    uint8x16_t q = vreinterpretq_u8_u32(vdupq_n_u32(v));
+    for (uint32_t i = 0; i + 16u <= b; i += 16u)
+        vst1q_u8(d + i, q);
+    if (b & 8u)
+        vst1_u8(d + (b & ~15u), vget_low_u8(q));
+    if (b & 4u)
+        rt_st32(d + (b & ~7u), v);
+#else
+    for (uint32_t i = 0; i < b; i += 4u)
+        rt_st32(d + i, v);
+#endif
+}
+
+static inline __attribute__((always_inline)) RtStr rt_rep_movs(uint8_t *gm, uint32_t df, uint32_t n, uint32_t si, uint32_t di, uint32_t size)
 {
     uint32_t b = n * size;
     /* Backward, empty, or the destination overlaps ahead of the source (element
      * order is observable): out of line. Otherwise a forward copy equals memmove. */
     if (df || n == 0 || di - si < b)
         return rt_rep_movs_slow(gm, df, n, si, di, size);
-    if (size == 4 && n <= 8) {
+    if (__builtin_constant_p(b) && b <= 64u && (b & 3u) == 0) {
+        rt_move_small(gm + di, gm + si, b);
+    } else if (size == 4 && n <= 8) {
         for (uint32_t i = 0; i < b; i += 4u)
             rt_st32(gm + di + i, rt_ld32(gm + si + i));
     } else {
@@ -270,12 +377,14 @@ static inline RtStr rt_rep_movs(uint8_t *gm, uint32_t df, uint32_t n, uint32_t s
     return r;
 }
 
-static inline RtStr rt_rep_stos(uint8_t *gm, uint32_t df, uint32_t n, uint32_t di, uint32_t v, uint32_t size)
+static inline __attribute__((always_inline)) RtStr rt_rep_stos(uint8_t *gm, uint32_t df, uint32_t n, uint32_t di, uint32_t v, uint32_t size)
 {
     if (df || n == 0 || size == 2)
         return rt_rep_stos_slow(gm, df, n, di, v, size);
     uint32_t b = n * size;
-    if (size == 1 || v == 0) {
+    if (size == 4 && __builtin_constant_p(b) && b <= 64u) {
+        rt_fill_small(gm + di, v, b);
+    } else if (size == 1 || v == 0) {
         memset(gm + di, (int)(v & 0xFFu), b);
     } else {
         for (uint32_t i = 0; i < b; i += 4u)
