@@ -35,6 +35,25 @@ int platform_pop_key_event(KeyEvent *out)
     return 1;
 }
 
+/* Press or release a key the way the real keyboard does: DirectInput state and
+ * buffer, plus the Win32 key messages the menus read (menu keys only). */
+void platform_key(uint8_t dik, int down)
+{
+    g_key_state[dik] = down ? 0x80 : 0;
+    platform_push_key(dik, down);
+    static const struct { uint8_t dik; uint8_t vk; } vk[] = {
+        { 0x01, 0x1B }, { 0x1C, 0x0D }, { 0xC8, 0x26 }, { 0xD0, 0x28 }, { 0xCB, 0x25 }, { 0xCD, 0x27 },
+    };
+    for (unsigned i = 0; i < sizeof(vk) / sizeof(vk[0]); i++) {
+        if (vk[i].dik != dik)
+            continue;
+        uint32_t lparam = 1u | ((uint32_t)(dik & 0x7F) << 16) | (down ? 0u : 0xC0000000u);
+        user32_post_message(down ? 0x0100u : 0x0101u, vk[i].vk, lparam);
+        if (down && (vk[i].vk == 0x0D || vk[i].vk == 0x1B))
+            user32_post_message(0x0102, vk[i].vk, lparam);   /* WM_CHAR */
+    }
+}
+
 /* IGI_INPUT="ms:action,ms:action,...": scripted input for automated testing.
  * Actions: a DIK code in hex (tap), "mx+N"/"my+N" relative mouse motion, "lmb" click. */
 void platform_scripted_input(void)
@@ -70,8 +89,7 @@ void platform_scripted_input(void)
     }
     if ((release_dik || release_lmb) && now >= release_at) {
         if (release_dik) {
-            g_key_state[release_dik] = 0;
-            platform_push_key(release_dik, 0);
+            platform_key(release_dik, 0);
             release_dik = 0;
         }
         if (release_lmb) {
@@ -113,8 +131,7 @@ void platform_scripted_input(void)
             }
         } else {
             uint8_t dik = (uint8_t)strtoul(buf, NULL, 16);
-            g_key_state[dik] = 0x80;
-            platform_push_key(dik, 1);
+            platform_key(dik, 1);
             release_dik = dik;
         }
         release_at = now + 100;
