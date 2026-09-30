@@ -153,6 +153,7 @@ typedef struct VertexBuffer {
     uint32_t cache_gen;        /* gen the decoded copy matches (0 = none) */
     struct RVertex *cache;     /* whole buffer decoded (static geometry is drawn every frame) */
     void *gl;                  /* renderer's GPU copy (render_draw_vb) */
+    float lo[3], hi[3];        /* bounds of the decoded copy */
 } VertexBuffer;
 
 static uint32_t fvf_stride(uint32_t fvf);
@@ -240,7 +241,7 @@ static void emit(uint32_t prim, uint32_t fvf, uint32_t base, uint32_t stride, co
                  const uint16_t *idx, uint32_t ni)
 {
     uint32_t pos = fvf & 0x0Eu;
-    if (pos != 0x4u) {
+    {
         GuestVerts g;
         memset(&g, 0, sizeof(g));
         g.base = g_mem + base;
@@ -250,7 +251,8 @@ static void emit(uint32_t prim, uint32_t fvf, uint32_t base, uint32_t stride, co
         g.has_color = (fvf & 0x40u) != 0;
         g.has_spec = (fvf & 0x80u) != 0;
         g.ntex = (int)((fvf >> 8) & 0xFu);
-        uint32_t o = pos == 0x2u ? 12u : 12u + ((pos - 0x4u) / 2u) * 4u;
+        g.pretransformed = pos == 0x4u;
+        uint32_t o = pos == 0x4u ? 16u : pos == 0x2u ? 12u : 12u + ((pos - 0x4u) / 2u) * 4u;
         g.nrm_off = o;
         if (g.has_normal)
             o += 12;
@@ -834,6 +836,17 @@ static RVertex *vb_cache(VertexBuffer *vb, Decoded *d)
         RVertex *v = decode(vb->fvf, vb->mem, vb->stride, NULL, vb->count, d);
         memcpy(vb->cache, v, (size_t)vb->count * sizeof(RVertex));
         vb->cache_gen = vb->gen;
+        for (int k = 0; k < 3; k++) {
+            vb->lo[k] = 1e30f;
+            vb->hi[k] = -1e30f;
+        }
+        for (uint32_t i = 0; i < vb->count; i++) {
+            const float *p = &vb->cache[i].x;
+            for (int k = 0; k < 3; k++) {
+                vb->lo[k] = p[k] < vb->lo[k] ? p[k] : vb->lo[k];
+                vb->hi[k] = p[k] > vb->hi[k] ? p[k] : vb->hi[k];
+            }
+        }
     } else {
         decode(vb->fvf, vb->mem, vb->stride, NULL, 0, d);   /* format only */
     }
@@ -855,7 +868,10 @@ static void dev_DrawPrimitiveVB(Ctx *c)
         stdcall_ret(c, D3D_OK, 6);
         return;
     }
+    if (cache)
+        render_set_bounds(vb->lo, vb->hi);
     draw(prim, vb->fvf, vb->mem + start * vb->stride, vb->stride, n, 0, 0, cache ? cache + start : NULL, &d);
+    render_set_bounds(NULL, NULL);
     stdcall_ret(c, D3D_OK, 6);
 }
 
@@ -873,7 +889,10 @@ static void dev_DrawIndexedPrimitiveVB(Ctx *c)
         stdcall_ret(c, D3D_OK, 8);
         return;
     }
+    if (cache)
+        render_set_bounds(vb->lo, vb->hi);
     draw(prim, vb->fvf, vb->mem + start * vb->stride, vb->stride, nv, idx, ni, cache ? cache + start : NULL, &d);
+    render_set_bounds(NULL, NULL);
     stdcall_ret(c, D3D_OK, 8);
 }
 

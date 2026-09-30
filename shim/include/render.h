@@ -61,6 +61,9 @@ void render_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, u
 int render_diag_no_compact(void);
 /* Diagnostic mode: decode vertex buffers on every draw instead of caching them. */
 int render_diag_no_vb_cache(void);
+/* Object-space bounds of the next render_draw's vertices (NULL: unknown); lets
+ * the near-plane test skip the per-vertex check. Cleared by render_draw. */
+void render_set_bounds(const float *lo, const float *hi);
 
 /* Untransformed vertices still in the game's own layout (guest memory). */
 typedef struct GuestVerts {
@@ -68,6 +71,7 @@ typedef struct GuestVerts {
     uint32_t stride;
     const uint32_t *src;        /* vertex i is base + src[i] * stride; NULL: consecutive */
     uint32_t nrm_off, col_off, spec_off, uv_off[MAX_STAGES], uv_bytes[MAX_STAGES];
+    int pretransformed;         /* x, y, z, rhw screen-space positions */
     int has_normal, has_color, has_spec, ntex;
 } GuestVerts;
 /* Packs straight from guest memory into the draw batch (no RVertex step).

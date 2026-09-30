@@ -3,6 +3,7 @@
  * Buffer memory lives in guest space so the game can Lock/write it directly;
  * the audio callback reads it concurrently, like a sound card would.
  */
+#include "bench.h"
 #include "com.h"
 
 #include <SDL.h>
@@ -177,6 +178,12 @@ static void mix(void *userdata, Uint8 *stream, int len)
         else if (out[f] < -1.0f)
             out[f] = -1.0f;
     }
+    /* Benchmark runs are silent (the mixing work above still happens). */
+    static int muted = -1;
+    if (muted < 0)
+        muted = bench_enabled();
+    if (muted)
+        memset(stream, 0, (size_t)len);
 }
 
 static int audio_open(void)
