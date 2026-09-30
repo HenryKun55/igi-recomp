@@ -688,10 +688,10 @@ static void draw_indexed(uint32_t prim, uint32_t fvf, uint32_t verts, uint32_t s
          * indices touch and rebase them (IGI draws small pieces of big buffers). */
         static uint16_t *rebased;
         static uint32_t rebased_cap;
-        const uint8_t *ip = g_mem + indices;
+        const uint16_t *ip = (const uint16_t *)(g_mem + indices);   /* little endian, ldrh handles alignment */
         uint32_t lo = 0xFFFFu, hi = 0;
         for (uint32_t i = 0; i < ni; i++) {
-            uint32_t x = (uint32_t)ip[i * 2u] | ((uint32_t)ip[i * 2u + 1u] << 8);
+            uint32_t x = ip[i];
             lo = x < lo ? x : lo;
             hi = x > hi ? x : hi;
         }
@@ -705,10 +705,8 @@ static void draw_indexed(uint32_t prim, uint32_t fvf, uint32_t verts, uint32_t s
         }
         uint32_t range = hi - lo + 1u;
         if (range <= ni || render_diag_no_compact()) {
-            for (uint32_t i = 0; i < ni; i++) {
-                uint32_t x = (uint32_t)ip[i * 2u] | ((uint32_t)ip[i * 2u + 1u] << 8);
-                rebased[i] = (uint16_t)(x - lo);
-            }
+            for (uint32_t i = 0; i < ni; i++)
+                rebased[i] = (uint16_t)(ip[i] - lo);
             RVertex *v = cache ? (d = *cd, cache + lo) : decode(fvf, verts + lo * stride, stride, NULL, range, &d);
             render_draw((int)prim, v, range, rebased, ni, d.pretransformed, d.has_normal, d.has_color,
                         d.has_spec, d.ntex);
@@ -735,7 +733,7 @@ static void draw_indexed(uint32_t prim, uint32_t fvf, uint32_t verts, uint32_t s
         }
         uint32_t nu = 0;
         for (uint32_t i = 0; i < ni; i++) {
-            uint32_t x = ((uint32_t)ip[i * 2u] | ((uint32_t)ip[i * 2u + 1u] << 8)) - lo;
+            uint32_t x = (uint32_t)ip[i] - lo;
             if (x >= range)
                 x = range - 1u;
             if (slot_gen[x] != gen) {

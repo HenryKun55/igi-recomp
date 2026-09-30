@@ -25,6 +25,30 @@ static void perf_swap(void);
 
 extern uint64_t win32_perf_counter(void);   /* microseconds */
 
+/* Timestamps for the per-section draw counters (DS/DT/DP/DG/DO on the overlay).
+ * Each is a system call on the Vita and a draw takes several: off unless
+ * IGI_FINE_TIMING=1 (desktop) or fine_timing=1 in igi.cfg (Vita). */
+static int fine_timing = -1;
+
+static uint64_t fine_now(void)
+{
+    if (fine_timing < 0) {
+        const char *e = getenv("IGI_FINE_TIMING");
+        fine_timing = e && e[0] == '1';
+#if defined(__vita__)
+        FILE *f = fopen("ux0:data/igi/igi.cfg", "r");
+        if (f) {
+            char buf[128];
+            while (fgets(buf, sizeof(buf), f))
+                if (strncmp(buf, "fine_timing=", 12) == 0)
+                    fine_timing = buf[12] == '1';
+            fclose(f);
+        }
+#endif
+    }
+    return fine_timing ? win32_perf_counter() : 0u;
+}
+
 /* Per-frame render counters, averaged over one second and shown by the overlay
  * (see perf_overlay_draw for the on-screen labels). */
 enum {
@@ -894,7 +918,7 @@ static uint32_t texture_get(Surface *s)
         levels_dirty |= m->dirty;
     if (s->gl_tex && !levels_dirty && !(diag_mode != DIAG_LEVEL0 && s->priv[0] == 0 && next_mip(s)))
         return s->gl_tex;
-    uint64_t t0 = win32_perf_counter();
+    uint64_t t0 = fine_now();
 
     /* Lock/Unlock marks a texture dirty even when the game only read it or wrote
      * the same pixels: compare content hashes before converting and uploading. */
@@ -925,7 +949,7 @@ static uint32_t texture_get(Surface *s)
         for (int i = 0; i < n; i++)
             lv[i]->dirty = 0;
         pc_frame[PC_TEX_SKIP]++;
-        pc_frame[PC_TEX_US] += win32_perf_counter() - t0;
+        pc_frame[PC_TEX_US] += fine_now() - t0;
         return s->gl_tex;
     }
 
@@ -956,7 +980,7 @@ static uint32_t texture_get(Surface *s)
     s->priv[0] = (uint32_t)(n - 1);   /* highest defined mip level */
     s->priv[TEXP_SAMPLER] = 0;        /* re-send the sampler state after an upload */
     pc_frame[PC_TEX_N]++;
-    pc_frame[PC_TEX_US] += win32_perf_counter() - t0;
+    pc_frame[PC_TEX_US] += fine_now() - t0;
     return s->gl_tex;
 }
 
@@ -1023,7 +1047,7 @@ static void draw_rgba_quad(const uint32_t *px, int w, int h, const Rect *sr, con
 void render_blit(Surface *src, const Rect *sr, const Rect *dr, int use_ck)
 {
     render_flush();
-    uint64_t t0 = win32_perf_counter();
+    uint64_t t0 = fine_now();
     pc_frame[PC_2D_N]++;
     VideoFrameSource *vs = src->client_mem ? video_source_for(src->mem) : NULL;
     if (vs) {
@@ -1034,7 +1058,7 @@ void render_blit(Surface *src, const Rect *sr, const Rect *dr, int use_ck)
                     (int32_t)((int64_t)sr->r * vs->width / (int32_t)src->w),
                     (int32_t)((int64_t)sr->b * vs->height / (int32_t)src->h) };
         draw_rgba_quad(px, vs->width, vs->height, &vr, dr, 0);
-        pc_frame[PC_2D_US] += win32_perf_counter() - t0;
+        pc_frame[PC_2D_US] += fine_now() - t0;
         return;
     }
     int saved_ck = src->has_ck;
@@ -1055,7 +1079,7 @@ void render_blit(Surface *src, const Rect *sr, const Rect *dr, int use_ck)
         draw_rgba_quad(px, (int)src->w, (int)src->h, sr, dr, use_ck && saved_ck);
         pc_frame[PC_2D_BYTES] += (uint64_t)src->w * src->h * 4u;
     }
-    pc_frame[PC_2D_US] += win32_perf_counter() - t0;
+    pc_frame[PC_2D_US] += fine_now() - t0;
 }
 
 /* rgba_to_pixel() through per-channel tables: no per-pixel divisions (the
@@ -1077,7 +1101,7 @@ static void packer_init(PixelPacker *pk, const PixFmt *pf)
 void render_readback(Surface *s)
 {
     render_flush();
-    uint64_t t0 = win32_perf_counter();
+    uint64_t t0 = fine_now();
     pc_frame[PC_READBACK_N]++;
     surface_alloc_mem(s);
     uint32_t *px = malloc((size_t)vp_w * (size_t)vp_h * 4u);
@@ -1107,13 +1131,13 @@ void render_readback(Surface *s)
     }
     free(fx);
     free(px);
-    pc_frame[PC_2D_US] += win32_perf_counter() - t0;
+    pc_frame[PC_2D_US] += fine_now() - t0;
 }
 
 void render_writeback(Surface *s)
 {
     render_flush();
-    uint64_t t0 = win32_perf_counter();
+    uint64_t t0 = fine_now();
     pc_frame[PC_2D_N]++;
     int ck = s->has_ck;
     s->has_ck = 0;
@@ -1123,7 +1147,7 @@ void render_writeback(Surface *s)
     Rect d = { 0, 0, rt_w, rt_h };
     draw_rgba_quad(px, (int)s->w, (int)s->h, &r, &d, 0);
     pc_frame[PC_2D_BYTES] += (uint64_t)s->w * s->h * 4u;
-    pc_frame[PC_2D_US] += win32_perf_counter() - t0;
+    pc_frame[PC_2D_US] += fine_now() - t0;
 }
 
 /* ---- 3D state ----------------------------------------------------------- */
@@ -1615,7 +1639,7 @@ static void layout_init(Layout *L, int pretransformed, int has_normal, int has_c
 static void pack_vertices(const Layout *L, const RVertex *v, uint32_t nv, uint32_t base)
 {
     PROF_SECTION(PROF_H_PACK);
-    uint64_t t0 = win32_perf_counter();
+    uint64_t t0 = fine_now();
     ensure_capacity((size_t)base + nv);
     if (L->pretransformed) {
         float *p = pos_buf + (size_t)base * 4u;
@@ -1662,7 +1686,7 @@ static void pack_vertices(const Layout *L, const RVertex *v, uint32_t nv, uint32
             uv[1] = v[i].uv[k][1];
         }
     }
-    pc_frame[PC_PACK_US] += win32_perf_counter() - t0;
+    pc_frame[PC_PACK_US] += fine_now() - t0;
     PROF_SECTION_END;
 }
 
@@ -1710,7 +1734,7 @@ static void submit_arrays(int prim, const Layout *L, uint32_t nv, const uint16_t
 {
     perf_gpu_draws++;
     PROF_SECTION(PROF_H_STATE);
-    uint64_t t0 = win32_perf_counter();
+    uint64_t t0 = fine_now();
     uint64_t tex_before = pc_frame[PC_TEX_US];
     apply_states(L->pretransformed, L->has_normal);
     int stages = apply_stages(L->ntex);
@@ -1775,12 +1799,14 @@ static void submit_arrays(int prim, const Layout *L, uint32_t nv, const uint16_t
         }
     }
     glClientActiveTexture(GL_TEXTURE0);
-    uint64_t t1 = win32_perf_counter();
+    uint64_t t1 = fine_now();
     pc_frame[PC_STATE_US] += (t1 - t0) - (pc_frame[PC_TEX_US] - tex_before);
 
     PROF_HOST(PROF_H_GLDRAW);
+    /* The index range is known: glDrawRangeElements spares vitaGL a scan of the
+     * indices for the highest one before copying the vertex arrays. */
     if (idx)
-        glDrawElements(gl_prim(prim), (GLsizei)ni, GL_UNSIGNED_SHORT, idx);
+        glDrawRangeElements(gl_prim(prim), 0, nv - 1u, (GLsizei)ni, GL_UNSIGNED_SHORT, idx);
     else
         glDrawArrays(gl_prim(prim), 0, (GLsizei)nv);
     if (A->vbo) {
@@ -1789,7 +1815,7 @@ static void submit_arrays(int prim, const Layout *L, uint32_t nv, const uint16_t
     }
     if (L->use_color)
         color_cache_valid = 0;   /* GL leaves the current color undefined after a color array */
-    pc_frame[PC_GL_US] += win32_perf_counter() - t1;
+    pc_frame[PC_GL_US] += fine_now() - t1;
     pc_frame[PC_VERTS] += nv;
     pc_frame[PC_INDICES] += idx ? ni : 0u;
     PROF_SECTION_END;
@@ -1952,9 +1978,9 @@ void render_flush(void)
         return;
     }
     /* Flushes from EndScene, Lock, Blt, Present...: still draw submission time. */
-    uint64_t t0 = win32_perf_counter();
+    uint64_t t0 = fine_now();
     flush_batch();
-    perf.draw_us += win32_perf_counter() - t0;
+    perf.draw_us += fine_now() - t0;
 }
 
 /* ---- near-plane clipping ---------------------------------------------------
@@ -2293,7 +2319,7 @@ int render_draw_vb(void **slot, uint32_t gen, const RVertex *all, uint32_t count
         return 0;
 #endif
     render_flush();
-    uint64_t t0 = win32_perf_counter();
+    uint64_t t0 = fine_now();
     perf.draws++;
     Layout L;
     layout_init(&L, 0, has_normal, has_color, has_spec, ntex);
@@ -2316,18 +2342,18 @@ int render_draw_vb(void **slot, uint32_t gen, const RVertex *all, uint32_t count
         ip = ib;
     }
     submit_arrays(prim, &L, nv, ip, ni, &A);
-    perf.draw_us += win32_perf_counter() - t0;
+    perf.draw_us += fine_now() - t0;
     return 1;
 }
 
 void render_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, uint32_t ni,
                  int pretransformed, int has_normal, int has_color, int has_spec, int ntex)
 {
-    uint64_t t0 = win32_perf_counter();
+    uint64_t t0 = fine_now();
     in_render_draw = 1;
     batch_draw(prim, v, nv, idx, ni, pretransformed, has_normal, has_color, has_spec, ntex);
     in_render_draw = 0;
-    perf.draw_us += win32_perf_counter() - t0;
+    perf.draw_us += fine_now() - t0;
     perf.draws++;
 }
 
