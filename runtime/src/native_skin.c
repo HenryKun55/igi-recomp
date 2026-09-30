@@ -122,9 +122,6 @@ static inline void rotate_normal(uint8_t *gm, uint32_t v, uint32_t p, const doub
     memcpy(gm + p + 0x0Cu, nrm, 12);
 }
 
-/* Rounding to float, as a store and reload of the x87 value. */
-static inline double f32(double v) { return (double)(float)v; }
-
 /* rigid == 0: position by the bone, scaled by the vertex weight. */
 static void skin_weighted(uint32_t verts, uint32_t n, uint32_t skel, uint32_t p, Locals *l)
 {
