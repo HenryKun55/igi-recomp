@@ -12,6 +12,9 @@
 #include <setjmp.h>
 #include <stdint.h>
 #include <string.h>
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
+#endif
 
 typedef struct Ctx {
     uint32_t r[8];          /* eax ecx edx ebx esp ebp esi edi */
@@ -310,14 +313,62 @@ RtScas rt_scasb_fwd(const uint8_t *gm, uint32_t n, uint32_t di, uint32_t al);
 RtStr rt_rep_movs_slow(uint8_t *gm, uint32_t df, uint32_t n, uint32_t si, uint32_t di, uint32_t size);
 RtStr rt_rep_stos_slow(uint8_t *gm, uint32_t df, uint32_t n, uint32_t di, uint32_t v, uint32_t size);
 
-static inline RtStr rt_rep_movs(uint8_t *gm, uint32_t df, uint32_t n, uint32_t si, uint32_t di, uint32_t size)
+/* Copy of a small constant number of bytes (a multiple of 4, at most 64) that
+ * reads the whole source before writing: the result equals an element-by-element
+ * forward copy whenever the destination does not start inside the source. With
+ * NEON, unaligned 16- and 8-byte vector loads and stores. */
+static inline __attribute__((always_inline)) void rt_move_small(uint8_t *d, const uint8_t *s, uint32_t b)
+{
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+    uint8x16_t q0 = vdupq_n_u8(0), q1 = q0, q2 = q0, q3 = q0;
+    uint8x8_t h = vdup_n_u8(0);
+    uint32_t w = 0;
+    if (b >= 16u) q0 = vld1q_u8(s);
+    if (b >= 32u) q1 = vld1q_u8(s + 16);
+    if (b >= 48u) q2 = vld1q_u8(s + 32);
+    if (b >= 64u) q3 = vld1q_u8(s + 48);
+    if (b & 8u) h = vld1_u8(s + (b & ~15u));
+    if (b & 4u) w = rt_ld32(s + (b & ~7u));
+    if (b >= 16u) vst1q_u8(d, q0);
+    if (b >= 32u) vst1q_u8(d + 16, q1);
+    if (b >= 48u) vst1q_u8(d + 32, q2);
+    if (b >= 64u) vst1q_u8(d + 48, q3);
+    if (b & 8u) vst1_u8(d + (b & ~15u), h);
+    if (b & 4u) rt_st32(d + (b & ~7u), w);
+#else
+    uint8_t t[64];
+    memcpy(t, s, b);
+    memcpy(d, t, b);
+#endif
+}
+
+/* Store of a small constant number of copies of a 32-bit value (b as above). */
+static inline __attribute__((always_inline)) void rt_fill_small(uint8_t *d, uint32_t v, uint32_t b)
+{
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+    uint8x16_t q = vreinterpretq_u8_u32(vdupq_n_u32(v));
+    for (uint32_t i = 0; i + 16u <= b; i += 16u)
+        vst1q_u8(d + i, q);
+    if (b & 8u)
+        vst1_u8(d + (b & ~15u), vget_low_u8(q));
+    if (b & 4u)
+        rt_st32(d + (b & ~7u), v);
+#else
+    for (uint32_t i = 0; i < b; i += 4u)
+        rt_st32(d + i, v);
+#endif
+}
+
+static inline __attribute__((always_inline)) RtStr rt_rep_movs(uint8_t *gm, uint32_t df, uint32_t n, uint32_t si, uint32_t di, uint32_t size)
 {
     uint32_t b = n * size;
     /* Backward, empty, or the destination overlaps ahead of the source (element
      * order is observable): out of line. Otherwise a forward copy equals memmove. */
     if (df || n == 0 || di - si < b)
         return rt_rep_movs_slow(gm, df, n, si, di, size);
-    if (size == 4 && n <= 8) {
+    if (__builtin_constant_p(b) && b <= 64u && (b & 3u) == 0) {
+        rt_move_small(gm + di, gm + si, b);
+    } else if (size == 4 && n <= 8) {
         for (uint32_t i = 0; i < b; i += 4u)
             rt_st32(gm + di + i, rt_ld32(gm + si + i));
     } else {
@@ -327,12 +378,14 @@ static inline RtStr rt_rep_movs(uint8_t *gm, uint32_t df, uint32_t n, uint32_t s
     return r;
 }
 
-static inline RtStr rt_rep_stos(uint8_t *gm, uint32_t df, uint32_t n, uint32_t di, uint32_t v, uint32_t size)
+static inline __attribute__((always_inline)) RtStr rt_rep_stos(uint8_t *gm, uint32_t df, uint32_t n, uint32_t di, uint32_t v, uint32_t size)
 {
     if (df || n == 0 || size == 2)
         return rt_rep_stos_slow(gm, df, n, di, v, size);
     uint32_t b = n * size;
-    if (size == 1 || v == 0) {
+    if (size == 4 && __builtin_constant_p(b) && b <= 64u) {
+        rt_fill_small(gm + di, v, b);
+    } else if (size == 1 || v == 0) {
         memset(gm + di, (int)(v & 0xFFu), b);
     } else {
         for (uint32_t i = 0; i < b; i += 4u)
