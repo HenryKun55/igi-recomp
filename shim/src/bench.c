@@ -25,9 +25,11 @@
 #if defined(__vita__)
 #define BENCH_CFG "ux0:data/igi/bench.txt"
 #define BENCH_RESULT "ux0:data/igi/bench_result.txt"
+#define BENCH_RUNNING "ux0:data/igi/bench_running.txt"
 #define BENCH_PLATFORM "vita"
 #else
 #define BENCH_RESULT "bench_result.txt"
+#define BENCH_RUNNING "bench_running.txt"
 #define BENCH_PLATFORM "desktop"
 #endif
 
@@ -320,6 +322,11 @@ void bench_frame(uint64_t now, uint64_t frame_us, uint64_t draw_us, uint64_t swa
 #endif
             run_start_us = now;
             set_phase(PH_RUN, now);
+            /* Tells external tools (tools/profile_vita3k.sh) the measured part began:
+             * Vita3K only writes igi.log out when the game exits. */
+            FILE *f = fopen(BENCH_RUNNING, "w");
+            if (f)
+                fclose(f);
         }
         break;
     case PH_RUN: {
