@@ -61,6 +61,9 @@ void render_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, u
 int render_diag_no_compact(void);
 /* Diagnostic mode: decode vertex buffers on every draw instead of caching them. */
 int render_diag_no_vb_cache(void);
+/* Object-space bounds of the next render_draw's vertices (NULL: unknown); lets
+ * the near-plane test skip the per-vertex check. Cleared by render_draw. */
+void render_set_bounds(const float *lo, const float *hi);
 
 /* Untransformed vertices still in the game's own layout (guest memory). */
 typedef struct GuestVerts {

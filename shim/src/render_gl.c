@@ -2100,6 +2100,43 @@ static int near_clip_impl(int prim, const RVertex *v, uint32_t nv, const uint16_
 static void batch_draw_impl(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, uint32_t ni,
                             int pretransformed, int has_normal, int has_color, int has_spec, int ntex);
 
+static float bounds_lo[3], bounds_hi[3];
+static int bounds_valid;
+
+void render_set_bounds(const float *lo, const float *hi)
+{
+    bounds_valid = lo && hi;
+    if (bounds_valid) {
+        memcpy(bounds_lo, lo, sizeof(bounds_lo));
+        memcpy(bounds_hi, hi, sizeof(bounds_hi));
+    }
+}
+
+#if defined(__vita__)
+/* True when the whole bounding box is in front of the near plane. */
+static int bounds_in_front(void)
+{
+    if (!bounds_valid)
+        return 0;
+    static float m[16];
+    static uint32_t m_serial;
+    static int m_valid;
+    if (!m_valid || m_serial != g_rs_serial) {
+        mat_mul(g_rs.world, g_rs.view, m);
+        mat_mul(m, g_rs.proj, m);
+        m_serial = g_rs_serial;
+        m_valid = 1;
+    }
+    for (int c = 0; c < 8; c++) {
+        float x = (c & 1) ? bounds_hi[0] : bounds_lo[0], y = (c & 2) ? bounds_hi[1] : bounds_lo[1];
+        float z = (c & 4) ? bounds_hi[2] : bounds_lo[2];
+        if (x * m[2] + y * m[6] + z * m[10] + m[14] < 0.0f)
+            return 0;
+    }
+    return 1;
+}
+#endif
+
 /* Appends `tris` triangles of a list/strip/fan (vertex numbers from `idx` if
  * set), offset by `base`, to the batch index list. */
 static void append_indices(int prim, const uint16_t *idx, uint32_t tris, uint32_t base)
@@ -2151,7 +2188,7 @@ static void batch_draw_impl(int prim, const RVertex *v, uint32_t nv, const uint1
     if ((diag_mode == DIAG_NO_SCREEN && pretransformed) || (diag_mode == DIAG_NO_3D && !pretransformed))
         return;
 #if defined(__vita__)
-    if (!pretransformed && diag_mode != DIAG_NO_NEARCLIP &&
+    if (!pretransformed && diag_mode != DIAG_NO_NEARCLIP && !bounds_in_front() &&
         (prim == PRIM_TRIANGLES || prim == PRIM_TRIANGLE_STRIP || prim == PRIM_TRIANGLE_FAN)) {
         RVertex *cv;
         uint32_t cn;
@@ -2520,6 +2557,7 @@ void render_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, u
     in_render_draw = 1;
     batch_draw(prim, v, nv, idx, ni, pretransformed, has_normal, has_color, has_spec, ntex);
     in_render_draw = 0;
+    bounds_valid = 0;
     perf.draw_us += fine_now() - t0;
     perf.draws++;
 }
