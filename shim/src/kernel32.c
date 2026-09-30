@@ -785,7 +785,20 @@ uint32_t win32_perf_counter_ms(void)
     return (uint32_t)((now_us() - t0_us) / 1000ull);
 }
 
-SHIM(kernel32, GetTickCount) { stdcall_ret(c, win32_tick_count() + 60000u, 0); }
+/* Time the game spent waiting for its 30 fps cap, for benchmarks: in Sleep, and
+ * spinning on GetTickCount (calls less than SPIN_GAP_US apart count as a spin). */
+uint64_t g_idle_us;
+#define SPIN_GAP_US 50u
+
+SHIM(kernel32, GetTickCount)
+{
+    static uint64_t last;
+    uint64_t now = win32_perf_counter();
+    if (now - last < SPIN_GAP_US)
+        g_idle_us += now - last;
+    last = now;
+    stdcall_ret(c, (uint32_t)(now / 1000u) + 60000u, 0);
+}
 
 SHIM(kernel32, QueryPerformanceCounter)
 {
@@ -795,7 +808,9 @@ SHIM(kernel32, QueryPerformanceCounter)
 
 SHIM(kernel32, Sleep)
 {
+    uint64_t t0 = win32_perf_counter();
     usleep(ARG(0) * 1000u);
+    g_idle_us += win32_perf_counter() - t0;
     stdcall_ret(c, 0, 1);
 }
 
