@@ -61,6 +61,19 @@ void render_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, u
 int render_diag_no_compact(void);
 /* Diagnostic mode: decode vertex buffers on every draw instead of caching them. */
 int render_diag_no_vb_cache(void);
+
+/* Untransformed vertices still in the game's own layout (guest memory). */
+typedef struct GuestVerts {
+    const uint8_t *base;
+    uint32_t stride;
+    const uint32_t *src;        /* vertex i is base + src[i] * stride; NULL: consecutive */
+    uint32_t nrm_off, col_off, spec_off, uv_off[MAX_STAGES], uv_bytes[MAX_STAGES];
+    int has_normal, has_color, has_spec, ntex;
+} GuestVerts;
+/* Packs straight from guest memory into the draw batch (no RVertex step).
+ * Returns 0 when the draw needs the general path (near-plane clipping, big
+ * or non-triangle draws, diagnostics). */
+int render_draw_guest(int prim, const GuestVerts *g, uint32_t nv, const uint16_t *idx, uint32_t ni);
 /* Draws from a GPU copy of an unchanged vertex buffer (`all`: the whole buffer decoded,
  * `gen`: its version). Returns 0 when the draw must take the normal path. */
 int render_draw_vb(void **slot, uint32_t gen, const RVertex *all, uint32_t count, uint32_t start, int prim,

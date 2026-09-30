@@ -234,6 +234,49 @@ static RVertex *decode(uint32_t fvf, uint32_t base, uint32_t stride, const uint3
     return r;
 }
 
+/* Hands untransformed vertices to the renderer in the game's layout when it can
+ * take them directly; otherwise decodes them to RVertex. */
+static void emit(uint32_t prim, uint32_t fvf, uint32_t base, uint32_t stride, const uint32_t *src, uint32_t count,
+                 const uint16_t *idx, uint32_t ni)
+{
+    uint32_t pos = fvf & 0x0Eu;
+    if (pos != 0x4u) {
+        GuestVerts g;
+        memset(&g, 0, sizeof(g));
+        g.base = g_mem + base;
+        g.stride = stride;
+        g.src = src;
+        g.has_normal = (fvf & 0x10u) != 0;
+        g.has_color = (fvf & 0x40u) != 0;
+        g.has_spec = (fvf & 0x80u) != 0;
+        g.ntex = (int)((fvf >> 8) & 0xFu);
+        uint32_t o = pos == 0x2u ? 12u : 12u + ((pos - 0x4u) / 2u) * 4u;
+        g.nrm_off = o;
+        if (g.has_normal)
+            o += 12;
+        if (fvf & 0x20u)
+            o += 4;
+        g.col_off = o;
+        if (g.has_color)
+            o += 4;
+        g.spec_off = o;
+        if (g.has_spec)
+            o += 4;
+        for (int t = 0; t < g.ntex && t < MAX_STAGES; t++) {
+            uint32_t f = (fvf >> (16 + t * 2)) & 3u;
+            uint32_t sz = f == 0 ? 8u : f == 1 ? 12u : f == 2 ? 16u : 4u;
+            g.uv_off[t] = o;
+            g.uv_bytes[t] = sz >= 8u ? 8u : 4u;
+            o += sz;
+        }
+        if (render_draw_guest((int)prim, &g, count, idx, ni))
+            return;
+    }
+    Decoded d;
+    RVertex *v = decode(fvf, base, stride, src, count, &d);
+    render_draw((int)prim, v, count, idx, ni, d.pretransformed, d.has_normal, d.has_color, d.has_spec, d.ntex);
+}
+
 static RVertex *decode_vertices(uint32_t fvf, uint32_t base, uint32_t stride, const uint32_t *src, uint32_t count,
                                Decoded *d)
 {
@@ -707,8 +750,12 @@ static void draw_indexed(uint32_t prim, uint32_t fvf, uint32_t verts, uint32_t s
         if (range <= ni || render_diag_no_compact()) {
             for (uint32_t i = 0; i < ni; i++)
                 rebased[i] = (uint16_t)(ip[i] - lo);
-            RVertex *v = cache ? (d = *cd, cache + lo) : decode(fvf, verts + lo * stride, stride, NULL, range, &d);
-            render_draw((int)prim, v, range, rebased, ni, d.pretransformed, d.has_normal, d.has_color,
+            if (!cache) {
+                emit(prim, fvf, verts + lo * stride, stride, NULL, range, rebased, ni);
+                return;
+            }
+            d = *cd;
+            render_draw((int)prim, cache + lo, range, rebased, ni, d.pretransformed, d.has_normal, d.has_color,
                         d.has_spec, d.ntex);
             return;
         }
@@ -743,13 +790,21 @@ static void draw_indexed(uint32_t prim, uint32_t fvf, uint32_t verts, uint32_t s
             }
             rebased[i] = (uint16_t)slot[x];
         }
-        RVertex *v = cache ? (d = *cd, gather(cache + lo, used, nu)) : decode(fvf, verts + lo * stride, stride, used, nu, &d);
-        render_draw((int)prim, v, nu, rebased, ni, d.pretransformed, d.has_normal, d.has_color, d.has_spec,
-                    d.ntex);
+        if (!cache) {
+            emit(prim, fvf, verts + lo * stride, stride, used, nu, rebased, ni);
+            return;
+        }
+        d = *cd;
+        render_draw((int)prim, gather(cache + lo, used, nu), nu, rebased, ni, d.pretransformed, d.has_normal,
+                    d.has_color, d.has_spec, d.ntex);
         return;
     }
-    RVertex *v = cache ? (d = *cd, cache) : decode(fvf, verts, stride, NULL, nv, &d);
-    render_draw((int)prim, v, nv, NULL, 0, d.pretransformed, d.has_normal, d.has_color, d.has_spec, d.ntex);
+    if (!cache) {
+        emit(prim, fvf, verts, stride, NULL, nv, NULL, 0);
+        return;
+    }
+    d = *cd;
+    render_draw((int)prim, cache, nv, NULL, 0, d.pretransformed, d.has_normal, d.has_color, d.has_spec, d.ntex);
 }
 
 static void dev_DrawPrimitive(Ctx *c)

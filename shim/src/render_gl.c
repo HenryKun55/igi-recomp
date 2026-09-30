@@ -2100,6 +2100,39 @@ static int near_clip_impl(int prim, const RVertex *v, uint32_t nv, const uint16_
 static void batch_draw_impl(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, uint32_t ni,
                             int pretransformed, int has_normal, int has_color, int has_spec, int ntex);
 
+/* Appends `tris` triangles of a list/strip/fan (vertex numbers from `idx` if
+ * set), offset by `base`, to the batch index list. */
+static void append_indices(int prim, const uint16_t *idx, uint32_t tris, uint32_t base)
+{
+    uint16_t *out = &batch_i[batch_ni];
+    for (uint32_t t = 0; t < tris; t++) {
+        uint32_t a, b, c;
+        if (prim == PRIM_TRIANGLES) {
+            a = t * 3u;
+            b = a + 1u;
+            c = a + 2u;
+        } else if (prim == PRIM_TRIANGLE_STRIP) {
+            /* Alternate winding so every triangle keeps the strip's orientation. */
+            a = (t & 1u) ? t + 1u : t;
+            b = (t & 1u) ? t : t + 1u;
+            c = t + 2u;
+        } else {
+            a = 0u;
+            b = t + 1u;
+            c = t + 2u;
+        }
+        if (idx) {
+            a = idx[a];
+            b = idx[b];
+            c = idx[c];
+        }
+        *out++ = (uint16_t)(base + a);
+        *out++ = (uint16_t)(base + b);
+        *out++ = (uint16_t)(base + c);
+    }
+    batch_ni += tris * 3u;
+}
+
 static void batch_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, uint32_t ni,
                        int pretransformed, int has_normal, int has_color, int has_spec, int ntex)
 {
@@ -2164,33 +2197,7 @@ static void batch_draw_impl(int prim, const RVertex *v, uint32_t nv, const uint1
     uint32_t base = batch_nv;
     pack_vertices(&batch_layout, v, nv, base);
     batch_nv += nv;
-    uint16_t *out = &batch_i[batch_ni];
-    for (uint32_t t = 0; t < tris; t++) {
-        uint32_t a, b, c;
-        if (prim == PRIM_TRIANGLES) {
-            a = t * 3u;
-            b = a + 1u;
-            c = a + 2u;
-        } else if (prim == PRIM_TRIANGLE_STRIP) {
-            /* Alternate winding so every triangle keeps the strip's orientation. */
-            a = (t & 1u) ? t + 1u : t;
-            b = (t & 1u) ? t : t + 1u;
-            c = t + 2u;
-        } else {
-            a = 0u;
-            b = t + 1u;
-            c = t + 2u;
-        }
-        if (idx) {
-            a = idx[a];
-            b = idx[b];
-            c = idx[c];
-        }
-        *out++ = (uint16_t)(base + a);
-        *out++ = (uint16_t)(base + b);
-        *out++ = (uint16_t)(base + c);
-    }
-    batch_ni += tris * 3u;
+    append_indices(prim, idx, tris, base);
 }
 
 /* ---- static vertex buffers in GPU memory ----------------------------------
@@ -2343,6 +2350,134 @@ int render_draw_vb(void **slot, uint32_t gen, const RVertex *all, uint32_t count
     }
     submit_arrays(prim, &L, nv, ip, ni, &A);
     perf.draw_us += fine_now() - t0;
+    return 1;
+}
+
+/* ---- guest-layout fast path ------------------------------------------------ */
+
+static uint32_t d3dcolor_rgba(uint32_t argb)
+{
+    return (argb & 0xFF00FF00u) | ((argb & 0xFFu) << 16) | ((argb >> 16) & 0xFFu);
+}
+
+/* Same as pack_vertices, reading the game's vertex layout directly. */
+static void pack_guest(const Layout *L, const GuestVerts *g, uint32_t nv, uint32_t base)
+{
+    PROF_SECTION(PROF_H_PACK);
+    ensure_capacity((size_t)base + nv);
+    const uint8_t *vb = g->base;
+    const uint32_t stride = g->stride;
+    const uint32_t *src = g->src;
+    float *p = pos_buf + (size_t)base * 3u;
+    for (uint32_t i = 0; i < nv; i++, p += 3)
+        memcpy(p, vb + (size_t)(src ? src[i] : i) * stride, 12);
+    if (L->use_color) {
+        uint32_t *c = col_buf + base;
+        const uint32_t off = g->col_off;
+        for (uint32_t i = 0; i < nv; i++) {
+            uint32_t v;
+            memcpy(&v, vb + (size_t)(src ? src[i] : i) * stride + off, 4);
+            c[i] = d3dcolor_rgba(v);
+        }
+    }
+    if (L->has_normal) {
+        float *n = nrm_buf + (size_t)base * 3u;
+        const uint32_t off = g->nrm_off;
+        for (uint32_t i = 0; i < nv; i++, n += 3)
+            memcpy(n, vb + (size_t)(src ? src[i] : i) * stride + off, 12);
+    }
+    if (L->use_fog) {
+        float *f = fog_buf + base;
+        const uint32_t off = g->spec_off;
+        for (uint32_t i = 0; i < nv; i++) {
+            uint32_t v;
+            memcpy(&v, vb + (size_t)(src ? src[i] : i) * stride + off, 4);
+            f[i] = (float)(v >> 24) * (1.0f / 255.0f);
+        }
+    }
+    for (int s = 0; s < L->stages; s++) {
+        int k = L->uv_src[s];
+        if (k < 0)
+            continue;
+        float *uv = uv_buf[s] + (size_t)base * 2u;
+        const uint32_t off = g->uv_off[k];
+        if (g->uv_bytes[k] == 8u) {
+            for (uint32_t i = 0; i < nv; i++, uv += 2)
+                memcpy(uv, vb + (size_t)(src ? src[i] : i) * stride + off, 8);
+        } else {
+            for (uint32_t i = 0; i < nv; i++, uv += 2) {
+                memcpy(uv, vb + (size_t)(src ? src[i] : i) * stride + off, 4);
+                uv[1] = 0.0f;
+            }
+        }
+    }
+    PROF_SECTION_END;
+}
+
+int render_draw_guest(int prim, const GuestVerts *g, uint32_t nv, const uint16_t *idx, uint32_t ni)
+{
+    if (!nv || g_trace_next_frame == 2 || diag_mode == DIAG_NO_3D || diag_mode == DIAG_NO_BATCH ||
+        diag_mode == DIAG_ZERO_UV)
+        return 0;
+    if (prim != PRIM_TRIANGLES && prim != PRIM_TRIANGLE_STRIP && prim != PRIM_TRIANGLE_FAN)
+        return 0;
+    uint32_t n = idx ? ni : nv;
+    uint32_t tris = prim == PRIM_TRIANGLES ? n / 3u : (n >= 3u ? n - 2u : 0u);
+    if (nv > BATCH_MAX_V || tris * 3u > BATCH_MAX_I)
+        return 0;
+    if (batch_enabled < 0) {
+        const char *e = getenv("IGI_BATCH");
+        batch_enabled = !(e && e[0] == '0');
+    }
+    if (!batch_enabled)
+        return 0;
+#if defined(__vita__)
+    if (diag_mode != DIAG_NO_NEARCLIP) {
+        /* Any vertex behind the near plane: the general path clips on the CPU. */
+        PROF_SECTION(PROF_H_NEARCLIP);
+        static float m[16];
+        static uint32_t m_serial;
+        static int m_valid;
+        if (!m_valid || m_serial != g_rs_serial) {
+            mat_mul(g_rs.world, g_rs.view, m);
+            mat_mul(m, g_rs.proj, m);
+            m_serial = g_rs_serial;
+            m_valid = 1;
+        }
+        int behind = 0;
+        for (uint32_t i = 0; i < nv; i++) {
+            float x[3];
+            memcpy(x, g->base + (size_t)(g->src ? g->src[i] : i) * g->stride, 12);
+            behind |= x[0] * m[2] + x[1] * m[6] + x[2] * m[10] + m[14] < 0.0f;
+        }
+        PROF_SECTION_END;
+        if (behind)
+            return 0;
+    }
+#endif
+    uint64_t t0 = fine_now();
+    PROF_SECTION(PROF_H_BATCH);
+    if (tris) {
+        const Layout *bl = &batch_layout;
+        if (batch_active &&
+            (batch_nv + nv > BATCH_MAX_V || batch_ni + tris * 3u > BATCH_MAX_I || bl->pretransformed ||
+             bl->has_normal != g->has_normal || bl->has_color != g->has_color || bl->has_spec != g->has_spec ||
+             bl->ntex != g->ntex || g_rs_serial != batch_serial))
+            render_flush();
+        if (!batch_active) {
+            batch_active = 1;
+            batch_serial = g_rs_serial;
+            layout_init(&batch_layout, 0, g->has_normal, g->has_color, g->has_spec, g->ntex);
+            batch_nv = batch_ni = 0;
+        }
+        uint32_t base = batch_nv;
+        pack_guest(&batch_layout, g, nv, base);
+        batch_nv += nv;
+        append_indices(prim, idx, tris, base);
+    }
+    PROF_SECTION_END;
+    perf.draw_us += fine_now() - t0;
+    perf.draws++;
     return 1;
 }
 
