@@ -1,0 +1,201 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: HenryKun55 <henriqueflavio55@gmail.com>
+Date: Wed, 30 Sep 2026 15:38:38 -0300
+Subject: [PATCH] Keep several recent ffp attribute setups; copy small blocks
+ locally instead of through SceLibKernel; no per-draw memset
+
+---
+ source/ffp.c             | 91 +++++++++++++++++++++++++++++-----------
+ source/utils/mem_utils.c | 15 +++++++
+ source/utils/mem_utils.h |  4 +-
+ 3 files changed, 85 insertions(+), 25 deletions(-)
+
+diff --git a/source/ffp.c b/source/ffp.c
+index a6326e6..9e0efe2 100644
+--- a/source/ffp.c
++++ b/source/ffp.c
+@@ -582,12 +582,26 @@ typedef struct {
+ 	SceGxmVertexAttribute attrib_config[FFP_VERTEX_ATTRIBS_NUM];
+ 	SceGxmVertexStream stream_config[FFP_VERTEX_ATTRIBS_NUM];
+ } ffp_binding_key;
+-static ffp_binding_key ffp_binding_last;
+-static GLboolean ffp_binding_valid = GL_FALSE;
+-static SceGxmVertexAttribute *ffp_binding_attrs;
+-static SceGxmVertexStream *ffp_binding_streams;
+-static int ffp_binding_num_params;
+-static SceGxmVertexStream *ffp_binding_lighting_streams;
++// A few recent setups: consecutive draws often alternate between layouts.
++#define FFP_BINDING_CACHE_SIZE 8
++typedef struct {
++	ffp_binding_key key;
++	SceGxmVertexAttribute *attrs;
++	SceGxmVertexStream *streams;
++	SceGxmVertexStream *lighting_streams;
++	int num_params;
++	SceGxmVertexProgram *patched;
++	SceGxmVertexAttribute attribute[FFP_VERTEX_ATTRIBS_NUM]; // ffp_vertex_attribute/stream contents
++	SceGxmVertexStream stream[FFP_VERTEX_ATTRIBS_NUM];
++} ffp_binding_entry;
++static ffp_binding_entry ffp_binding_cache[FFP_BINDING_CACHE_SIZE];
++static int ffp_binding_num = 0, ffp_binding_next = 0, ffp_binding_last = -1;
++
++static void ffp_binding_reset(void) {
++	ffp_binding_num = 0;
++	ffp_binding_next = 0;
++	ffp_binding_last = -1;
++}
+ 
+ static inline void ffp_binding_make_key(ffp_binding_key *k, SceGxmVertexAttribute *attrs, SceGxmVertexStream *streams, uint32_t mask, SceGxmIndexSource index_type) {
+ 	k->attrs_in = attrs;
+@@ -600,8 +614,8 @@ static inline void ffp_binding_make_key(ffp_binding_key *k, SceGxmVertexAttribut
+ 	k->color_material = color_material_state;
+ 	k->color_material_mode = color_material_mode;
+ 	k->index_type = index_type;
+-	memcpy(k->attrib_config, ffp_vertex_attrib_config, sizeof(k->attrib_config));
+-	memcpy(k->stream_config, ffp_vertex_stream_config, sizeof(k->stream_config));
++	vgl_fast_memcpy(k->attrib_config, ffp_vertex_attrib_config, sizeof(k->attrib_config));
++	vgl_fast_memcpy(k->stream_config, ffp_vertex_stream_config, sizeof(k->stream_config));
+ }
+ 
+ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *streams, SceGxmIndexSource index_type) {
+@@ -871,7 +885,7 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
+ 			sceGxmShaderPatcherForceUnregisterProgram(gxm_shader_patcher, vert_shader_cache[vert_shader_cache_idx].id);
+ 			vgl_invalidate_bound_programs();
+ 			ffp_patch_cache_reset();
+-			ffp_binding_valid = GL_FALSE;
++			ffp_binding_reset();
+ 			ffp_frag_patch_cache_reset();
+ 			vgl_free(vert_shader_cache[vert_shader_cache_idx].prog);
+ 			vgl_free(vert_shader_cache[vert_shader_cache_idx].unif_buf);
+@@ -892,11 +906,29 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
+ 	VGL_PROF(2);
+ 	ffp_binding_key binding_key;
+ 	ffp_binding_make_key(&binding_key, attrs, streams, mask.raw, index_type);
+-	if (ffp_binding_valid && !memcmp(&binding_key, &ffp_binding_last, sizeof(binding_key))) {
+-		attrs = ffp_binding_attrs;
+-		streams = ffp_binding_streams;
+-		ffp_vertex_num_params = ffp_binding_num_params;
+-		ffp_lighting_streams = ffp_binding_lighting_streams;
++	ffp_binding_entry *hit = NULL;
++	if (ffp_binding_last >= 0 && !memcmp(&binding_key, &ffp_binding_cache[ffp_binding_last].key, sizeof(binding_key))) {
++		hit = &ffp_binding_cache[ffp_binding_last];
++	} else {
++		for (int i = 0; i < ffp_binding_num; i++) {
++			if (!memcmp(&binding_key, &ffp_binding_cache[i].key, sizeof(binding_key))) {
++				hit = &ffp_binding_cache[i];
++				ffp_binding_last = i;
++				// The arrays hold another setup: restore this one
++				if (hit->attrs == ffp_vertex_attribute) {
++					vgl_fast_memcpy(ffp_vertex_attribute, hit->attribute, hit->num_params * sizeof(SceGxmVertexAttribute));
++					vgl_fast_memcpy(ffp_vertex_stream, hit->stream, hit->num_params * sizeof(SceGxmVertexStream));
++				}
++				break;
++			}
++		}
++	}
++	if (hit) {
++		attrs = hit->attrs;
++		streams = hit->streams;
++		ffp_vertex_num_params = hit->num_params;
++		ffp_lighting_streams = hit->lighting_streams;
++		ffp_vertex_program_patched = hit->patched;
+ 	} else {
+ 	// Not going for the vertex config setup if we have aligned datas
+ 	if (!attrs && mask.num_textures == 1 && mask.lights_num == 0) {
+@@ -1042,13 +1074,24 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
+ 	// Creating patched vertex shader
+ 	ffp_patch_vertex_program(ffp_vertex_program_id, attrs, streams, ffp_vertex_num_params, &ffp_vertex_program_patched);
+ 
+-	// The setup above may have written into the attribute configs: key on the result
+-	ffp_binding_make_key(&ffp_binding_last, binding_key.attrs_in, binding_key.streams_in, mask.raw, index_type);
+-	ffp_binding_valid = ffp_vertex_program_patched != NULL;
+-	ffp_binding_attrs = attrs;
+-	ffp_binding_streams = streams;
+-	ffp_binding_num_params = ffp_vertex_num_params;
+-	ffp_binding_lighting_streams = ffp_lighting_streams;
++	if (ffp_vertex_program_patched) {
++		// The setup above may have written into the attribute configs: key on the result
++		ffp_binding_entry *e = &ffp_binding_cache[ffp_binding_next];
++		ffp_binding_make_key(&e->key, binding_key.attrs_in, binding_key.streams_in, mask.raw, index_type);
++		e->attrs = attrs;
++		e->streams = streams;
++		e->lighting_streams = ffp_lighting_streams;
++		e->num_params = ffp_vertex_num_params;
++		e->patched = ffp_vertex_program_patched;
++		if (attrs == ffp_vertex_attribute) {
++			vgl_fast_memcpy(e->attribute, ffp_vertex_attribute, ffp_vertex_num_params * sizeof(SceGxmVertexAttribute));
++			vgl_fast_memcpy(e->stream, ffp_vertex_stream, ffp_vertex_num_params * sizeof(SceGxmVertexStream));
++		}
++		ffp_binding_last = ffp_binding_next;
++		ffp_binding_next = (ffp_binding_next + 1) % FFP_BINDING_CACHE_SIZE;
++		if (ffp_binding_num < FFP_BINDING_CACHE_SIZE)
++			ffp_binding_num++;
++	}
+ 	}
+ 
+ 	VGL_PROF(4);
+@@ -1314,7 +1357,7 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
+ 					}
+ 				}
+ 			}
+-			sceClibMemcpy(buffer, ffp_fragment_unif_buf, ffp_fragment_unif_buf_size);
++			vgl_fast_memcpy(buffer, ffp_fragment_unif_buf, ffp_fragment_unif_buf_size);
+ 		}
+ 		dirty_frag_unifs = 0;
+ 	}
+@@ -1363,7 +1406,7 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
+ 				}
+ 			}
+ 		}
+-		sceClibMemcpy(buffer, ffp_vertex_unif_buf, ffp_vertex_unif_buf_size);
++		vgl_fast_memcpy(buffer, ffp_vertex_unif_buf, ffp_vertex_unif_buf_size);
+ 		dirty_vert_unifs = 0;
+ 	}
+ #ifdef HAVE_PROFILING
+@@ -1677,7 +1720,7 @@ void _glDrawElements_FixedFunctionIMPL(uint16_t *idx_buf, GLsizei count, uint32_
+ #ifdef HAVE_PROFILING
+ 	uint32_t draw_start = sceKernelGetProcessTimeLow();
+ #endif
+-	int attr_idxs[FFP_VERTEX_ATTRIBS_NUM] = {0, 0, 0, 0, 0, 0, 0, 0};
++	int attr_idxs[FFP_VERTEX_ATTRIBS_NUM]; // attr_num entries are set
+ 	int attr_num = 0;
+ #ifndef DRAW_SPEEDHACK
+ 	GLboolean is_full_vbo = GL_TRUE;
+diff --git a/source/utils/mem_utils.c b/source/utils/mem_utils.c
+index a9ab8bd..ff4c18c 100644
+--- a/source/utils/mem_utils.c
++++ b/source/utils/mem_utils.c
+@@ -624,3 +624,18 @@ void *vgl_realloc(void *ptr, size_t size) {
+ #endif
+ 	return NULL;
+ }
++
++#ifndef DISABLE_CLIB
++// Most copies here are a few words (vertex attribute descriptors, uniforms): a call
++// into SceLibKernel costs more than the copy itself.
++__attribute__((optimize("no-tree-loop-distribute-patterns"))) void *vgl_small_memcpy(void *dst, const void *src, size_t n) {
++	if (n <= 256 && !(((uintptr_t)dst | (uintptr_t)src | n) & 3)) {
++		uint32_t *d = (uint32_t *)dst;
++		const uint32_t *s = (const uint32_t *)src;
++		for (size_t i = n >> 2; i; i--)
++			*d++ = *s++;
++		return dst;
++	}
++	return sceClibMemcpy(dst, src, n);
++}
++#endif
+diff --git a/source/utils/mem_utils.h b/source/utils/mem_utils.h
+index 8d5b9da..ed86765 100644
+--- a/source/utils/mem_utils.h
++++ b/source/utils/mem_utils.h
+@@ -32,7 +32,9 @@
+ #define vgl_fast_memcpy memcpy
+ #else
+ #define vgl_memset sceClibMemset
+-#define vgl_fast_memcpy sceClibMemcpy
++// Small word-aligned copies stay local, larger ones go to sceClibMemcpy.
++void *vgl_small_memcpy(void *dst, const void *src, size_t n);
++#define vgl_fast_memcpy vgl_small_memcpy
+ #endif
+ 
+ extern vglMemType VGL_MEM_MAIN; // Flag for VRAM usage for allocations
