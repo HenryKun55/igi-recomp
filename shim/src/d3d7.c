@@ -152,6 +152,7 @@ typedef struct VertexBuffer {
     uint32_t lock_frame;       /* g_frame_serial at the last writable Lock */
     uint32_t cache_gen;        /* gen the decoded copy matches (0 = none) */
     struct RVertex *cache;     /* whole buffer decoded (static geometry is drawn every frame) */
+    void *gl;                  /* renderer's GPU copy (render_draw_vb) */
 } VertexBuffer;
 
 static uint32_t fvf_stride(uint32_t fvf);
@@ -794,6 +795,13 @@ static void dev_DrawPrimitiveVB(Ctx *c)
     RVertex *cache = vb_cache(vb, &d);
     if (start + n > vb->count)
         cache = NULL;
+    if (cache && !d.pretransformed &&
+        !((vb->fvf & 0x0Eu) == 0x4u && !g_rs.stage[0].texture && igi_skip_untextured_2d()) &&
+        render_draw_vb(&vb->gl, vb->cache_gen, cache, vb->count, start, (int)prim, n, NULL, 0, d.has_normal,
+                       d.has_color, d.has_spec, d.ntex)) {
+        stdcall_ret(c, D3D_OK, 6);
+        return;
+    }
     draw(prim, vb->fvf, vb->mem + start * vb->stride, vb->stride, n, 0, 0, cache ? cache + start : NULL, &d);
     stdcall_ret(c, D3D_OK, 6);
 }
@@ -806,6 +814,12 @@ static void dev_DrawIndexedPrimitiveVB(Ctx *c)
     RVertex *cache = vb_cache(vb, &d);
     if (start + nv > vb->count)
         cache = NULL;
+    if (cache && !d.pretransformed && idx && ni &&
+        render_draw_vb(&vb->gl, vb->cache_gen, cache, vb->count, start, (int)prim, nv, (const uint16_t *)gptr(idx),
+                       ni, d.has_normal, d.has_color, d.has_spec, d.ntex)) {
+        stdcall_ret(c, D3D_OK, 8);
+        return;
+    }
     draw(prim, vb->fvf, vb->mem + start * vb->stride, vb->stride, nv, idx, ni, cache ? cache + start : NULL, &d);
     stdcall_ret(c, D3D_OK, 8);
 }
@@ -920,6 +934,7 @@ static void vb_Release(Ctx *c)
     if (n <= 1u) {
         heap_free(vb->mem);
         free(vb->cache);
+        render_vb_release(&vb->gl);
         free(vb);
     }
     stdcall_ret(c, com_release(obj), 1);

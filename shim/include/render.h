@@ -61,6 +61,12 @@ void render_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, u
 int render_diag_no_compact(void);
 /* Diagnostic mode: decode vertex buffers on every draw instead of caching them. */
 int render_diag_no_vb_cache(void);
+/* Draws from a GPU copy of an unchanged vertex buffer (`all`: the whole buffer decoded,
+ * `gen`: its version). Returns 0 when the draw must take the normal path. */
+int render_draw_vb(void **slot, uint32_t gen, const RVertex *all, uint32_t count, uint32_t start, int prim,
+                   uint32_t nv, const uint16_t *idx, uint32_t ni, int has_normal, int has_color, int has_spec,
+                   int ntex);
+void render_vb_release(void **slot);
 void render_clear(uint32_t nrects, const Rect *rects, uint32_t flags, uint32_t color, float z);
 
 #endif

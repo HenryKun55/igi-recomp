@@ -349,11 +349,11 @@ static int aspect_fill = -1;
 static int cull_override;
 /* Live diagnostic mode (Vita: L+R+SELECT cycles it), shown on the overlay; diag_mode is declared above. */
 enum { DIAG_NONE, DIAG_NO_BATCH, DIAG_NO_CULL, DIAG_FLIP_ZREMAP, DIAG_NO_SCREEN, DIAG_NO_3D, DIAG_DEPTH_LEQUAL,
-       DIAG_NO_COMPACT, DIAG_USEPROGRAM, DIAG_ZERO_UV, DIAG_LEVEL0, DIAG_NO_NEARCLIP, DIAG_NO_VB_CACHE, DIAG_COUNT };
+       DIAG_NO_COMPACT, DIAG_USEPROGRAM, DIAG_ZERO_UV, DIAG_LEVEL0, DIAG_NO_NEARCLIP, DIAG_NO_VB_CACHE, DIAG_NO_VBO, DIAG_COUNT };
 static const char *const diag_names[DIAG_COUNT] = { "NORMAL", "NO BATCH", "NO CULL", "FLIP ZREMAP",
                                                      "NO 2D VERTS", "NO 3D VERTS", "DEPTH LEQUAL", "NO COMPACT",
                                                      "USEPROGRAM", "ZERO UV", "LEVEL0",
-                                                     "NO NEARCLIP", "NO VB CACHE" };
+                                                     "NO NEARCLIP", "NO VB CACHE", "NO VBO" };
 int render_diag_no_vb_cache(void)
 {
     return diag_mode == DIAG_NO_VB_CACHE;
@@ -1670,6 +1670,13 @@ enum { PTR_VERTEX, PTR_COLOR, PTR_NORMAL, PTR_FOG, PTR_TEX0, PTR_COUNT = PTR_TEX
 static const void *ptr_cache[PTR_COUNT];
 static int ptr_size_cache[PTR_COUNT];
 
+/* Forgets every cached pointer (offset 0 into a buffer object looks like NULL). */
+static void ptr_cache_reset(void)
+{
+    for (int i = 0; i < PTR_COUNT; i++)
+        ptr_size_cache[i] = -1;
+}
+
 static int ptr_changed(int slot, const void *p, int size)
 {
     if (ptr_cache[slot] == p && ptr_size_cache[slot] == size)
@@ -1680,7 +1687,25 @@ static int ptr_changed(int slot, const void *p, int size)
 }
 
 /* Sets up the GL state for arrays packed with layout L and draws them. */
+/* Where a draw's attributes live: client arrays (vbo 0) or offsets into a buffer object. */
+typedef struct DrawArrays {
+    GLuint vbo;
+    const void *pos, *col, *nrm, *fog, *uv[MAX_STAGES];
+} DrawArrays;
+
+static void submit_arrays(int prim, const Layout *L, uint32_t nv, const uint16_t *idx, uint32_t ni,
+                          const DrawArrays *A);
+
 static void submit(int prim, const Layout *L, uint32_t nv, const uint16_t *idx, uint32_t ni)
+{
+    DrawArrays A = { 0, pos_buf, col_buf, nrm_buf, fog_buf, { 0 } };
+    for (int s = 0; s < MAX_STAGES; s++)
+        A.uv[s] = uv_buf[s];
+    submit_arrays(prim, L, nv, idx, ni, &A);
+}
+
+static void submit_arrays(int prim, const Layout *L, uint32_t nv, const uint16_t *idx, uint32_t ni,
+                          const DrawArrays *A)
 {
     perf_gpu_draws++;
     PROF_SECTION(PROF_H_STATE);
@@ -1690,29 +1715,34 @@ static void submit(int prim, const Layout *L, uint32_t nv, const uint16_t *idx, 
     int stages = apply_stages(L->ntex);
     apply_transforms(L->pretransformed);
 
+    if (A->vbo) {
+        /* Offsets into a buffer object: bind it and re-send every pointer. */
+        glBindBuffer(GL_ARRAY_BUFFER, A->vbo);
+        ptr_cache_reset();
+    }
     glEnableClientState(GL_VERTEX_ARRAY);
-    if (ptr_changed(PTR_VERTEX, pos_buf, L->pos_size))
-        glVertexPointer(L->pos_size, GL_FLOAT, 0, pos_buf);
+    if (ptr_changed(PTR_VERTEX, A->pos, L->pos_size))
+        glVertexPointer(L->pos_size, GL_FLOAT, 0, A->pos);
     if (L->use_color) {
         glEnableClientState(GL_COLOR_ARRAY);
-        if (ptr_changed(PTR_COLOR, col_buf, 4))
-            glColorPointer(4, GL_UNSIGNED_BYTE, 0, col_buf);
+        if (ptr_changed(PTR_COLOR, A->col, 4))
+            glColorPointer(4, GL_UNSIGNED_BYTE, 0, A->col);
     } else {
         glDisableClientState(GL_COLOR_ARRAY);
         glColor4f(1, 1, 1, 1);
     }
     if (L->has_normal) {
         glEnableClientState(GL_NORMAL_ARRAY);
-        if (ptr_changed(PTR_NORMAL, nrm_buf, 3))
-            glNormalPointer(GL_FLOAT, 0, nrm_buf);
+        if (ptr_changed(PTR_NORMAL, A->nrm, 3))
+            glNormalPointer(GL_FLOAT, 0, A->nrm);
     } else {
         glDisableClientState(GL_NORMAL_ARRAY);
     }
 #if !defined(__vita__)
     if (L->use_fog) {
         glEnableClientState(GL_FOG_COORDINATE_ARRAY);
-        if (ptr_changed(PTR_FOG, fog_buf, 1))
-            glFogCoordPointer(GL_FLOAT, 0, fog_buf);
+        if (ptr_changed(PTR_FOG, A->fog, 1))
+            glFogCoordPointer(GL_FLOAT, 0, A->fog);
     } else {
         glDisableClientState(GL_FOG_COORDINATE_ARRAY);
         glFogCoordf(1.0f);
@@ -1722,8 +1752,8 @@ static void submit(int prim, const Layout *L, uint32_t nv, const uint16_t *idx, 
         glClientActiveTexture(GL_TEXTURE0 + (GLenum)s);
         if (s < L->stages && L->uv_src[s] >= 0) {
             glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-            if (ptr_changed(PTR_TEX0 + s, uv_buf[s], 2))
-                glTexCoordPointer(2, GL_FLOAT, 0, uv_buf[s]);
+            if (ptr_changed(PTR_TEX0 + s, A->uv[s], 2))
+                glTexCoordPointer(2, GL_FLOAT, 0, A->uv[s]);
         } else {
 #if defined(__vita__)
             /* Audit experiment (diagnostic mode 9): zero texcoord array on units
@@ -1752,6 +1782,10 @@ static void submit(int prim, const Layout *L, uint32_t nv, const uint16_t *idx, 
         glDrawElements(gl_prim(prim), (GLsizei)ni, GL_UNSIGNED_SHORT, idx);
     else
         glDrawArrays(gl_prim(prim), 0, (GLsizei)nv);
+    if (A->vbo) {
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        ptr_cache_reset();
+    }
     if (L->use_color)
         color_cache_valid = 0;   /* GL leaves the current color undefined after a color array */
     pc_frame[PC_GL_US] += win32_perf_counter() - t1;
@@ -2129,6 +2163,157 @@ static void batch_draw_impl(int prim, const RVertex *v, uint32_t nv, const uint1
         *out++ = (uint16_t)(base + c);
     }
     batch_ni += tris * 3u;
+}
+
+/* ---- static vertex buffers in GPU memory ----------------------------------
+ * Vertex buffers the game leaves unchanged are uploaded once to a GL buffer
+ * object with every attribute they have; their draws then only send indices
+ * (no decode, packing, index scan or per-draw vertex copy in vitaGL). Draws
+ * that could cross the near plane still take the CPU path (near_clip).
+ */
+typedef struct VBGL {
+    GLuint buf;
+    uint32_t gen, count;
+    int has_normal, has_color, has_spec, ntex;
+    size_t off_col, off_nrm, off_fog, off_uv[MAX_STAGES];
+    float lo[3], hi[3];   /* object-space bounds */
+} VBGL;
+
+void render_vb_release(void **slot)
+{
+    VBGL *g = *slot;
+    if (!g)
+        return;
+    render_flush();
+    GLuint b = g->buf;
+    glDeleteBuffers(1, &b);
+    free(g);
+    *slot = NULL;
+}
+
+static VBGL *vb_upload(void **slot, uint32_t gen, const RVertex *v, uint32_t count, int has_normal, int has_color,
+                       int has_spec, int ntex)
+{
+    VBGL *g = *slot;
+    if (g && g->gen == gen && g->count == count && g->has_normal == has_normal && g->has_color == has_color &&
+        g->has_spec == has_spec && g->ntex == ntex)
+        return g;
+    if (!g) {
+        g = calloc(1, sizeof(*g));
+        GLuint b;
+        glGenBuffers(1, &b);
+        g->buf = b;
+        *slot = g;
+    }
+    g->gen = gen;
+    g->count = count;
+    g->has_normal = has_normal;
+    g->has_color = has_color;
+    g->has_spec = has_spec;
+    g->ntex = ntex;
+    size_t n = count, o = n * 12u;
+    g->off_col = o;
+    o += has_color ? n * 4u : 0u;
+    g->off_nrm = o;
+    o += has_normal ? n * 12u : 0u;
+    g->off_fog = o;
+    o += has_spec ? n * 4u : 0u;
+    for (int s = 0; s < MAX_STAGES; s++) {
+        g->off_uv[s] = o;
+        o += s < ntex ? n * 8u : 0u;
+    }
+    uint8_t *data = malloc(o);
+    float *pos = (float *)data;
+    for (int k = 0; k < 3; k++) {
+        g->lo[k] = 1e30f;
+        g->hi[k] = -1e30f;
+    }
+    for (uint32_t i = 0; i < count; i++) {
+        const float *p = &v[i].x;
+        for (int k = 0; k < 3; k++) {
+            pos[i * 3u + (uint32_t)k] = p[k];
+            g->lo[k] = p[k] < g->lo[k] ? p[k] : g->lo[k];
+            g->hi[k] = p[k] > g->hi[k] ? p[k] : g->hi[k];
+        }
+        if (has_color)
+            memcpy(data + g->off_col + i * 4u, &v[i].color, 4);
+        if (has_normal)
+            memcpy(data + g->off_nrm + i * 12u, &v[i].nx, 12);
+        if (has_spec) {
+            float f = (float)(v[i].spec >> 24) * (1.0f / 255.0f);
+            memcpy(data + g->off_fog + i * 4u, &f, 4);
+        }
+        for (int s = 0; s < MAX_STAGES && s < ntex; s++)
+            memcpy(data + g->off_uv[s] + i * 8u, v[i].uv[s], 8);
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, g->buf);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)o, data, GL_STATIC_DRAW);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    free(data);
+    pc_frame[PC_TEX_BYTES] += o;
+    return g;
+}
+
+#if defined(__vita__)
+/* True when every corner of the bounds is in front of the near plane (clip z >= 0). */
+static int vb_in_front(const VBGL *g)
+{
+    float m[16];
+    mat_mul(g_rs.world, g_rs.view, m);
+    mat_mul(m, g_rs.proj, m);
+    for (int c = 0; c < 8; c++) {
+        float x = (c & 1) ? g->hi[0] : g->lo[0], y = (c & 2) ? g->hi[1] : g->lo[1], z = (c & 4) ? g->hi[2] : g->lo[2];
+        if (x * m[2] + y * m[6] + z * m[10] + m[14] < 0.0f)
+            return 0;
+    }
+    return 1;
+}
+#endif
+
+int render_draw_vb(void **slot, uint32_t gen, const RVertex *all, uint32_t count, uint32_t start, int prim,
+                   uint32_t nv, const uint16_t *idx, uint32_t ni, int has_normal, int has_color, int has_spec,
+                   int ntex)
+{
+    if (diag_mode == DIAG_NO_VBO || diag_mode == DIAG_ZERO_UV || diag_mode == DIAG_NO_3D ||
+        diag_mode == DIAG_NO_COMPACT || g_trace_next_frame == 2 || !nv || start + nv > count)
+        return 0;
+    if (prim != PRIM_TRIANGLES && prim != PRIM_TRIANGLE_STRIP && prim != PRIM_TRIANGLE_FAN)
+        return 0;
+    if (in_render_draw)
+        return 0;
+    PROF_SECTION(PROF_H_TEXTURE);
+    VBGL *g = vb_upload(slot, gen, all, count, has_normal, has_color, has_spec, ntex);
+    PROF_SECTION_END;
+#if defined(__vita__)
+    if (diag_mode != DIAG_NO_NEARCLIP && !vb_in_front(g))
+        return 0;
+#endif
+    render_flush();
+    uint64_t t0 = win32_perf_counter();
+    perf.draws++;
+    Layout L;
+    layout_init(&L, 0, has_normal, has_color, has_spec, ntex);
+    L.use_color = has_color;
+    DrawArrays A = { g->buf, (const void *)(uintptr_t)(start * 12u), (const void *)(g->off_col + start * 4u),
+                     (const void *)(g->off_nrm + start * 12u), (const void *)(g->off_fog + start * 4u), { 0 } };
+    for (int s = 0; s < MAX_STAGES; s++) {
+        int k = L.uv_src[s] < 0 ? 0 : L.uv_src[s];
+        A.uv[s] = (const void *)(g->off_uv[k] + start * 8u);
+    }
+    static uint16_t *ib;
+    static uint32_t ib_cap;
+    const uint16_t *ip = idx;
+    if (idx && ((uintptr_t)idx & 1u)) {
+        if (ni > ib_cap) {
+            ib_cap = ni + 1024u;
+            ib = realloc(ib, ib_cap * sizeof(uint16_t));
+        }
+        memcpy(ib, idx, ni * sizeof(uint16_t));
+        ip = ib;
+    }
+    submit_arrays(prim, &L, nv, ip, ni, &A);
+    perf.draw_us += win32_perf_counter() - t0;
+    return 1;
 }
 
 void render_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, uint32_t ni,
