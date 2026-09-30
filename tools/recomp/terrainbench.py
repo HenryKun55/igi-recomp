@@ -1,17 +1,24 @@
-"""Terrain renderer benchmark on a synthetic but realistic frame.
+"""Terrain renderer benchmark and differential test on synthetic and captured frames.
 
 armbench.py runs every function from random inputs, which never gets far into
 the terrain renderer (f_00512C30, the hottest guest function in gameplay). This
-builds a frame for it instead: a camera, 9x9-vertex terrain patches with
-triangle strips and material passes, the batch pool and fake Direct3D objects
-(their COM methods are host stubs), then runs it in Unicorn ARM and counts the
-ARM instructions executed per function. Given two ELFs (e.g. before and after a
-generator change) it also checks that the final guest memory and context are
-identical.
+builds a frame for it instead: a camera anywhere above a grid of terrain patches
+(base and morph vertices, triangle strips, texture groups, detail pass), the
+batch pool and fake Direct3D objects whose COM methods are host stubs that log
+every call into guest memory, then runs it in Unicorn ARM and counts the ARM
+instructions executed per function. It can also replay frames captured from the
+running game (IGI_TERRAIN_DUMP, runtime/src/capture.c).
 
   terrainbench.py build IGI.exe GEN_DIR OUT.elf
-  terrainbench.py run IGI.exe A.elf [B.elf] [--patches N] [--seed S]
-                  [--profile GEN_DIR [--func f_XXXXXXXX]]
+  terrainbench.py run IGI.exe A.elf [B.elf] [--patches N] [--seed S] [--frame F]
+                  [--native 0|1] [--profile GEN_DIR [--func f_XXXXXXXX]]
+  terrainbench.py diff IGI.exe A.elf [--seed S --count N | --frame F ...]
+
+run: with two ELFs (e.g. before and after a generator change) also checks that
+the final guest memory (outside the dead stack) and context are identical.
+diff: runs one ELF with g_igi_native = 0 (recompiled code) and 1 (the native
+version in runtime/src/native_terrain.c) and compares them the same way,
+including the logged Direct3D calls.
 
 --profile writes A.elf.prof: executed ARM instructions per guest instruction of
 one function (default f_00512C30), from the debug line info. The ELF is built
