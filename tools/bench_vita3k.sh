@@ -48,7 +48,8 @@ stop() {
 }
 trap 'stop; exit 1' INT TERM
 
-VITA3K_CPU_MHZ=${MHZ:-444} "$VITA3K" -r PIGI00001 > "$LOG" 2>&1 &
+# In a subshell, so the shell does not report the kill below.
+(VITA3K_CPU_MHZ=${MHZ:-444} "$VITA3K" -r PIGI00001 > "$LOG" 2>&1 &)
 echo "Vita3K started (CPU ${MHZ:-444} MHz), waiting for the result (timeout $TIMEOUT s)"
 
 waited=0
@@ -59,7 +60,7 @@ while [ ! -s "$DATA/bench_result.txt" ] && [ $waited -lt "$TIMEOUT" ]; do
     sleep 2
     waited=$((waited + 2))
 done
-# The game exits by itself after writing the result; give the profile a moment.
+# The game writes the profile right after the result and exits (Vita3K stays open).
 sleep 2
 stop
 
