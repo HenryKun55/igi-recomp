@@ -197,7 +197,9 @@ void rt_x87_mismatch(Ctx *c, uint32_t addr, uint32_t expect);
 
 /* Round according to the rounding-control field of the control word. Round to
  * nearest is inline: below 2^52, adding and subtracting 2^52 to the magnitude
- * rounds to nearest-even in the host's default rounding mode (no libm call). */
+ * rounds to nearest-even in the host's default rounding mode (no libm call).
+ * Truncation (the game draws its frames with control word 0xE3F) is inline too:
+ * below 2^31 a conversion to int32 and back truncates, the sign keeps -0.0. */
 static inline double rt_fround(const Ctx *c, double v)
 {
     if (__builtin_expect((c->fcw & 0x0C00u) == 0, 1)) {
@@ -207,6 +209,8 @@ static inline double rt_fround(const Ctx *c, double v)
         return v + 0.0;                         /* integral, infinite or NaN (quieted) */
     }
     uint32_t rc = (c->fcw >> 10) & 3u;
+    if (rc == 3u && fabs(v) < 2147483648.0)
+        return copysign((double)(int32_t)v, v);
     if (rc == 1)
         return floor(v);
     return rc == 2 ? ceil(v) : trunc(v);
@@ -235,12 +239,15 @@ static inline double rt_fild64(uint64_t v)
     return (double)(int64_t)v;
 }
 
-/* fist: the common case (round to nearest, result representable) is inline. Adding
- * 1.5 * 2^52 rounds to nearest-even in the host's default rounding mode, and while
- * the sum stays in [2^52, 2^53) its low mantissa bits are the rounded integer in
- * two's complement: no conversion instruction is needed. Everything else (other
- * rounding modes, out of range, NaN) goes out of line. */
+/* fist: the common cases (round to nearest or truncate, result representable) are
+ * inline. Adding 1.5 * 2^52 rounds to nearest-even in the host's default rounding
+ * mode, and while the sum stays in [2^52, 2^53) its low mantissa bits are the
+ * rounded integer in two's complement: no conversion instruction is needed. In
+ * truncating mode a C conversion truncates. Everything else (other rounding modes,
+ * out of range, NaN) goes out of line (the same results: see fround_small). */
 #define RT_FIST_NEAREST(c) (((c)->fcw & 0x0C00u) == 0)
+#define RT_FIST_CHOP(c) (((c)->fcw & 0x0C00u) == 0x0C00u)
+#define RT_FIST_SMALL(v) ((v) > -2147483647.0 && (v) < 2147483647.0)
 #define RT_ROUND_MAGIC 6755399441055744.0
 #define RT_ROUND_MAGIC_BITS 0x4338000000000000ull
 
@@ -258,9 +265,13 @@ int16_t rt_fist16_slow(const Ctx *c, double v);
 
 static inline int64_t rt_fist64(Ctx *c, double v)
 {
-    uint64_t b = rt_round_bits(v);
-    if (RT_FIST_NEAREST(c) && (uint32_t)(b >> 52) == 0x433u)
-        return (int64_t)(b - RT_ROUND_MAGIC_BITS);
+    if (RT_FIST_NEAREST(c)) {
+        uint64_t b = rt_round_bits(v);
+        if ((uint32_t)(b >> 52) == 0x433u)
+            return (int64_t)(b - RT_ROUND_MAGIC_BITS);
+    } else if (RT_FIST_CHOP(c) && RT_FIST_SMALL(v)) {
+        return (int32_t)v;
+    }
     return rt_fist64_slow(c, v);
 }
 
@@ -268,19 +279,27 @@ static inline int64_t rt_fist64(Ctx *c, double v)
  * extension of the low word (which also implies the sum's exponent is 2^52). */
 static inline int32_t rt_fist32(Ctx *c, double v)
 {
-    uint64_t b = rt_round_bits(v);
-    uint32_t lo = (uint32_t)b, hi = (uint32_t)(b >> 32) - 0x43380000u;
-    if (RT_FIST_NEAREST(c) && hi == (uint32_t)((int32_t)lo >> 31))
-        return (int32_t)lo;
+    if (RT_FIST_NEAREST(c)) {
+        uint64_t b = rt_round_bits(v);
+        uint32_t lo = (uint32_t)b, hi = (uint32_t)(b >> 32) - 0x43380000u;
+        if (hi == (uint32_t)((int32_t)lo >> 31))
+            return (int32_t)lo;
+    } else if (RT_FIST_CHOP(c) && RT_FIST_SMALL(v)) {
+        return (int32_t)v;
+    }
     return rt_fist32_slow(c, v);
 }
 
 static inline int16_t rt_fist16(Ctx *c, double v)
 {
-    uint64_t b = rt_round_bits(v);
-    uint32_t lo = (uint32_t)b, hi = (uint32_t)(b >> 32) - 0x43380000u;
-    if (RT_FIST_NEAREST(c) && hi == (uint32_t)((int32_t)lo >> 31) && lo + 0x8000u < 0x10000u)
-        return (int16_t)lo;
+    if (RT_FIST_NEAREST(c)) {
+        uint64_t b = rt_round_bits(v);
+        uint32_t lo = (uint32_t)b, hi = (uint32_t)(b >> 32) - 0x43380000u;
+        if (hi == (uint32_t)((int32_t)lo >> 31) && lo + 0x8000u < 0x10000u)
+            return (int16_t)lo;
+    } else if (RT_FIST_CHOP(c) && v > -32769.0 && v < 32768.0) {
+        return (int16_t)(int32_t)v;
+    }
     return rt_fist16_slow(c, v);
 }
 
