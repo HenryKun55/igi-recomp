@@ -65,6 +65,10 @@ void handle_close(uint32_t h)
         return;
     if (o->type == H_FILE && o->fd >= 0)
         close(o->fd);
+    if (o->type == H_FILE) {
+        free(o->ptr);
+        o->ptr = NULL;
+    }
     if (o->type == H_FIND && o->ptr) {
         free(o->ptr);
     }
@@ -431,6 +435,66 @@ SHIM(kernel32, CreateFileA)
     stdcall_ret(c, h, 7);
 }
 
+/* ---- buffered reads ----------------------------------------------------
+ * The game streams sound in small ReadFile calls; each one was a system call
+ * (slow on the Vita). Reads go through a per-handle read-ahead buffer. While
+ * the buffer is valid the descriptor sits at base + len and the file position
+ * the game sees is base + pos.
+ */
+#define READ_AHEAD (64u * 1024u)
+
+typedef struct ReadBuf {
+    off_t base;
+    uint32_t len, pos;
+    uint8_t data[READ_AHEAD];
+} ReadBuf;
+
+/* Puts the descriptor back at the game's position and drops the buffer. */
+static void rb_drop(HandleObj *o)
+{
+    ReadBuf *b = o->ptr;
+    if (b && b->len) {
+        lseek(o->fd, b->base + (off_t)b->pos, SEEK_SET);
+        b->len = b->pos = 0;
+    }
+}
+
+static ssize_t rb_read(HandleObj *o, uint8_t *dst, uint32_t n)
+{
+    ReadBuf *b = o->ptr;
+    if (!b) {
+        b = calloc(1, sizeof(*b));
+        o->ptr = b;
+    }
+    ssize_t total = 0;
+    while (n) {
+        if (b->pos < b->len) {
+            uint32_t k = b->len - b->pos < n ? b->len - b->pos : n;
+            memcpy(dst, b->data + b->pos, k);
+            b->pos += k;
+            dst += k;
+            n -= k;
+            total += k;
+            continue;
+        }
+        if (n >= READ_AHEAD) {   /* big reads go straight through */
+            rb_drop(o);
+            ssize_t got = read(o->fd, dst, n);
+            return got < 0 ? (total ? total : got) : total + got;
+        }
+        off_t at = b->len ? b->base + (off_t)b->len : lseek(o->fd, 0, SEEK_CUR);
+        ssize_t got = read(o->fd, b->data, READ_AHEAD);
+        if (got <= 0) {
+            b->len = b->pos = 0;
+            break;
+        }
+        b->base = at;
+        b->len = (uint32_t)got;
+        b->pos = 0;
+    }
+    return total;
+}
+
 SHIM(kernel32, ReadFile)
 {
     uint32_t h = ARG(0), buf = ARG(1), n = ARG(2), out = ARG(3);
@@ -441,7 +505,7 @@ SHIM(kernel32, ReadFile)
         return;
     }
     uint64_t t0 = win32_perf_counter();
-    ssize_t got = read(o->fd, gptr(buf), n);
+    ssize_t got = rb_read(o, gptr(buf), n);
     if (got < 0)
         got = 0;
     /* I/O statistics (ReadFile shows up in gameplay profiles). */
@@ -471,6 +535,7 @@ SHIM(kernel32, WriteFile)
     if (o && o->type == H_STD) {
         put = (ssize_t)fwrite(gptr(buf), 1, n, stderr);
     } else if (o && o->type == H_FILE) {
+        rb_drop(o);
         put = write(o->fd, gptr(buf), n);
     } else {
         win32_set_last_error(ERROR_INVALID_HANDLE);
@@ -495,7 +560,21 @@ SHIM(kernel32, SetFilePointer)
     if (high)
         off = (int64_t)(((uint64_t)RD32(high) << 32) | dist);
     int whence = method == 1 ? SEEK_CUR : method == 2 ? SEEK_END : SEEK_SET;
-    off_t r = lseek(o->fd, (off_t)off, whence);
+    ReadBuf *b = o->ptr;
+    off_t r;
+    if (b && b->len && whence != SEEK_END) {
+        off_t target = whence == SEEK_CUR ? b->base + (off_t)b->pos + (off_t)off : (off_t)off;
+        if (target >= b->base && target <= b->base + (off_t)b->len) {
+            b->pos = (uint32_t)(target - b->base);   /* inside the buffer: no system call */
+            r = target;
+        } else {
+            b->len = b->pos = 0;
+            r = lseek(o->fd, target, SEEK_SET);
+        }
+    } else {
+        rb_drop(o);
+        r = lseek(o->fd, (off_t)off, whence);
+    }
     if (high)
         WR32(high, (uint32_t)((uint64_t)r >> 32));
     stdcall_ret(c, (uint32_t)r, 4);
@@ -506,6 +585,7 @@ SHIM(kernel32, SetEndOfFile)
     HandleObj *o = handle_get(ARG(0), H_FILE);
     int ok = 0;
     if (o) {
+        rb_drop(o);
         off_t pos = lseek(o->fd, 0, SEEK_CUR);
         ok = ftruncate(o->fd, pos) == 0;
     }
