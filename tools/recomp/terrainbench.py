@@ -44,6 +44,7 @@ static void com_stub(Ctx *c)
 GuestFn thunk_lookup(uint32_t a) { (void)a; return com_stub; }
 void rt_fatal(Ctx *c, const char *fmt, ...) { (void)c; (void)fmt; for (;;) __asm__ volatile("udf #1"); }
 void rt_probe(Ctx *c, uint32_t f) { (void)c; (void)f; }
+void rt_log(const char *fmt, ...) { (void)fmt; }
 void rt_missing_import(Ctx *c, const char *n) { (void)c; (void)n; __asm__ volatile("udf #2"); }
 int *__errno(void) { static int e; return &e; }
 /* On the Vita memcpy/memmove/memset are SceLibc calls; these word-at-a-time
@@ -111,7 +112,16 @@ class Alloc:
         return a
 
 
-def scene(npatch=4, seed=1):
+def cross(a, b):
+    return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+
+
+def scene(npatch=12, seed=1):
+    """A terrain frame: camera at a random place and orientation above a grid of
+    16-unit patches around it (7x7 base vertices plus morph vertices, strips of
+    full-triangle entries, 0-2 extra texture groups, optional detail pass). Patches
+    under and behind the camera cross the near plane, others the screen edges or
+    the patch range."""
     rnd = random.Random(seed)
     m = Mem()
     al = Alloc(SCENE)
@@ -125,19 +135,25 @@ def scene(npatch=4, seed=1):
     m.u32(vb, vt)
     m.u32(0x5CA114, dev)
     m.u32(0xA7F890, vb)
-    vbuf = al(0x40000)
+    vbuf = al(0x80000)
     m.u32(0xA7F89C, vbuf)
     m.u32(0xA7E078, 0)
+    m.u32(0xA7E070, rnd.randrange(0, 100))
     # Writable dummies written through at the start.
     for g in (0xBCADE8, 0xBCAD7C, 0xBCADAC, 0xBCADC4):
         m.u32(g, al(64))
-    # Camera: position (doubles), rotation rows, projection, clipping.
-    cam = (0.0, 30.0, 0.0)
+    m.u32(0xC28B44, 640)
+    m.u32(0xC28B48, 480)
+    # Camera: position (doubles), rotation rows (right, down, forward).
+    cam = (rnd.uniform(-40.0, 40.0), rnd.uniform(1.5, 12.0), rnd.uniform(-40.0, 40.0))
     for i, v in enumerate(cam):
         m.f64(0xBCAB08 + 8 * i, v)
-    ang = 0.3                          # yaw
-    ca, sa = math.cos(ang), math.sin(ang)
-    rows = [(ca, 0.0, -sa), (0.0, -1.0, 0.0), (sa, 0.0, ca)]
+    yaw = rnd.uniform(-math.pi, math.pi)
+    pitch = rnd.uniform(-0.6, 0.3)
+    fw = (math.cos(pitch) * math.sin(yaw), math.sin(pitch), math.cos(pitch) * math.cos(yaw))
+    right = (math.cos(yaw), 0.0, -math.sin(yaw))
+    up = cross(fw, right)
+    rows = [right, tuple(-x for x in up), fw]
     for r, row in enumerate(rows):
         for k, v in enumerate(row):
             m.f32(0xBCAAE0 + 12 * r + 4 * k, v)
@@ -146,22 +162,25 @@ def scene(npatch=4, seed=1):
     m.f32(0xC311A0, 320.0)
     m.f32(0xC311B0, 320.0)
     m.f32(0xC311B4, 240.0)
-    for a, v in ((0xBCABD0, 0.0), (0xBCABD4, 0.0), (0xBCABD8, 640.0), (0xBCABDC, 480.0)):
+    # Clip rectangle: the screen, sometimes a smaller viewport.
+    inset = rnd.choice([0.0, 0.0, 16.0])
+    for a, v in ((0xBCABD0, inset), (0xBCABD4, inset), (0xBCABD8, 640.0 - inset), (0xBCABDC, 480.0 - inset)):
         m.f32(a, v)
-    m.f32(0xBCADC0, 1.0)           # near plane
-    m.f32(0xBCADCC, 1.0e9)         # patch distance limit
+    m.f32(0xBCADC0, rnd.choice([0.5, 1.0, 2.0]))     # near plane
+    m.f32(0xBCADCC, 1771.0 + rnd.uniform(30.0, 80.0))   # patch range (radius term 1024 * 1.73)
     m.f32(0xBCADA0, 1.0)
     m.f32(0xBCADC8, 2.0)
     m.f32(0xBCAD8C, 1000.0)
     m.f32(0xBCADB4, 1.0)
-    m.f32(0xBCAD70, 0.001)
-    m.f32(0xBCABEC, 1.0)
-    m.f32(0xA7DA18, 0.004)         # fog density
+    m.f32(0xBCAD70, 0.5)                             # rhw scale
+    m.f32(0xBCABEC, 2.0)                             # 1 / rhw scale
+    m.u32(0xBCAD78, 1)
+    m.f32(0xA7DA18, rnd.uniform(0.002, 0.03))        # fog density
     m.f32(0xA7DA30, 0.5)
     m.f32(0xA7DA34, 0.6)
     m.f32(0xA7DA38, 0.7)
-    m.u32(0xC31088, 40)
-    m.f32(0xC28FC0, 0.02)
+    m.u32(0xC31088, rnd.choice([0, 0, 1]))           # lod bias
+    m.f32(0xC28FC0, rnd.uniform(1.5, 3.0))           # lod scale
     m.u32(0xC28FBC, 0)
     # Batch pool used by 514680 and the flush loop.
     kmax = 64
@@ -182,70 +201,105 @@ def scene(npatch=4, seed=1):
         m.u32(s + 4, 0)
         m.u32(s + 8, s)
     mats = []
-    for i in range(3):
+    for i in range(4):
         mt = al(0x40)
         m.u32(mt + 0x20, 0x1000 + i)
         mats.append(mt)
-    # Patches: 9x9 vertex grids ahead of the camera.
-    n = 9
-    nv = n * n
+    # Patches on the 16-unit grid cells nearest to the camera, in random order.
+    n = 7
+    size = 16.0
+    step = size / (n - 1)
+    cx, cz = int(math.floor(cam[0] / size)), int(math.floor(cam[2] / size))
+    cells = [(cx + i, cz + j) for i in range(-3, 4) for j in range(-3, 4)]
+    cells.sort(key=lambda c: (c[0] - cx) ** 2 + (c[1] - cz) ** 2)
+    cells = cells[:npatch]
+    rnd.shuffle(cells)
     plist = []
-    for p in range(npatch):
-        px = (p % 2) * 64.0 - 32.0
-        pz = 16.0 + (p // 2) * 64.0
-        rec = al(0x18 + 16 + nv * 16 + 16 + 3 * (4 + nv * 12) + 4 + 4 + nv * 12 + 16)
-        plist.append(rec)
-        m.f64(rec, px + 32.0)
-        m.f64(rec + 8, 0.0)
-        m.f64(rec + 16, pz + 32.0)
-        e = rec + 0x18
-        m.u32(e, (nv << 16) | nv)
-        m.u32(e + 4, 18)
-        e += 8
+    for (gx, gz) in cells:
+        x0, z0 = gx * size, gz * size
+        nbase = n * n
+        base = []
         for j in range(n):
             for i in range(n):
-                m.f32(e, px + i * 8.0)
-                m.f32(e + 4, rnd.uniform(-4.0, 4.0))
-                m.f32(e + 8, pz + j * 8.0)
-                m.f32(e + 12, rnd.uniform(-1.0, 1.0))
-                e += 16
-        # Triangle strips, one per grid row.
-        strips = []
+                base.append((x0 + i * step, rnd.uniform(-1.5, 1.5), z0 + j * step))
+        # Morph vertices: edge midpoints moving to a neighbouring base vertex.
+        nextra = rnd.randrange(0, 16)
+        extra = []
+        for e in range(nextra):
+            j, i = rnd.randrange(n - 1), rnd.randrange(n - 1)
+            a = j * n + i
+            b = a + rnd.choice([1, n])
+            pa, pb = base[a], base[b]
+            extra.append(((pa[0] + pb[0]) / 2, (pa[1] + pb[1]) / 2 + rnd.uniform(-0.3, 0.3),
+                          (pa[2] + pb[2]) / 2, rnd.choice([a, b])))
+        ntotal = nbase + nextra
+        # Strips: one per grid row, entries (previous two, new); single triangles with morph vertices.
+        words = []
         for r in range(n - 1):
             seq = []
             for i in range(n):
                 seq += [r * n + i, (r + 1) * n + i]
-            words = [(seq[0] << 16) | (seq[1] << 8) | seq[2]] + seq[3:]
+            for k in range(2, len(seq)):
+                words.append((seq[k - 2] << 16) | (seq[k - 1] << 8) | seq[k])
             words[-1] |= 0x10000000
-            strips += words
-        il = al(4 * len(strips))
-        for k, w in enumerate(strips):
+        for e in range(nextra):
+            v = nbase + e
+            p = extra[e][3]
+            q = p + 1 if (p % n) < n - 1 else p - 1
+            words.append((p << 16) | (q << 8) | v | 0x10000000)
+        ngroups = rnd.choice([0, 1, 2])
+        detail = rnd.random() < 0.6
+        rec = al(0x20 + 16 * ntotal + 16 + (max(1, ngroups) * 2 * (4 + 20 * ntotal)) + 4 + 20 * ntotal + 64)
+        plist.append(rec)
+        m.f64(rec, x0 + size / 2)
+        m.f64(rec + 8, 0.0)
+        m.f64(rec + 16, z0 + size / 2)
+        m.u32(rec + 0x18, (nbase << 16) | ntotal)
+        m.u32(rec + 0x1C, 20)
+        e = rec + 0x20
+        for (x, y, z) in base:
+            m.f32(e, x)
+            m.f32(e + 4, y)
+            m.f32(e + 8, z)
+            m.f32(e + 12, rnd.uniform(-0.5, 0.5))
+            e += 16
+        for (x, y, z, p) in extra:
+            m.f32(e, x)
+            m.f32(e + 4, y)
+            m.f32(e + 8, z)
+            m.u32(e + 12, p)
+            e += 16
+        il = al(4 * len(words))
+        for k, w in enumerate(words):
             m.u32(il + 4 * k, w)
-        m.u32(e, 0)
+        m.u32(e, rnd.choice([0, 4, 0x13]))
         m.u32(e + 4, il)
-        m.u32(e + 8, 0)
-        m.u32(e + 12, len(strips))
+        m.u32(e + 8, ngroups)
+        m.u32(e + 12, len(words))
         e += 16
-        for pas in range(3):
-            m.u32(e, mats[pas])
+
+        def records(e, mat):
+            m.u32(e, mat)
             e += 4
-            for v in range(nv):
-                m.u32(e, 32 * v)
-                m.f32(e + 4, rnd.uniform(0.0, 1.0))
-                m.f32(e + 8, rnd.uniform(0.0, 1.0))
+            for v in range(nbase):
+                m.u32(e, 32 * v + 4 * rnd.randrange(8))
+                m.f32(e + 4, rnd.uniform(0.0, 4.0))
+                m.f32(e + 8, rnd.uniform(0.0, 4.0))
                 e += 12
-        m.u32(e, mats[0])           # detail pass
-        e += 4
-        for v in range(nv):
-            m.u32(e, 32 * v)
-            m.f32(e + 4, rnd.uniform(0.0, 4.0))
-            m.f32(e + 8, rnd.uniform(0.0, 4.0))
-            e += 12
-    pl = al(4 * len(plist))
-    for k, a in enumerate(plist):
-        m.u32(pl + 4 * k, a)
+            for (_, _, _, p) in extra:
+                m.u32(e, (p << 16) | (32 * p + 4 * rnd.randrange(8)))
+                for k in range(4):
+                    m.f32(e + 4 + 4 * k, rnd.uniform(-1.0, 4.0))
+                e += 20
+            return e
+        for g in range(max(1, ngroups)):
+            for pas in range(2):
+                e = records(e, rnd.choice(mats))
+        if detail:
+            e = records(e, mats[3])
+        else:
+            m.u32(e, 0)
     m.u32(0xB16C9C, len(plist))
-    # The list pointer is an immediate (0xB12C60): copy it there.
     for k, a in enumerate(plist):
         m.u32(0xB12C60 + 4 * k, a)
     return m
@@ -273,7 +327,9 @@ def funcs_of(path):
     return syms
 
 
-def run(exe, path, npatch, seed, prof_gen=None, prof_func='f_00512C30'):
+def run(exe, path, npatch, seed, prof_gen=None, prof_func='f_00512C30', native=None, frame=None, setup=None):
+    """Runs f_00512C30 on a synthetic scene (or `frame`: (Mem, esp) of a captured
+    frame). native: value for g_igi_native (None leaves the ELF's default)."""
     ab = armbench
     from unicorn import Uc, UcError, UC_ARCH_ARM, UC_MODE_THUMB, UC_HOOK_BLOCK
     from unicorn import arm_const as A
@@ -292,12 +348,13 @@ def run(exe, path, npatch, seed, prof_gen=None, prof_func='f_00512C30'):
     uc.mem_map(ab.GMEM, ab.GSIZE)
     uc.mem_write(ab.GMEM + 0x400000, ab.guest_image(exe))
     uc.mem_write(syms['g_mem'], struct.pack('<I', ab.GMEM))
-    m = scene(npatch, seed)
+    m, esp = frame if frame is not None else (scene(npatch, seed), 0x02EFF000)
     for a, b in m.w.items():
         uc.mem_write(ab.GMEM + a, b)
-    esp = 0x02EFF000
+    if native is not None:
+        uc.mem_write(syms['g_igi_native'], struct.pack('<i', native))
     uc.mem_write(ab.GMEM + esp, struct.pack('<I', 0xFDFDFD00))
-    regs = [0, 0, 0, 0, esp, 0x02EFFF00, 0, 0]
+    regs = [0x11111111, 0x22222222, 0x33333333, 0x44444444, esp, 0x55555555, 0x66666666, 0x77777777]
     ctx = struct.pack('<8I3I4x8dIII', *regs, 0, 0, 0x00020000, *([0.0] * 8), 0, 0x27F, 0)
     uc.mem_write(ab.CTX, ctx)
     uc.reg_write(A.UC_ARM_REG_C1_C0_2, uc.reg_read(A.UC_ARM_REG_C1_C0_2) | (0xF << 20))
@@ -324,6 +381,8 @@ def run(exe, path, npatch, seed, prof_gen=None, prof_func='f_00512C30'):
             blocks[(addr, size)] = blocks.get((addr, size), 0) + 1
 
     uc.hook_add(UC_HOOK_BLOCK, hook)
+    if setup:
+        setup(uc, syms)          # extra hooks (diagnostics)
     status = 'ok'
     try:
         uc.emu_start(syms['f_00512C30'] | 1, ab.STOP, count=200_000_000)
@@ -393,20 +452,79 @@ def profile(path, gen, addrs, blocks):
             f.write('%s %d\n' % ('%08X' % a if a else '?', res[a]))
 
 
+# Guest stack below the entry esp: dead after the return (locals, call frames).
+STACK_SCRATCH = 0x40000
+# Context fields a caller can observe: eax, ebx, esp, ebp, esi, edi, x87 top.
+CTX_LIVE = [(0, 4), (12, 4), (16, 4), (20, 4), (24, 4), (28, 4), (112, 4)]
+
+
+def compare(ra, rb, esp):
+    """Differences between two runs: guest memory outside the dead stack area and
+    the live context fields. Returns a list of descriptions (empty: identical)."""
+    a, b = ra[3], rb[3]
+    lo = esp - STACK_SCRATCH
+    out = []
+    if a[:lo] != b[:lo] or a[esp:] != b[esp:]:
+        for base, end in ((0, lo), (esp, len(a))):
+            for pg in range(base, end, 4096):
+                if a[pg:pg + 4096] == b[pg:pg + 4096]:
+                    continue
+                for i in range(pg, min(pg + 4096, end), 4):
+                    if a[i:i + 4] != b[i:i + 4]:
+                        out.append('mem %08X: %s / %s' % (i, a[i:i + 4].hex(), b[i:i + 4].hex()))
+    for off, n in CTX_LIVE:
+        if ra[4][off:off + n] != rb[4][off:off + n]:
+            out.append('ctx +%d: %s / %s' % (off, ra[4][off:off + n].hex(), rb[4][off:off + n].hex()))
+    return out
+
+
+def diff_mode(args):
+    """Recompiled (g_igi_native = 0) against native (1) on several scenes."""
+    seeds = range(args.seed, args.seed + args.count)
+    fails = 0
+    tot = [0, 0]
+    for seed in seeds:
+        res = [run(args.exe, args.files[0], args.patches, seed, native=k) for k in (0, 1)]
+        mem = res[0][3]
+        verts = struct.unpack_from('<I', mem, 0xA7E078)[0]
+        clips = struct.unpack_from('<I', mem, 0xA7E070)[0]
+        d = compare(res[0], res[1], 0x02EFF000)
+        tot[0] += res[0][1]
+        tot[1] += res[1][1]
+        ok = not d and res[0][0] == 'ok' and res[1][0] == 'ok'
+        fails += not ok
+        print('seed %3d: %s  vertices %5d clip counter %4d  ARM insns %10d -> %9d (%.1fx)%s' % (
+            seed, 'same' if ok else 'DIFFERENT', verts, clips, res[0][1], res[1][1],
+            res[0][1] / max(1, res[1][1]), '' if res[0][0] == res[1][0] == 'ok' else
+            ' status %s / %s' % (res[0][0], res[1][0])))
+        for line in d[:12]:
+            print('    ' + line)
+        if len(d) > 12:
+            print('    ... %d differences' % len(d))
+    print('%d/%d scenes identical; ARM instructions %d -> %d (%.2fx)' % (
+        len(seeds) - fails, len(seeds), tot[0], tot[1], tot[0] / max(1, tot[1])))
+    sys.exit(1 if fails else 0)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('mode', choices=['build', 'run'])
+    ap.add_argument('mode', choices=['build', 'run', 'diff'])
     ap.add_argument('exe')
     ap.add_argument('files', nargs='+')
-    ap.add_argument('--patches', type=int, default=4)
+    ap.add_argument('--patches', type=int, default=12)
     ap.add_argument('--seed', type=int, default=1)
+    ap.add_argument('--count', type=int, default=20, help='diff: number of scenes (seeds from --seed)')
+    ap.add_argument('--native', type=int, choices=[0, 1], help='run: g_igi_native value')
     ap.add_argument('--profile', metavar='GEN_DIR')
     ap.add_argument('--func', default='f_00512C30')
     args = ap.parse_args()
     if args.mode == 'build':
         build(args.exe, args.files[0], args.files[1])
         return
-    res = [run(args.exe, e, args.patches, args.seed, args.profile if k == 0 else None, args.func)
+    if args.mode == 'diff':
+        diff_mode(args)
+        return
+    res = [run(args.exe, e, args.patches, args.seed, args.profile if k == 0 else None, args.func, args.native)
            for k, e in enumerate(args.files)]
     names = set()
     for r in res:
@@ -418,14 +536,9 @@ def main():
             continue
         print('%-28s' % nm + ''.join('%12d' % r[2].get(nm, 0) for r in res))
     if len(res) == 2:
-        a, b = res[0][3], res[1][3]
-        if a == b and res[0][4] == res[1][4]:
-            print('guest memory and context: identical')
-        else:
-            diff = [i for i in range(0, len(a), 4) if a[i:i + 4] != b[i:i + 4]]
-            print('DIFFERENT: %d words, first at %s; context %s' % (
-                len(diff), ', '.join('%08X' % d for d in diff[:8]), 'same' if res[0][4] == res[1][4] else 'differs'))
-        sys.exit(0 if a == b and res[0][4] == res[1][4] else 1)
+        d = compare(res[0], res[1], 0x02EFF000)
+        print('guest memory and context: identical' if not d else 'DIFFERENT: %d, first: %s' % (len(d), d[0]))
+        sys.exit(1 if d else 0)
 
 
 if __name__ == '__main__':

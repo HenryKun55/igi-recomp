@@ -68,6 +68,20 @@ HLE = {
     0x004ACD10: ('rt_hle_memset', 88, '4fd4d112065490f5cdd92c83810b685d8c896ca8'),
 }
 
+# Game functions with hand-decompiled native versions (runtime/src/native_*.c): entry ->
+# (host function, [(address, size, SHA-1)] of every piece of guest code the native
+# version reproduces). Same convention as HLE: the hook is emitted only when all the
+# bytes match, and the native version may decline (return 0, e.g. when disabled at
+# run time with IGI_NATIVE=0) to run the recompiled code. IGI_NATIVE=0 at configure
+# time leaves the hooks out entirely.
+NATIVE = {
+    # Terrain renderer and its triangle clipper (runtime/src/native_terrain.c).
+    0x00512C30: ('rt_native_terrain_render', [
+        (0x00512C30, 6317, '0babcc6a828c5ba5fa10360608a72abc7b88dc57'),
+        (0x00514760, 7839, '40c1f468e13cd4a2dbf61721e78741da9e81aaa6'),
+    ]),
+}
+
 # Instruction emitters produce C with a few tokens that are expanded per code copy
 # (FuncGen.lower): ST(i), fpush(c, v), fpop(c) and FTOP address the x87 stack;
 # SPILL/RELOAD synchronise registers and x87 state with the context around calls,
@@ -1792,6 +1806,11 @@ class Generator:
                 self.hle[a] = name
             else:
                 print('warning: %08X does not match %s; running the guest code' % (a, name))
+        for a, (name, pieces) in (NATIVE.items() if os.environ.get('IGI_NATIVE') != '0' else ()):
+            if a in self.funcs and all(hashlib.sha1(self.an.pe.read(p, n)).hexdigest() == d for p, n, d in pieces):
+                self.hle[a] = name
+            else:
+                print('warning: %08X does not match %s; running the guest code' % (a, name))
 
     def x87_info(self, ins):
         """(stack delta, needs dynamic mode) for an x87 instruction, None otherwise."""
@@ -1892,7 +1911,7 @@ class Generator:
             body = ['    c->r[0] = eax; c->r[1] = ecx; c->r[4] = esp; rt_probe(c, 0x%08Xu);' % entry] + body
         hle = self.hle.get(entry)
         if hle:
-            body = ['    { uint64_t hr; if (%s(c, esp, ecx, eax, &hr)) return hr; }' % hle] + body
+            body = ['    { uint64_t hr; if (%s(c, esp, ecx, eax, &hr)) { return hr; } }' % hle] + body
         # Profiler hooks (empty unless IGI_PROFILE): every exit restores the caller.
         body = [re.sub(r'\breturn\b', 'PROF_EXIT; return', line) for line in body]
         text = '\n'.join(body)

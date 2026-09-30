@@ -398,6 +398,11 @@ static inline __attribute__((always_inline)) RtStr rt_rep_stos(uint8_t *gm, uint
 int rt_hle_stricmp(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
 int rt_hle_memset(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
 
+/* Hand-decompiled game functions (runtime/src/native_*.c, NATIVE table in gen.py),
+ * same convention. g_igi_native = 0 (IGI_NATIVE=0) makes them all decline. */
+extern int g_igi_native;
+int rt_native_terrain_render(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
+
 /* ---- profiler ------------------------------------------------------------
  * With IGI_PROFILE, generated functions keep a shadow call stack and the id of
  * the code currently running (a guest function address, an import's IAT slot,

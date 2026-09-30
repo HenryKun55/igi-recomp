@@ -202,6 +202,29 @@ static void setup_tib(Ctx *c)
 
 extern void win32_init(int argc, char **argv);
 
+/* Hand-decompiled game functions (runtime/src/native_*.c) are on unless
+ * IGI_NATIVE=0 (desktop) or native=0 in ux0:data/igi/igi.cfg (Vita). */
+static void native_setting(void)
+{
+    const char *v = getenv("IGI_NATIVE");
+#if defined(__vita__)
+    static char line[64];
+    FILE *f = fopen("ux0:data/igi/igi.cfg", "r");
+    if (f) {
+        char buf[64];
+        while (fgets(buf, sizeof(buf), f))
+            if (strncmp(buf, "native=", 7) == 0) {
+                memcpy(line, buf + 7, sizeof(line) - 7);
+                v = line;
+            }
+        fclose(f);
+    }
+#endif
+    if (v)
+        g_igi_native = v[0] != '0';
+    rt_log("native game functions: %s", g_igi_native ? "on" : "off (recompiled code)");
+}
+
 int main(int argc, char **argv)
 {
     const char *dir = getenv("IGI_DIR");
@@ -221,6 +244,7 @@ int main(int argc, char **argv)
         setvbuf(log_file, NULL, _IONBF, 0);
 
     mem_init();
+    native_setting();
     char exe[1100];
     snprintf(exe, sizeof(exe), "%s/IGI.exe", g_game_dir);
     uint32_t entry = load_exe(exe);

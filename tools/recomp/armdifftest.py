@@ -60,6 +60,8 @@ from gen import FuncGen, Generator  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 VITASDK = os.environ.get('VITASDK', os.path.expanduser('~/vitasdk'))
+# The recompiled code is under test: no hooks to hand-decompiled native versions.
+os.environ['IGI_NATIVE'] = '0'
 VITA_CC = os.path.join(VITASDK, 'bin', 'arm-vita-eabi-gcc')
 VITA_NM = os.path.join(VITASDK, 'bin', 'arm-vita-eabi-nm')
 # Same as the Vita build of igi_recomp (CMakeLists.txt + vita.toolchain.cmake, Release):
