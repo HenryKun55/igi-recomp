@@ -1,6 +1,7 @@
 /* SDL2 implementation of the platform layer (desktop). */
 #if !defined(__vita__)
 #include "platform.h"
+#include "bench.h"
 #include "runtime.h"
 
 #include <SDL.h>
@@ -281,10 +282,10 @@ static void to_game(int wx, int wy, int32_t *gx, int32_t *gy)
 
 static void handle_event(const SDL_Event *e)
 {
-    /* IGI_NO_HOST_INPUT=1: automated runs ignore the real keyboard and mouse. */
+    /* IGI_NO_HOST_INPUT=1 and benchmarks: automated runs ignore the real keyboard and mouse. */
     static int no_host_input = -1;
     if (no_host_input < 0)
-        no_host_input = getenv("IGI_NO_HOST_INPUT") != NULL;
+        no_host_input = getenv("IGI_NO_HOST_INPUT") != NULL || bench_enabled();
     if (no_host_input && e->type != SDL_QUIT && e->type != SDL_WINDOWEVENT)
         return;
     switch (e->type) {

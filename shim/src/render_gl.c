@@ -1,5 +1,6 @@
 /* Fixed-function OpenGL backend for the DirectDraw / Direct3D 7 shims. */
 #include "platform.h"
+#include "bench.h"
 #include "igi_fixes.h"
 #include "render.h"
 
@@ -1912,6 +1913,7 @@ static int batch_enabled = -1;
  */
 static struct {
     uint64_t draw_us, swap_us, frame_start;
+    uint64_t last_swap_us;   /* the previous buffer swap (part of this frame's time) */
     uint32_t draws, frames;
     uint64_t acc_frame, acc_draw, acc_swap, window_start;
     uint32_t acc_draws, acc_gpu_draws;
@@ -2461,6 +2463,8 @@ static void perf_frame_begin_swap(void)
         perf.frame_start = now;
         perf.window_start = now;
     }
+    bench_frame(now, now - perf.frame_start, perf.draw_us, perf.last_swap_us, perf.draws, perf_gpu_draws,
+                (uint32_t)pc_frame[PC_VERTS]);
     perf.acc_frame += now - perf.frame_start;
     perf.acc_draw += perf.draw_us;
     perf.acc_draws += perf.draws;
@@ -2511,5 +2515,6 @@ static void perf_swap(void)
 {
     uint64_t t0 = win32_perf_counter();
     platform_swap();
-    perf.acc_swap += win32_perf_counter() - t0;
+    perf.last_swap_us = win32_perf_counter() - t0;
+    perf.acc_swap += perf.last_swap_us;
 }

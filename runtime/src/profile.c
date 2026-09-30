@@ -52,6 +52,7 @@ typedef struct Map {
 
 static Map excl, incl, pairs;
 static uint32_t total;
+static volatile int reset_requested, stopped;
 
 static void map_add(Map *m, uint64_t key)
 {
@@ -180,6 +181,15 @@ static void sampler_loop(void)
 #else
         usleep(SAMPLE_US);
 #endif
+        if (stopped)
+            continue;
+        if (reset_requested) {
+            memset(&excl, 0, sizeof(excl));
+            memset(&incl, 0, sizeof(incl));
+            memset(&pairs, 0, sizeof(pairs));
+            total = 0;
+            reset_requested = 0;
+        }
         sample();
         if (total % DUMP_EVERY == 0)
             dump();
@@ -202,6 +212,23 @@ static void *sampler_thread(void *arg)
     return NULL;
 }
 #endif
+
+void rt_prof_reset(void)
+{
+    reset_requested = 1;   /* done by the sampler thread, between samples */
+}
+
+void rt_prof_flush(void)
+{
+    stopped = 1;
+    /* Let a sample in progress finish before reading the maps. */
+#if defined(__vita__)
+    sceKernelDelayThread(2 * SAMPLE_US);
+#else
+    usleep(2 * SAMPLE_US);
+#endif
+    dump();
+}
 
 void rt_prof_start(void)
 {

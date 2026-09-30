@@ -8,6 +8,8 @@ void platform_init(void);
 void platform_create_window(int w, int h, const char *title);
 void platform_show_window(int show);
 void platform_set_title(const char *title);
+/* Stop audio before exiting; on the Vita this also ends the process. */
+void platform_shutdown(void);
 
 /* Switch the game's back-buffer resolution; creates the GL context on first use. */
 void platform_set_video_mode(int w, int h);
@@ -39,6 +41,9 @@ typedef struct KeyEvent {
 } KeyEvent;
 int platform_pop_key_event(KeyEvent *out);
 void platform_push_key(uint8_t dik, int down);
+/* Key press/release as from a keyboard: DirectInput state + buffer and, for the
+ * menu keys (Esc, Enter, arrows), the matching Win32 key messages. */
+void platform_key(uint8_t dik, int down);
 /* Feed IGI_INPUT scripted events (testing aid); called from platform_pump. */
 void platform_scripted_input(void);
 

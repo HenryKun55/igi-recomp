@@ -2,6 +2,7 @@
  * sceCtrl mapped onto IGI's default keyboard/mouse bindings, SDL for audio. */
 #if defined(__vita__)
 #include "platform.h"
+#include "bench.h"
 #include "runtime.h"
 
 #include <SDL.h>
@@ -107,20 +108,7 @@ static void set_key(uint8_t dik, int down)
 {
     if (!dik || ((g_key_state[dik] != 0) == (down != 0)))
         return;
-    g_key_state[dik] = down ? 0x80 : 0;
-    platform_push_key(dik, down);
-    /* Menus read Win32 key messages; keep them in sync. */
-    static const struct { uint8_t dik; uint32_t vk; } vk[] = {
-        { 0x01, 0x1B }, { 0x1C, 0x0D }, { 0xC8, 0x26 }, { 0xD0, 0x28 }, { 0xCB, 0x25 }, { 0xCD, 0x27 },
-    };
-    for (unsigned i = 0; i < sizeof(vk) / sizeof(vk[0]); i++) {
-        if (vk[i].dik == dik) {
-            uint32_t lparam = 1u | ((uint32_t)(dik & 0x7F) << 16) | (down ? 0u : 0xC0000000u);
-            user32_post_message(down ? 0x0100u : 0x0101u, vk[i].vk, lparam);
-            if (down && (vk[i].vk == 0x0D || vk[i].vk == 0x1B))
-                user32_post_message(0x0102, vk[i].vk, lparam);
-        }
-    }
+    platform_key(dik, down);
 }
 
 static void set_mouse_button(int b, int down)
@@ -145,6 +133,8 @@ void platform_pump(void)
 {
     static uint64_t last_look, last_pump;
     platform_scripted_input();
+    if (bench_enabled())
+        return;   /* the benchmark drives the game; the pad would disturb it */
     /* The game polls input and messages many times per frame; the pad only
      * needs sampling every couple of milliseconds. */
     uint64_t t = sceKernelGetProcessTimeWide();
