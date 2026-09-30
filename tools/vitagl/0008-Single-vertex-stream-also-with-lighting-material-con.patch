@@ -1,0 +1,213 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: HenryKun55 <henriqueflavio55@gmail.com>
+Date: Wed, 30 Sep 2026 16:07:57 -0300
+Subject: [PATCH] Single vertex stream also with lighting: material constants
+ in a second zero-stride stream
+
+---
+ source/ffp.c | 108 +++++++++++++++++++++++++++++++++++++++++----------
+ 1 file changed, 88 insertions(+), 20 deletions(-)
+
+diff --git a/source/ffp.c b/source/ffp.c
+index 579332e..5c941c6 100644
+--- a/source/ffp.c
++++ b/source/ffp.c
+@@ -570,8 +570,37 @@ static inline GLboolean ffp_attrib_from_vbo(int id) {
+ // Interleaved attributes all read from one buffer object with one stride are fed
+ // through a single vertex stream (one sceGxmSetVertexStream per draw instead of one
+ // per attribute): the patched program then carries the attribute offsets.
++// With lighting, the material attributes not taken from the color array are constants:
++// they go through a second, zero-stride stream holding them one after another.
+ static GLboolean ffp_single_stream = GL_FALSE;
+ static uint32_t ffp_single_vbo, ffp_single_base, ffp_single_stride;
++static int ffp_single_num_mats;
++static uint8_t ffp_single_mat_ids[FFP_VERTEX_ATTRIBS_NUM];
++
++// Sets the vertex streams of a single-stream draw (first: first vertex).
++static inline void ffp_single_stream_upload(uint32_t first) {
++	vbo *gpu_buf = (vbo *)ffp_single_vbo;
++	gpu_buf->last_frame = vgl_framecount;
++	sceGxmSetVertexStream(gxm_context, 0, (uint8_t *)gpu_buf->ptr + ffp_single_base + first * ffp_single_stride);
++	if (ffp_single_num_mats) {
++		float *mat = (float *)gpu_alloc_mapped_temp(ffp_single_num_mats * 4 * sizeof(float));
++		for (int m = 0; m < ffp_single_num_mats; m++) {
++			int id = ffp_single_mat_ids[m];
++			if (id == FFP_ATTRIB_NORMAL) {
++				mat[m * 4 + 0] = current_vtx.nor.x;
++				mat[m * 4 + 1] = current_vtx.nor.y;
++				mat[m * 4 + 2] = current_vtx.nor.z;
++			} else {
++				const float *src = lighting_attr_ptr[FFP_ATTRIB_LIGHT_COEFF(id)];
++				mat[m * 4 + 0] = src[0];
++				mat[m * 4 + 1] = src[1];
++				mat[m * 4 + 2] = src[2];
++				mat[m * 4 + 3] = src[3];
++			}
++		}
++		sceGxmSetVertexStream(gxm_context, 1, mat);
++	}
++}
+ 
+ // Everything the vertex attribute setup and patching below depend on. When it is
+ // unchanged since the last draw, the previous setup and patched program are reused.
+@@ -602,6 +631,8 @@ typedef struct {
+ 	SceGxmVertexProgram *patched;
+ 	GLboolean single_stream;
+ 	uint32_t single_vbo, single_base, single_stride;
++	int single_num_mats;
++	uint8_t single_mat_ids[FFP_VERTEX_ATTRIBS_NUM];
+ 	SceGxmVertexAttribute attribute[FFP_VERTEX_ATTRIBS_NUM]; // attrs/streams contents
+ 	SceGxmVertexStream stream[FFP_VERTEX_ATTRIBS_NUM];
+ } ffp_binding_entry;
+@@ -949,6 +980,8 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
+ 		ffp_single_vbo = hit->single_vbo;
+ 		ffp_single_base = hit->single_base;
+ 		ffp_single_stride = hit->single_stride;
++		ffp_single_num_mats = hit->single_num_mats;
++		vgl_fast_memcpy(ffp_single_mat_ids, hit->single_mat_ids, sizeof(ffp_single_mat_ids));
+ 	} else {
+ 	// Not going for the vertex config setup if we have aligned datas
+ 	if (!attrs && mask.num_textures == 1 && mask.lights_num == 0) {
+@@ -1093,30 +1126,66 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
+ 	VGL_PROF(3);
+ 	int num_streams = ffp_vertex_num_params;
+ 	ffp_single_stream = GL_FALSE;
+-	if (attrs == ffp_vertex_attribute && !ffp_lighting_streams && base_texture_id == 0) {
++	if (attrs == ffp_vertex_attribute && base_texture_id == 0) {
+ 		// Attribute ids in stream order (the draw functions' order)
+ 		int ids[FFP_VERTEX_ATTRIBS_NUM], n = 0;
+ 		for (int i = 0; i < FFP_VERTEX_ATTRIBS_NUM && n < FFP_VERTEX_ATTRIBS_NUM; i++) {
+ 			if (draw_mask_state & (1 << i))
+ 				ids[n++] = i;
+ 		}
++		// Where each attribute comes from: a buffer object (src id) or a material constant (-1)
++		int src[FFP_VERTEX_ATTRIBS_NUM];
+ 		GLboolean ok = n == ffp_vertex_num_params && n > 1;
+-		uint32_t vbo = ok ? ffp_vertex_attrib_vbo[ids[0]] : 0;
+-		uint32_t stride = ok ? ffp_vertex_stream_config[ids[0]].stride : 0;
+-		uint32_t base = 0xFFFFFFFF;
+ 		for (int k = 0; ok && k < n; k++) {
+-			ok = vbo && ffp_vertex_attrib_vbo[ids[k]] == vbo && ffp_vertex_stream_config[ids[k]].stride == stride && streams[k].stride == stride;
+-			if (ffp_vertex_attrib_offsets[ids[k]] < base)
+-				base = ffp_vertex_attrib_offsets[ids[k]];
++			int id = ids[k];
++			if (ffp_lighting_streams && FFP_ATTRIB_IS_LIGHT(id)) {
++				if (ffp_lighting_streams[FFP_ATTRIB_LIGHT_COEFF(id)].stride == 0)
++					src[k] = -1;
++				else
++					src[k] = id == FFP_ATTRIB_NORMAL ? FFP_ATTRIB_NORMAL : FFP_ATTRIB_COLOR;
++			} else {
++				src[k] = id;
++			}
++		}
++		uint32_t vbo = 0, stride = 0, base = 0xFFFFFFFF;
++		int num_mats = 0;
++		for (int k = 0; ok && k < n; k++) {
++			if (src[k] < 0) {
++				num_mats++;
++				continue;
++			}
++			if (!vbo) {
++				vbo = ffp_vertex_attrib_vbo[src[k]];
++				stride = ffp_vertex_stream_config[src[k]].stride;
++			}
++			ok = vbo && ffp_vertex_attrib_vbo[src[k]] == vbo && ffp_vertex_stream_config[src[k]].stride == stride && streams[k].stride == stride;
++			if (ffp_vertex_attrib_offsets[src[k]] < base)
++				base = ffp_vertex_attrib_offsets[src[k]];
+ 		}
++		ok = ok && vbo;
+ 		for (int k = 0; ok && k < n; k++)
+-			ok = ffp_vertex_attrib_offsets[ids[k]] - base < stride;
++			ok = src[k] < 0 || ffp_vertex_attrib_offsets[src[k]] - base < stride;
+ 		if (ok) {
++			int m = 0;
+ 			for (int k = 0; k < n; k++) {
+-				attrs[k].streamIndex = 0;
+-				attrs[k].offset = ffp_vertex_attrib_offsets[ids[k]] - base;
++				if (src[k] < 0) {
++					attrs[k].streamIndex = 1;
++					attrs[k].offset = m * 4 * sizeof(float);
++					ffp_single_mat_ids[m++] = ids[k];
++				} else {
++					attrs[k].streamIndex = 0;
++					attrs[k].offset = ffp_vertex_attrib_offsets[src[k]] - base;
++				}
+ 			}
++			streams[0].stride = stride;
++			streams[0].indexSource = index_type;
+ 			num_streams = 1;
++			if (num_mats) {
++				streams[1].stride = 0;
++				streams[1].indexSource = index_type;
++				num_streams = 2;
++			}
++			ffp_single_num_mats = num_mats;
+ 			ffp_single_stream = GL_TRUE;
+ 			ffp_single_vbo = vbo;
+ 			ffp_single_base = base;
+@@ -1140,6 +1209,8 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
+ 		e->single_vbo = ffp_single_vbo;
+ 		e->single_base = ffp_single_base;
+ 		e->single_stride = ffp_single_stride;
++		e->single_num_mats = ffp_single_num_mats;
++		vgl_fast_memcpy(e->single_mat_ids, ffp_single_mat_ids, sizeof(ffp_single_mat_ids));
+ 		vgl_fast_memcpy(e->attribute, attrs, ffp_vertex_num_params * sizeof(SceGxmVertexAttribute));
+ 		vgl_fast_memcpy(e->stream, streams, ffp_vertex_num_params * sizeof(SceGxmVertexStream));
+ 		ffp_binding_last = ffp_binding_next;
+@@ -1507,16 +1578,14 @@ void _glDrawArrays_FixedFunctionIMPL(GLint first, GLsizei count) {
+ 	VGL_PROF(9);
+ 	// Preparing materials temp buffer if lights are enabled
+ 	float *materials;
+-	if (ffp_lighting_streams) {
++	if (ffp_lighting_streams && !ffp_single_stream) {
+ 		materials = (float *)gpu_alloc_mapped_temp(19 * sizeof(float));
+ 	}
+ 
+ 	// Uploading vertex streams
+ 	int j = 0;
+ 	if (ffp_single_stream) {
+-		vbo *gpu_buf = (vbo *)ffp_single_vbo;
+-		gpu_buf->last_frame = vgl_framecount;
+-		sceGxmSetVertexStream(gxm_context, 0, (uint8_t *)gpu_buf->ptr + ffp_single_base + first * ffp_single_stride);
++		ffp_single_stream_upload(first);
+ 		mask_state = 0;
+ 	}
+ 	for (int i = 0; i < FFP_VERTEX_ATTRIBS_NUM; i++) {
+@@ -1654,7 +1723,7 @@ void _glMultiDrawArrays_FixedFunctionIMPL(SceGxmPrimitiveType gxm_p, uint16_t *i
+ 	VGL_PROF(9);
+ 	// Preparing materials temp buffer if lights are enabled
+ 	float *materials;
+-	if (ffp_lighting_streams) {
++	if (ffp_lighting_streams && !ffp_single_stream) {
+ 		materials = (float *)gpu_alloc_mapped_temp(19 * sizeof(float));
+ 	}
+ 
+@@ -1663,8 +1732,9 @@ void _glMultiDrawArrays_FixedFunctionIMPL(SceGxmPrimitiveType gxm_p, uint16_t *i
+ 	void *ptrs[FFP_VERTEX_ATTRIBS_NUM];
+ 	uint32_t strides[FFP_VERTEX_ATTRIBS_NUM];
+ 	if (ffp_single_stream) {
++		// Sets both streams; stream 0 is then offset per draw below
++		ffp_single_stream_upload(lowest);
+ 		vbo *gpu_buf = (vbo *)ffp_single_vbo;
+-		gpu_buf->last_frame = vgl_framecount;
+ 		ptrs[0] = (uint8_t *)gpu_buf->ptr + ffp_single_base + lowest * ffp_single_stride;
+ 		strides[0] = ffp_single_stride;
+ 		j = 1;
+@@ -1878,15 +1948,13 @@ void _glDrawElements_FixedFunctionIMPL(uint16_t *idx_buf, GLsizei count, uint32_
+ 	VGL_PROF(9);
+ 	// Preparing materials temp buffer if lights are enabled
+ 	float *materials;
+-	if (ffp_lighting_streams) {
++	if (ffp_lighting_streams && !ffp_single_stream) {
+ 		materials = (float *)gpu_alloc_mapped_temp(19 * sizeof(float));
+ 	}
+ 
+ 	// Uploading vertex streams
+ 	if (ffp_single_stream) {
+-		vbo *gpu_buf = (vbo *)ffp_single_vbo;
+-		gpu_buf->last_frame = vgl_framecount;
+-		sceGxmSetVertexStream(gxm_context, 0, (uint8_t *)gpu_buf->ptr + ffp_single_base);
++		ffp_single_stream_upload(0);
+ 		attr_num = 0;
+ 	}
+ 	for (int i = 0; i < attr_num; i++) {
