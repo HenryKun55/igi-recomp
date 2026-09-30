@@ -68,6 +68,7 @@ typedef struct GuestVerts {
     uint32_t stride;
     const uint32_t *src;        /* vertex i is base + src[i] * stride; NULL: consecutive */
     uint32_t nrm_off, col_off, spec_off, uv_off[MAX_STAGES], uv_bytes[MAX_STAGES];
+    int pretransformed;         /* x, y, z, rhw screen-space positions */
     int has_normal, has_color, has_spec, ntex;
 } GuestVerts;
 /* Packs straight from guest memory into the draw batch (no RVertex step).

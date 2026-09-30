@@ -2368,16 +2368,34 @@ static void pack_guest(const Layout *L, const GuestVerts *g, uint32_t nv, uint32
     const uint8_t *vb = g->base;
     const uint32_t stride = g->stride;
     const uint32_t *src = g->src;
-    float *p = pos_buf + (size_t)base * 3u;
-    for (uint32_t i = 0; i < nv; i++, p += 3)
-        memcpy(p, vb + (size_t)(src ? src[i] : i) * stride, 12);
+    if (L->pretransformed) {
+        float *p = pos_buf + (size_t)base * 4u;
+        for (uint32_t i = 0; i < nv; i++, p += 4) {
+            float v[4];
+            memcpy(v, vb + (size_t)(src ? src[i] : i) * stride, 16);
+            float w = v[3] != 0.0f ? 1.0f / v[3] : 1.0f;
+            p[0] = v[0] * w;
+            p[1] = v[1] * w;
+            p[2] = v[2] * w;
+            p[3] = w;
+        }
+    } else {
+        float *p = pos_buf + (size_t)base * 3u;
+        for (uint32_t i = 0; i < nv; i++, p += 3)
+            memcpy(p, vb + (size_t)(src ? src[i] : i) * stride, 12);
+    }
     if (L->use_color) {
         uint32_t *c = col_buf + base;
         const uint32_t off = g->col_off;
-        for (uint32_t i = 0; i < nv; i++) {
-            uint32_t v;
-            memcpy(&v, vb + (size_t)(src ? src[i] : i) * stride + off, 4);
-            c[i] = d3dcolor_rgba(v);
+        if (!g->has_color) {   /* pre-transformed without diffuse: white */
+            for (uint32_t i = 0; i < nv; i++)
+                c[i] = 0xFFFFFFFFu;
+        } else {
+            for (uint32_t i = 0; i < nv; i++) {
+                uint32_t v;
+                memcpy(&v, vb + (size_t)(src ? src[i] : i) * stride + off, 4);
+                c[i] = d3dcolor_rgba(v);
+            }
         }
     }
     if (L->has_normal) {
@@ -2431,8 +2449,21 @@ int render_draw_guest(int prim, const GuestVerts *g, uint32_t nv, const uint16_t
     }
     if (!batch_enabled)
         return 0;
+    if (g->pretransformed) {
+        if (diag_mode == DIAG_NO_SCREEN)
+            return 1;
+        /* rhw_invisible: all rhw ~0 means the primitive is fully transparent. */
+        float max_rhw = 0.0f;
+        for (uint32_t i = 0; i < nv; i++) {
+            float w;
+            memcpy(&w, g->base + (size_t)(g->src ? g->src[i] : i) * g->stride + 12u, 4);
+            max_rhw = w > max_rhw ? w : max_rhw;
+        }
+        if (max_rhw < 1e-6f)
+            return 1;
+    }
 #if defined(__vita__)
-    if (diag_mode != DIAG_NO_NEARCLIP) {
+    if (!g->pretransformed && diag_mode != DIAG_NO_NEARCLIP) {
         /* Any vertex behind the near plane: the general path clips on the CPU. */
         PROF_SECTION(PROF_H_NEARCLIP);
         static float m[16];
@@ -2460,14 +2491,15 @@ int render_draw_guest(int prim, const GuestVerts *g, uint32_t nv, const uint16_t
     if (tris) {
         const Layout *bl = &batch_layout;
         if (batch_active &&
-            (batch_nv + nv > BATCH_MAX_V || batch_ni + tris * 3u > BATCH_MAX_I || bl->pretransformed ||
+            (batch_nv + nv > BATCH_MAX_V || batch_ni + tris * 3u > BATCH_MAX_I ||
+             bl->pretransformed != g->pretransformed ||
              bl->has_normal != g->has_normal || bl->has_color != g->has_color || bl->has_spec != g->has_spec ||
              bl->ntex != g->ntex || g_rs_serial != batch_serial))
             render_flush();
         if (!batch_active) {
             batch_active = 1;
             batch_serial = g_rs_serial;
-            layout_init(&batch_layout, 0, g->has_normal, g->has_color, g->has_spec, g->ntex);
+            layout_init(&batch_layout, g->pretransformed, g->has_normal, g->has_color, g->has_spec, g->ntex);
             batch_nv = batch_ni = 0;
         }
         uint32_t base = batch_nv;

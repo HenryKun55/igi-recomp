@@ -240,7 +240,7 @@ static void emit(uint32_t prim, uint32_t fvf, uint32_t base, uint32_t stride, co
                  const uint16_t *idx, uint32_t ni)
 {
     uint32_t pos = fvf & 0x0Eu;
-    if (pos != 0x4u) {
+    {
         GuestVerts g;
         memset(&g, 0, sizeof(g));
         g.base = g_mem + base;
@@ -250,7 +250,8 @@ static void emit(uint32_t prim, uint32_t fvf, uint32_t base, uint32_t stride, co
         g.has_color = (fvf & 0x40u) != 0;
         g.has_spec = (fvf & 0x80u) != 0;
         g.ntex = (int)((fvf >> 8) & 0xFu);
-        uint32_t o = pos == 0x2u ? 12u : 12u + ((pos - 0x4u) / 2u) * 4u;
+        g.pretransformed = pos == 0x4u;
+        uint32_t o = pos == 0x4u ? 16u : pos == 0x2u ? 12u : 12u + ((pos - 0x4u) / 2u) * 4u;
         g.nrm_off = o;
         if (g.has_normal)
             o += 12;
