@@ -2498,6 +2498,14 @@ static void perf_frame_begin_swap(void)
         const char *e = getenv("IGI_OVERLAY");
 #if defined(__vita__)
         perf.enabled = !(e && e[0] == '0');
+        FILE *f = fopen("ux0:data/igi/igi.cfg", "r");   /* overlay=0 hides it */
+        if (f) {
+            char buf[128];
+            while (fgets(buf, sizeof(buf), f))
+                if (strncmp(buf, "overlay=", 8) == 0)
+                    perf.enabled = buf[8] != '0';
+            fclose(f);
+        }
 #else
         perf.enabled = e && e[0] == '1';
 #endif
