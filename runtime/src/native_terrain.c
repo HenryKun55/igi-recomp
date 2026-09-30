@@ -143,11 +143,12 @@ typedef struct TLVertex {
     float tu, tv;
 } TLVertex;
 
-/* Clipper vertex (0x40 bytes in the guest, passed by value). */
+/* Clipper vertex (0x40 bytes in the guest, passed by value). Its +0x24 points to
+ * the view-space position, which only the near-plane step of one clipper call
+ * uses: here that is a local of clip_near. */
 typedef struct ClipVert {
     TLVertex v;         /* +0x00; sz holds 1/depth while clipping */
     uint32_t code;      /* +0x20 outcode */
-    float cam[3];       /* view-space position, for near clipping (+0x24 points to it) */
     float attr[6];      /* +0x28 r, g, b, tu, tv, fog, multiplied by 1/depth */
 } ClipVert;
 
@@ -183,6 +184,9 @@ typedef struct PatchWork {
     uint8_t unused[256];            /* 1: not referenced by any drawn triangle */
     uint8_t tri[MAX_STRIP];         /* per strip entry: 0 draw, TRI_CULLED, or outcodes to clip */
     uint32_t blend[MAX_VERTS][8];   /* per base vertex: colours of the blend passes */
+    ClipVert clip[256];             /* clipper input of each vertex in the current pass */
+    uint32_t clip_pass[256];        /* pass number of clip[i] */
+    uint32_t pass;                  /* pass number (counts all passes) */
 } PatchWork;
 
 static uint32_t stale_reads;        /* reads of data the guest leaves undefined */
@@ -239,7 +243,7 @@ static uint32_t get_batch(const Frame *f, uint32_t material, uint32_t kind)
 
 static void copy_vertex(uint32_t dst, const TLVertex *v)
 {
-    memcpy(g_mem + dst, v, sizeof(*v));
+    rt_move_small(g_mem + dst, (const uint8_t *)v, sizeof(*v));
 }
 
 /* ---- clipper (0x514760) ------------------------------------------------- */
@@ -260,24 +264,30 @@ static void lerp_screen(ClipVert *b, const ClipVert *a, double t)
         b->attr[k] = LERP(b->attr[k], a->attr[k], t);
 }
 
-static void lerp_cam(ClipVert *b, const ClipVert *a, double t)
+/* Moves b (view-space position bc, attributes) towards a onto the near plane. */
+static void near_lerp(const Frame *f, ClipVert *b, float *bc, const ClipVert *a, const float *ac, int nattr,
+                      double *t_out)
 {
+    double t = ((double)f->near_z - ac[2]) / ((double)bc[2] - ac[2]);
     for (int k = 0; k < 3; k++)
-        b->cam[k] = LERP(b->cam[k], a->cam[k], t);
+        bc[k] = LERP(bc[k], ac[k], t);
+    for (int k = 0; k < nattr; k++)
+        b->attr[k] = LERP(b->attr[k], a->attr[k], t);
+    *t_out = t;
 }
 
 /* Screen position of a vertex just moved onto the near plane. The guest has two
  * copies of this with different multiplication orders; `alt` selects the first. */
-static void near_project(const Frame *f, ClipVert *v, int alt)
+static void near_project(const Frame *f, ClipVert *v, const float *cam, int alt)
 {
-    double r = 1.0 / (double)v->cam[2];
+    double r = 1.0 / (double)cam[2];
     v->v.sz = (float)r;
     if (alt) {
-        v->v.sx = (float)(r * f->proj_sx * v->cam[0] + f->proj_cx);
-        v->v.sy = (float)((double)f->proj_sy * v->cam[1] * v->v.sz + f->proj_cy);
+        v->v.sx = (float)(r * f->proj_sx * cam[0] + f->proj_cx);
+        v->v.sy = (float)((double)f->proj_sy * cam[1] * v->v.sz + f->proj_cy);
     } else {
-        v->v.sx = (float)(r * v->cam[0] * f->proj_sx + f->proj_cx);
-        v->v.sy = (float)((double)v->cam[1] * v->v.sz * f->proj_sy + f->proj_cy);
+        v->v.sx = (float)(r * cam[0] * f->proj_sx + f->proj_cx);
+        v->v.sy = (float)((double)cam[1] * v->v.sz * f->proj_sy + f->proj_cy);
     }
     v->code = screen_code(f, v->v.sx, v->v.sy);
 }
@@ -335,6 +345,77 @@ static void clip_second(const Frame *f, const ClipVert *in2, const ClipVert *tmp
     clip_triangle(f, sub, out);
 }
 
+/* Near plane: back to view space (the screen position of a vertex in front of the
+ * plane is divided by its 1/depth), attributes undivided, clip, and divide the
+ * attributes again. */
+static void clip_near(const Frame *f, ClipVert *v, ClipOut *out, uint32_t *any, uint32_t *all)
+{
+    float cam[3][3];
+    for (int k = 0; k < 3; k++) {
+        ClipVert *p = &v[k];
+        if (!(p->code & OUT_NEAR)) {
+            double w = p->v.sz;
+            cam[k][2] = (float)(1.0 / w);
+            cam[k][0] = (float)(((double)p->v.sx - f->proj_cx) / ((double)f->proj_sx * w));
+            cam[k][1] = (float)(((double)p->v.sy - f->proj_cy) / ((double)f->proj_sy * w));
+        } else {
+            cam[k][0] = p->v.sx;
+            cam[k][1] = p->v.sy;
+            cam[k][2] = p->v.sz;
+        }
+        p->attr[0] = (float)((p->v.color >> 16) & 0xFFu);
+        p->attr[1] = (float)((p->v.color >> 8) & 0xFFu);
+        p->attr[2] = (float)(p->v.color & 0xFFu);
+        p->attr[3] = p->v.tu;
+        p->attr[4] = p->v.tv;
+        p->attr[5] = (float)(p->v.specular >> 24);
+    }
+    double t;
+    if (count_out(v, OUT_NEAR) == 2) {
+        int k = first_with(v, OUT_NEAR, 0), k1 = (k + 1) % 3, k2 = (k + 2) % 3;
+        near_lerp(f, &v[k1], cam[k1], &v[k], cam[k], 6, &t);
+        near_project(f, &v[k1], cam[k1], 1);
+        near_lerp(f, &v[k2], cam[k2], &v[k], cam[k], 6, &t);
+        near_project(f, &v[k2], cam[k2], 0);
+        *any = v[0].code | v[1].code | v[2].code;
+        *all = v[0].code & v[1].code & v[2].code;
+        for (int j = 0; j < 3; j++)
+            for (int m = 0; m < 6; m++)
+                v[j].attr[m] = (float)((double)v[j].attr[m] * v[j].v.sz);
+        return;
+    }
+    /* One vertex behind: the quad in front becomes two triangles. */
+    int k = first_with(v, OUT_NEAR, 1), k1 = (k + 1) % 3, k2 = (k + 2) % 3;
+    ClipVert *o = &v[k], *in2 = &v[k2];
+    ClipVert sub[3];
+    ClipVert *tmp = &sub[1];
+    float tcam[3] = { cam[k][0], cam[k][1], cam[k][2] };
+    *tmp = *o;
+    near_lerp(f, o, cam[k], &v[k1], cam[k1], 6, &t);
+    near_project(f, o, cam[k], 0);
+    near_lerp(f, tmp, tcam, in2, cam[k2], 5, &t);
+    double fog = ((double)tmp->attr[5] - in2->attr[5]) * t + in2->attr[5];   /* kept unrounded */
+    double r = 1.0 / (double)tcam[2];
+    tmp->v.sz = (float)r;
+    double x = r * tcam[0] * f->proj_sx + f->proj_cx;
+    tmp->v.sx = (float)x;
+    double y = (double)tmp->v.sz * tcam[1] * f->proj_sy + f->proj_cy;
+    tmp->v.sy = (float)y;
+    tmp->code = (uint32_t)BELOW(x, f->left) | (uint32_t)BELOW(y, f->top) << 1 |
+                (uint32_t)ABOVE(x, f->right) << 2 | (uint32_t)ABOVE((double)tmp->v.sy, f->bottom) << 3;
+    *any = v[0].code | v[1].code | v[2].code;
+    *all = v[0].code & v[1].code & v[2].code;
+    for (int j = 0; j < 3; j++)
+        for (int m = 0; m < 6; m++)
+            v[j].attr[m] = (float)((double)v[j].v.sz * v[j].attr[m]);
+    for (int m = 0; m < 5; m++)
+        tmp->attr[m] = (float)((double)tmp->v.sz * tmp->attr[m]);
+    tmp->attr[5] = (float)((double)tmp->v.sz * fog);
+    sub[0] = *in2;
+    sub[2] = *o;
+    clip_triangle(f, sub, out);
+}
+
 /* Clips the triangle v[0..2] (the guest passes the three vertices by value; v is
  * the callee's copy and is modified). */
 static void clip_triangle(const Frame *f, ClipVert *v, ClipOut *out)
@@ -346,78 +427,7 @@ static void clip_triangle(const Frame *f, ClipVert *v, ClipOut *out)
         goto rejected;
 
     if (any & OUT_NEAR) {
-        /* Back to view space (the screen position of a vertex in front of the
-         * plane is divided by its 1/depth), attributes undivided. */
-        for (int k = 0; k < 3; k++) {
-            ClipVert *p = &v[k];
-            if (!(p->code & OUT_NEAR)) {
-                double w = p->v.sz;
-                p->cam[2] = (float)(1.0 / w);
-                p->cam[0] = (float)(((double)p->v.sx - f->proj_cx) / ((double)f->proj_sx * w));
-                p->cam[1] = (float)(((double)p->v.sy - f->proj_cy) / ((double)f->proj_sy * w));
-            } else {
-                p->cam[0] = p->v.sx;
-                p->cam[1] = p->v.sy;
-                p->cam[2] = p->v.sz;
-            }
-            p->attr[0] = (float)((p->v.color >> 16) & 0xFFu);
-            p->attr[1] = (float)((p->v.color >> 8) & 0xFFu);
-            p->attr[2] = (float)(p->v.color & 0xFFu);
-            p->attr[3] = p->v.tu;
-            p->attr[4] = p->v.tv;
-            p->attr[5] = (float)(p->v.specular >> 24);
-        }
-        if (count_out(v, OUT_NEAR) == 2) {
-            int k = first_with(v, OUT_NEAR, 0);
-            ClipVert *in = &v[k], *o1 = &v[(k + 1) % 3], *o2 = &v[(k + 2) % 3];
-            double t = ((double)f->near_z - in->cam[2]) / ((double)o1->cam[2] - in->cam[2]);
-            lerp_cam(o1, in, t);
-            for (int j = 0; j < 6; j++)
-                o1->attr[j] = LERP(o1->attr[j], in->attr[j], t);
-            near_project(f, o1, 1);
-            t = ((double)f->near_z - in->cam[2]) / ((double)o2->cam[2] - in->cam[2]);
-            lerp_cam(o2, in, t);
-            for (int j = 0; j < 6; j++)
-                o2->attr[j] = LERP(o2->attr[j], in->attr[j], t);
-            near_project(f, o2, 0);
-            any = v[0].code | v[1].code | v[2].code;
-            all = v[0].code & v[1].code & v[2].code;
-            for (int j = 0; j < 3; j++)
-                for (int m = 0; m < 6; m++)
-                    v[j].attr[m] = (float)((double)v[j].attr[m] * v[j].v.sz);
-        } else {
-            /* One vertex behind: the quad in front becomes two triangles. */
-            int k = first_with(v, OUT_NEAR, 1);
-            ClipVert *o = &v[k], *in1 = &v[(k + 1) % 3], *in2 = &v[(k + 2) % 3];
-            ClipVert tmp = *o;
-            double t = ((double)f->near_z - in1->cam[2]) / ((double)o->cam[2] - in1->cam[2]);
-            lerp_cam(o, in1, t);
-            for (int j = 0; j < 6; j++)
-                o->attr[j] = LERP(o->attr[j], in1->attr[j], t);
-            near_project(f, o, 0);
-            t = ((double)f->near_z - in2->cam[2]) / ((double)tmp.cam[2] - in2->cam[2]);
-            lerp_cam(&tmp, in2, t);
-            for (int j = 0; j < 5; j++)
-                tmp.attr[j] = LERP(tmp.attr[j], in2->attr[j], t);
-            double fog = ((double)tmp.attr[5] - in2->attr[5]) * t + in2->attr[5];   /* kept unrounded */
-            double r = 1.0 / (double)tmp.cam[2];
-            tmp.v.sz = (float)r;
-            double x = r * tmp.cam[0] * f->proj_sx + f->proj_cx;
-            tmp.v.sx = (float)x;
-            double y = (double)tmp.v.sz * tmp.cam[1] * f->proj_sy + f->proj_cy;
-            tmp.v.sy = (float)y;
-            tmp.code = (uint32_t)BELOW(x, f->left) | (uint32_t)BELOW(y, f->top) << 1 |
-                       (uint32_t)ABOVE(x, f->right) << 2 | (uint32_t)ABOVE((double)tmp.v.sy, f->bottom) << 3;
-            any = v[0].code | v[1].code | v[2].code;
-            all = v[0].code & v[1].code & v[2].code;
-            for (int j = 0; j < 3; j++)
-                for (int m = 0; m < 6; m++)
-                    v[j].attr[m] = (float)((double)v[j].v.sz * v[j].attr[m]);
-            for (int m = 0; m < 5; m++)
-                tmp.attr[m] = (float)((double)tmp.v.sz * tmp.attr[m]);
-            tmp.attr[5] = (float)((double)tmp.v.sz * fog);
-            clip_second(f, in2, &tmp, o, out);
-        }
+        clip_near(f, v, out, &any, &all);
         if (all)
             goto rejected;
     }
@@ -647,6 +657,16 @@ static uint32_t blend_of(const PatchWork *w, uint32_t off, int32_t nbase)
 }
 
 /* Draws the strip entries of one pass into a batch; flagged triangles go through the clipper. */
+/* Clipper input of vertex i, made once per pass. */
+static const ClipVert *clip_vert(const Frame *f, PatchWork *w, uint32_t i)
+{
+    if (w->clip_pass[i] != w->pass) {
+        make_clip_vert(f, w, i, &w->clip[i]);
+        w->clip_pass[i] = w->pass;
+    }
+    return &w->clip[i];
+}
+
 /* The guest builds the clipper's vertices of the detail pass at esp+0x280, inside
  * its triangle flag array (esp+0x240, 256 entries): each clipped triangle
  * overwrites the flags of strip entries 64..255 with the vertices' bytes. */
@@ -666,6 +686,10 @@ static void emit_strips(const Frame *f, PatchWork *w, const uint8_t *strip, int3
 {
     uint32_t pack = out->vbase * 0x10001u;
     uint32_t ip = out->idx;
+    if (++w->pass == 0) {               /* wrapped: forget every cached vertex */
+        memset(w->clip_pass, 0, sizeof(w->clip_pass));
+        w->pass = 1;
+    }
     for (int32_t j = 0; j < nwords; j++) {
         uint32_t fl = w->tri[j];
         uint32_t word = rd32(strip + 4 * j);
@@ -675,9 +699,9 @@ static void emit_strips(const Frame *f, PatchWork *w, const uint8_t *strip, int3
             ip += 6u;
         } else if (!(fl & TRI_CULLED)) {
             ClipVert cv[3];
-            make_clip_vert(f, w, word & 0xFFu, &cv[0]);
-            make_clip_vert(f, w, (word >> 16) & 0xFFu, &cv[1]);
-            make_clip_vert(f, w, (word >> 8) & 0xFFu, &cv[2]);
+            cv[0] = *clip_vert(f, w, word & 0xFFu);
+            cv[1] = *clip_vert(f, w, (word >> 16) & 0xFFu);
+            cv[2] = *clip_vert(f, w, (word >> 8) & 0xFFu);
             if (detail)
                 overlay_detail_flags(w, cv);
             out->ntris = (ip - out->idx) / 6u;
