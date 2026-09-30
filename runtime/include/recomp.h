@@ -422,6 +422,10 @@ extern volatile uint32_t rt_prof_stack[RT_PROF_MAX];
 /* A setjmp returning through longjmp: this function is current again. */
 #define PROF_REENTER(a) (rt_prof_depth = prof_pd + 1u, rt_prof_cur = (a))
 void rt_prof_start(void);
+/* Drop the samples taken so far (e.g. boot and menus before a benchmark). */
+void rt_prof_reset(void);
+/* Stop sampling and write the profile now (for exits that skip atexit). */
+void rt_prof_flush(void);
 /* Host sections inside a thunk (ids 0xFD0000xx, named in profile.c). */
 enum { PROF_H_DECODE = 0xFD000001u, PROF_H_NEARCLIP, PROF_H_PACK, PROF_H_BATCH, PROF_H_STATE, PROF_H_GLDRAW,
        PROF_H_TEXTURE, PROF_H_BLIT, PROF_H_MIX, PROF_H_INDEX, PROF_H_FILL, PROF_H_SOFTFILL,
