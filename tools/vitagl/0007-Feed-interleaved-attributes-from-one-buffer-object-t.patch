@@ -1,0 +1,214 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: HenryKun55 <henriqueflavio55@gmail.com>
+Date: Wed, 30 Sep 2026 15:58:45 -0300
+Subject: [PATCH] Feed interleaved attributes from one buffer object through a
+ single vertex stream
+
+---
+ source/ffp.c | 94 ++++++++++++++++++++++++++++++++++++++++++++++------
+ 1 file changed, 84 insertions(+), 10 deletions(-)
+
+diff --git a/source/ffp.c b/source/ffp.c
+index d41afe0..579332e 100644
+--- a/source/ffp.c
++++ b/source/ffp.c
+@@ -465,7 +465,7 @@ static unsigned int ffp_param_index(const SceGxmProgramParameter *param) {
+ #define FFP_PATCH_CACHE_SIZE 32
+ typedef struct {
+ 	SceGxmShaderPatcherId id;
+-	int num;
++	int num, num_streams;
+ 	SceGxmVertexAttribute attrs[FFP_VERTEX_ATTRIBS_NUM];
+ 	SceGxmVertexStream streams[FFP_VERTEX_ATTRIBS_NUM];
+ 	SceGxmVertexProgram *prog;
+@@ -479,35 +479,36 @@ static void ffp_patch_cache_reset(void) {
+ 	ffp_patch_cache_last = -1;
+ }
+ 
+-static inline int ffp_patch_entry_matches(const ffp_patch_entry *e, SceGxmShaderPatcherId id, const SceGxmVertexAttribute *attrs, const SceGxmVertexStream *streams, int num) {
+-	return e->id == id && e->num == num && !memcmp(e->attrs, attrs, num * sizeof(SceGxmVertexAttribute)) && !memcmp(e->streams, streams, num * sizeof(SceGxmVertexStream));
++static inline int ffp_patch_entry_matches(const ffp_patch_entry *e, SceGxmShaderPatcherId id, const SceGxmVertexAttribute *attrs, const SceGxmVertexStream *streams, int num, int num_streams) {
++	return e->id == id && e->num == num && e->num_streams == num_streams && !memcmp(e->attrs, attrs, num * sizeof(SceGxmVertexAttribute)) && !memcmp(e->streams, streams, num_streams * sizeof(SceGxmVertexStream));
+ }
+ 
+-static void ffp_patch_vertex_program(SceGxmShaderPatcherId id, const SceGxmVertexAttribute *attrs, const SceGxmVertexStream *streams, int num, SceGxmVertexProgram **prog) {
++static void ffp_patch_vertex_program(SceGxmShaderPatcherId id, const SceGxmVertexAttribute *attrs, const SceGxmVertexStream *streams, int num, int num_streams, SceGxmVertexProgram **prog) {
+ 	if (num > FFP_VERTEX_ATTRIBS_NUM) {
+-		patch_vertex_program(gxm_shader_patcher, id, attrs, num, streams, num, prog);
++		patch_vertex_program(gxm_shader_patcher, id, attrs, num, streams, num_streams, prog);
+ 		return;
+ 	}
+-	if (ffp_patch_cache_last >= 0 && ffp_patch_entry_matches(&ffp_patch_cache[ffp_patch_cache_last], id, attrs, streams, num)) {
++	if (ffp_patch_cache_last >= 0 && ffp_patch_entry_matches(&ffp_patch_cache[ffp_patch_cache_last], id, attrs, streams, num, num_streams)) {
+ 		*prog = ffp_patch_cache[ffp_patch_cache_last].prog;
+ 		return;
+ 	}
+ 	for (int i = 0; i < ffp_patch_cache_num; i++) {
+-		if (ffp_patch_entry_matches(&ffp_patch_cache[i], id, attrs, streams, num)) {
++		if (ffp_patch_entry_matches(&ffp_patch_cache[i], id, attrs, streams, num, num_streams)) {
+ 			ffp_patch_cache_last = i;
+ 			*prog = ffp_patch_cache[i].prog;
+ 			return;
+ 		}
+ 	}
+ 	*prog = NULL;
+-	patch_vertex_program(gxm_shader_patcher, id, attrs, num, streams, num, prog);
++	patch_vertex_program(gxm_shader_patcher, id, attrs, num, streams, num_streams, prog);
+ 	if (!*prog)
+ 		return;
+ 	ffp_patch_entry *e = &ffp_patch_cache[ffp_patch_cache_next];
+ 	e->id = id;
+ 	e->num = num;
++	e->num_streams = num_streams;
+ 	memcpy(e->attrs, attrs, num * sizeof(SceGxmVertexAttribute));
+-	memcpy(e->streams, streams, num * sizeof(SceGxmVertexStream));
++	memcpy(e->streams, streams, num_streams * sizeof(SceGxmVertexStream));
+ 	e->prog = *prog;
+ 	ffp_patch_cache_last = ffp_patch_cache_next;
+ 	ffp_patch_cache_next = (ffp_patch_cache_next + 1) % FFP_PATCH_CACHE_SIZE;
+@@ -566,6 +567,12 @@ static inline GLboolean ffp_attrib_from_vbo(int id) {
+ 	return GL_TRUE;
+ }
+ 
++// Interleaved attributes all read from one buffer object with one stride are fed
++// through a single vertex stream (one sceGxmSetVertexStream per draw instead of one
++// per attribute): the patched program then carries the attribute offsets.
++static GLboolean ffp_single_stream = GL_FALSE;
++static uint32_t ffp_single_vbo, ffp_single_base, ffp_single_stride;
++
+ // Everything the vertex attribute setup and patching below depend on. When it is
+ // unchanged since the last draw, the previous setup and patched program are reused.
+ typedef struct {
+@@ -581,6 +588,8 @@ typedef struct {
+ 	uint32_t index_type; // not the enum type: no padding bytes in the key
+ 	SceGxmVertexAttribute attrib_config[FFP_VERTEX_ATTRIBS_NUM];
+ 	SceGxmVertexStream stream_config[FFP_VERTEX_ATTRIBS_NUM];
++	uint32_t attrib_offsets[FFP_VERTEX_ATTRIBS_NUM]; // single stream: offsets baked into the program
++	uint32_t attrib_vbo[FFP_VERTEX_ATTRIBS_NUM];
+ } ffp_binding_key;
+ // A few recent setups: consecutive draws often alternate between layouts.
+ #define FFP_BINDING_CACHE_SIZE 8
+@@ -591,6 +600,8 @@ typedef struct {
+ 	SceGxmVertexStream *lighting_streams;
+ 	int num_params;
+ 	SceGxmVertexProgram *patched;
++	GLboolean single_stream;
++	uint32_t single_vbo, single_base, single_stride;
+ 	SceGxmVertexAttribute attribute[FFP_VERTEX_ATTRIBS_NUM]; // attrs/streams contents
+ 	SceGxmVertexStream stream[FFP_VERTEX_ATTRIBS_NUM];
+ } ffp_binding_entry;
+@@ -616,6 +627,8 @@ static inline void ffp_binding_make_key(ffp_binding_key *k, SceGxmVertexAttribut
+ 	k->index_type = (uint32_t)index_type;
+ 	vgl_fast_memcpy(k->attrib_config, ffp_vertex_attrib_config, sizeof(k->attrib_config));
+ 	vgl_fast_memcpy(k->stream_config, ffp_vertex_stream_config, sizeof(k->stream_config));
++	vgl_fast_memcpy(k->attrib_offsets, ffp_vertex_attrib_offsets, sizeof(k->attrib_offsets));
++	vgl_fast_memcpy(k->attrib_vbo, ffp_vertex_attrib_vbo, sizeof(k->attrib_vbo));
+ 	// Outputs of the setup when it works in place on the configs (immediate path)
+ 	for (int i = 0; i < FFP_VERTEX_ATTRIBS_NUM; i++) {
+ 		k->attrib_config[i].regIndex = 0;
+@@ -932,6 +945,10 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
+ 		ffp_vertex_num_params = hit->num_params;
+ 		ffp_lighting_streams = hit->lighting_streams;
+ 		ffp_vertex_program_patched = hit->patched;
++		ffp_single_stream = hit->single_stream;
++		ffp_single_vbo = hit->single_vbo;
++		ffp_single_base = hit->single_base;
++		ffp_single_stride = hit->single_stride;
+ 	} else {
+ 	// Not going for the vertex config setup if we have aligned datas
+ 	if (!attrs && mask.num_textures == 1 && mask.lights_num == 0) {
+@@ -1074,8 +1091,41 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
+ #endif
+ 
+ 	VGL_PROF(3);
++	int num_streams = ffp_vertex_num_params;
++	ffp_single_stream = GL_FALSE;
++	if (attrs == ffp_vertex_attribute && !ffp_lighting_streams && base_texture_id == 0) {
++		// Attribute ids in stream order (the draw functions' order)
++		int ids[FFP_VERTEX_ATTRIBS_NUM], n = 0;
++		for (int i = 0; i < FFP_VERTEX_ATTRIBS_NUM && n < FFP_VERTEX_ATTRIBS_NUM; i++) {
++			if (draw_mask_state & (1 << i))
++				ids[n++] = i;
++		}
++		GLboolean ok = n == ffp_vertex_num_params && n > 1;
++		uint32_t vbo = ok ? ffp_vertex_attrib_vbo[ids[0]] : 0;
++		uint32_t stride = ok ? ffp_vertex_stream_config[ids[0]].stride : 0;
++		uint32_t base = 0xFFFFFFFF;
++		for (int k = 0; ok && k < n; k++) {
++			ok = vbo && ffp_vertex_attrib_vbo[ids[k]] == vbo && ffp_vertex_stream_config[ids[k]].stride == stride && streams[k].stride == stride;
++			if (ffp_vertex_attrib_offsets[ids[k]] < base)
++				base = ffp_vertex_attrib_offsets[ids[k]];
++		}
++		for (int k = 0; ok && k < n; k++)
++			ok = ffp_vertex_attrib_offsets[ids[k]] - base < stride;
++		if (ok) {
++			for (int k = 0; k < n; k++) {
++				attrs[k].streamIndex = 0;
++				attrs[k].offset = ffp_vertex_attrib_offsets[ids[k]] - base;
++			}
++			num_streams = 1;
++			ffp_single_stream = GL_TRUE;
++			ffp_single_vbo = vbo;
++			ffp_single_base = base;
++			ffp_single_stride = stride;
++		}
++	}
++
+ 	// Creating patched vertex shader
+-	ffp_patch_vertex_program(ffp_vertex_program_id, attrs, streams, ffp_vertex_num_params, &ffp_vertex_program_patched);
++	ffp_patch_vertex_program(ffp_vertex_program_id, attrs, streams, ffp_vertex_num_params, num_streams, &ffp_vertex_program_patched);
+ 
+ 	if (ffp_vertex_program_patched) {
+ 		// The setup above may have written into the attribute configs: key on the result
+@@ -1086,6 +1136,10 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
+ 		e->lighting_streams = ffp_lighting_streams;
+ 		e->num_params = ffp_vertex_num_params;
+ 		e->patched = ffp_vertex_program_patched;
++		e->single_stream = ffp_single_stream;
++		e->single_vbo = ffp_single_vbo;
++		e->single_base = ffp_single_base;
++		e->single_stride = ffp_single_stride;
+ 		vgl_fast_memcpy(e->attribute, attrs, ffp_vertex_num_params * sizeof(SceGxmVertexAttribute));
+ 		vgl_fast_memcpy(e->stream, streams, ffp_vertex_num_params * sizeof(SceGxmVertexStream));
+ 		ffp_binding_last = ffp_binding_next;
+@@ -1459,6 +1513,12 @@ void _glDrawArrays_FixedFunctionIMPL(GLint first, GLsizei count) {
+ 
+ 	// Uploading vertex streams
+ 	int j = 0;
++	if (ffp_single_stream) {
++		vbo *gpu_buf = (vbo *)ffp_single_vbo;
++		gpu_buf->last_frame = vgl_framecount;
++		sceGxmSetVertexStream(gxm_context, 0, (uint8_t *)gpu_buf->ptr + ffp_single_base + first * ffp_single_stride);
++		mask_state = 0;
++	}
+ 	for (int i = 0; i < FFP_VERTEX_ATTRIBS_NUM; i++) {
+ 		if (mask_state & (1 << i)) {
+ 			int id;
+@@ -1602,6 +1662,14 @@ void _glMultiDrawArrays_FixedFunctionIMPL(SceGxmPrimitiveType gxm_p, uint16_t *i
+ 	int j = 0;
+ 	void *ptrs[FFP_VERTEX_ATTRIBS_NUM];
+ 	uint32_t strides[FFP_VERTEX_ATTRIBS_NUM];
++	if (ffp_single_stream) {
++		vbo *gpu_buf = (vbo *)ffp_single_vbo;
++		gpu_buf->last_frame = vgl_framecount;
++		ptrs[0] = (uint8_t *)gpu_buf->ptr + ffp_single_base + lowest * ffp_single_stride;
++		strides[0] = ffp_single_stride;
++		j = 1;
++		mask_state = 0;
++	}
+ 	for (int i = 0; i < FFP_VERTEX_ATTRIBS_NUM; i++) {
+ 		if (mask_state & (1 << i)) {
+ 			int id;
+@@ -1815,6 +1883,12 @@ void _glDrawElements_FixedFunctionIMPL(uint16_t *idx_buf, GLsizei count, uint32_
+ 	}
+ 
+ 	// Uploading vertex streams
++	if (ffp_single_stream) {
++		vbo *gpu_buf = (vbo *)ffp_single_vbo;
++		gpu_buf->last_frame = vgl_framecount;
++		sceGxmSetVertexStream(gxm_context, 0, (uint8_t *)gpu_buf->ptr + ffp_single_base);
++		attr_num = 0;
++	}
+ 	for (int i = 0; i < attr_num; i++) {
+ 		void *ptr;
+ 		int attr_idx = attr_idxs[i];
