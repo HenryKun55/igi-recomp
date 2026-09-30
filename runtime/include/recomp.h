@@ -200,17 +200,16 @@ void rt_x87_mismatch(Ctx *c, uint32_t addr, uint32_t expect);
  * rounds to nearest-even in the host's default rounding mode (no libm call). */
 static inline double rt_fround(const Ctx *c, double v)
 {
-    switch ((c->fcw >> 10) & 3u) {
-    case 1: return floor(v);
-    case 2: return ceil(v);
-    case 3: return trunc(v);
-    default: {
+    if (__builtin_expect((c->fcw & 0x0C00u) == 0, 1)) {
         double a = fabs(v);
         if (a < 4503599627370496.0)
             return copysign((a + 4503599627370496.0) - 4503599627370496.0, v);
         return v + 0.0;                         /* integral, infinite or NaN (quieted) */
     }
-    }
+    uint32_t rc = (c->fcw >> 10) & 3u;
+    if (rc == 1)
+        return floor(v);
+    return rc == 2 ? ceil(v) : trunc(v);
 }
 
 /* fscale: ST(0) * 2^trunc(ST(1)). Multiplying by the power of two when it is a
