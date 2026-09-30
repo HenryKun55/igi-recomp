@@ -440,9 +440,24 @@ SHIM(kernel32, ReadFile)
         stdcall_ret(c, 0, 5);
         return;
     }
+    uint64_t t0 = win32_perf_counter();
     ssize_t got = read(o->fd, gptr(buf), n);
     if (got < 0)
         got = 0;
+    /* I/O statistics (ReadFile shows up in gameplay profiles). */
+    static uint64_t io_us, io_bytes, io_last;
+    static uint32_t io_calls;
+    uint64_t t1 = win32_perf_counter();
+    io_us += t1 - t0;
+    io_bytes += (uint64_t)got;
+    io_calls++;
+    if (t1 - io_last >= 5000000u) {
+        rt_log("io: %u ReadFile calls, %llu KB, %.1f ms in the last %.1f s", io_calls,
+               (unsigned long long)(io_bytes / 1024u), (double)io_us / 1000.0, (double)(t1 - io_last) / 1e6);
+        io_last = t1;
+        io_us = io_bytes = 0;
+        io_calls = 0;
+    }
     if (out)
         WR32(out, (uint32_t)got);
     stdcall_ret(c, 1, 5);
