@@ -12,6 +12,7 @@
 #include <OpenGL/gl.h>
 #elif defined(__vita__)
 #include <vitaGL.h>
+#include <psp2/kernel/threadmgr.h>
 #else
 #include <GL/gl.h>
 #endif
@@ -581,6 +582,10 @@ void render_begin_frame(void)
     update_letterbox();
 }
 
+#if defined(__vita__)
+static int shot_hold = -1;   /* benchmark frame to hold on screen after its swap */
+#endif
+
 /* IGI_SHOT=N: save every Nth presented frame as shot_<frame>.bmp (debugging aid); the
  * benchmark's screenshots go to bench_shot_<measured frame>.bmp. */
 static void maybe_screenshot(void)
@@ -594,6 +599,15 @@ static void maybe_screenshot(void)
     frame++;
     int forced = g_trace_next_frame == 2;
     int bench_shot = bench_shot_due();
+#if defined(__vita__)
+    /* Vita3K does not write rendered frames back to guest memory (read backs come
+     * out black): the frame is held on screen instead for an external window
+     * capture (tools/bench_vita3k.sh with SHOT set). */
+    if (bench_shot >= 0) {
+        shot_hold = bench_shot;
+        bench_shot = -1;
+    }
+#endif
     if (!forced && bench_shot < 0 && (every <= 0 || frame % (unsigned)every))
         return;
     uint8_t *px = malloc((size_t)fb_w * (size_t)fb_h * 4u);
@@ -654,6 +668,19 @@ void render_present(void)
     }
     perf_frame_begin_swap();
     perf_swap();
+#if defined(__vita__)
+    if (shot_hold >= 0) {
+        sceKernelDelayThread(1000000);   /* until the frame is on screen */
+        /* A file of its own: Vita3K only writes igi.log out when it is closed. */
+        FILE *f = fopen("ux0:data/igi/bench_shot_now.txt", "w");
+        if (f) {
+            fprintf(f, "%d\n", shot_hold);
+            fclose(f);
+        }
+        sceKernelDelayThread(3000000);   /* while it is captured */
+        shot_hold = -1;
+    }
+#endif
     platform_pump();
     render_begin_frame();
 }
