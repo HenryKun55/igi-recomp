@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: HenryKun55 <henriqueflavio55@gmail.com>
+Date: Wed, 30 Sep 2026 14:41:10 -0300
+Subject: [PATCH] Read lighting attributes from buffer objects only for actual
+ normal arrays
+
+---
+ source/ffp.c | 17 ++++++++++++++---
+ 1 file changed, 14 insertions(+), 3 deletions(-)
+
+diff --git a/source/ffp.c b/source/ffp.c
+index f2dcab9..675bfbc 100644
+--- a/source/ffp.c
++++ b/source/ffp.c
+@@ -555,6 +555,17 @@ static void ffp_patch_fragment_program(SceGxmShaderPatcherId id, const SceGxmPro
+ 		ffp_frag_patch_cache_num++;
+ }
+ 
++// With lighting, the color and material attributes come from the material or the
++// color array depending on GL_COLOR_MATERIAL, whatever buffer object the attribute
++// slot was last bound to; only an actual normal array is read from its buffer.
++static inline GLboolean ffp_attrib_from_vbo(int id) {
++	if (!ffp_vertex_attrib_vbo[id])
++		return GL_FALSE;
++	if (ffp_lighting_streams && FFP_ATTRIB_IS_LIGHT(id))
++		return id == FFP_ATTRIB_NORMAL && ffp_lighting_streams[FFP_ATTRIB_LIGHT_COEFF(id)].stride != 0;
++	return GL_TRUE;
++}
++
+ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *streams, SceGxmIndexSource index_type) {
+ #ifdef HAVE_PROFILING
+ 	uint32_t reload_ffp_shaders_start = sceKernelGetProcessTimeLow();
+@@ -1367,7 +1378,7 @@ void _glDrawArrays_FixedFunctionIMPL(GLint first, GLsizei count) {
+ #endif
+ 				id = i;
+ 			void *ptr;
+-			if (ffp_vertex_attrib_vbo[id]) {
++			if (ffp_attrib_from_vbo(id)) {
+ 				vbo *gpu_buf = (vbo *)ffp_vertex_attrib_vbo[id];
+ 				gpu_buf->last_frame = vgl_framecount;
+ 				ptr = (uint8_t *)gpu_buf->ptr + ffp_vertex_attrib_offsets[id] + first * ffp_vertex_stream_config[id].stride;
+@@ -1511,7 +1522,7 @@ void _glMultiDrawArrays_FixedFunctionIMPL(SceGxmPrimitiveType gxm_p, uint16_t *i
+ 			{
+ 				id = i;
+ 			}
+-			if (ffp_vertex_attrib_vbo[id]) {
++			if (ffp_attrib_from_vbo(id)) {
+ 				vbo *gpu_buf = (vbo *)ffp_vertex_attrib_vbo[id];
+ 				gpu_buf->last_frame = vgl_framecount;
+ 				ptrs[j] = (uint8_t *)gpu_buf->ptr + ffp_vertex_attrib_offsets[i] + lowest * ffp_vertex_stream_config[id].stride;
+@@ -1707,7 +1718,7 @@ void _glDrawElements_FixedFunctionIMPL(uint16_t *idx_buf, GLsizei count, uint32_
+ 	for (int i = 0; i < attr_num; i++) {
+ 		void *ptr;
+ 		int attr_idx = attr_idxs[i];
+-		if (ffp_vertex_attrib_vbo[attr_idx]) {
++		if (ffp_attrib_from_vbo(attr_idx)) {
+ 			vbo *gpu_buf = (vbo *)ffp_vertex_attrib_vbo[attr_idx];
+ 			gpu_buf->last_frame = vgl_framecount;
+ 			ptr = (uint8_t *)gpu_buf->ptr + ffp_vertex_attrib_offsets[attr_idx];

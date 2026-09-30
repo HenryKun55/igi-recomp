@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: HenryKun55 <henriqueflavio55@gmail.com>
 Date: Wed, 30 Sep 2026 13:58:36 -0300
-Subject: [PATCH 2/2] Cache ffp shader patching: attribute lookups, patched
+Subject: [PATCH] Cache ffp shader patching: attribute lookups, patched
  vertex/fragment programs, bound programs
 
 ---
