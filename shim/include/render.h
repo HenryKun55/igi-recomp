@@ -47,6 +47,9 @@ extern RenderState g_rs;
 extern uint32_t g_rs_serial;
 /* Call before changing g_rs: draws the pending batch with the old state and bumps g_rs_serial. */
 void render_state_changing(void);
+/* Bumped with g_rs_serial when an input of the fixed-function lighting changes
+ * (lights, material, view matrix, ambient/color material/normalize states). */
+extern uint32_t g_light_serial;
 /* Presented frames so far. */
 extern uint32_t g_frame_serial;
 

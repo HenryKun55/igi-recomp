@@ -470,6 +470,8 @@ static void dev_SetTransform(Ctx *c)
     if (m && memcmp(m, gptr(ARG(2)), 64)) {
         render_state_changing();
         memcpy(m, gptr(ARG(2)), 64);
+        if (m == g_rs.view)
+            g_light_serial++;
     }
     stdcall_ret(c, D3D_OK, 3);
 }
@@ -494,6 +496,8 @@ static void dev_MultiplyTransform(Ctx *c)
         if (memcmp(m, r, 64)) {
             render_state_changing();
             memcpy(m, r, 64);
+            if (m == g_rs.view)
+                g_light_serial++;
         }
     }
     stdcall_ret(c, D3D_OK, 3);
@@ -541,6 +545,7 @@ static void dev_SetMaterial(Ctx *c)
         memcmp(g_rs.mat_specular, g + 32, 16) || memcmp(g_rs.mat_emissive, g + 48, 16) ||
         memcmp(&g_rs.mat_power, g + 64, 4)) {
         render_state_changing();
+        g_light_serial++;
         memcpy(g_rs.mat_diffuse, g, 16);
         memcpy(g_rs.mat_ambient, g + 16, 16);
         memcpy(g_rs.mat_specular, g + 32, 16);
@@ -575,6 +580,7 @@ static void dev_SetLight(Ctx *c)
         memcpy(&n.range, gptr(p + 76u), 28);
         if (memcmp(&n, &g_rs.lights[i], sizeof(n))) {
             render_state_changing();
+            g_light_serial++;
             g_rs.lights[i] = n;
         }
     }
@@ -586,6 +592,7 @@ static void dev_LightEnable(Ctx *c)
     uint32_t i = ARG(1);
     if (i < MAX_LIGHTS && g_rs.lights[i].enabled != (ARG(2) != 0)) {
         render_state_changing();
+        g_light_serial++;
         g_rs.lights[i].enabled = ARG(2) != 0;
     }
     stdcall_ret(c, D3D_OK, 3);
@@ -603,6 +610,8 @@ static void dev_SetRenderState(Ctx *c)
     uint32_t s = ARG(1);
     if (s < 256u && g_rs.rs[s] != ARG(2)) {
         render_state_changing();
+        if (s == 139u || s == 141u || s == 143u || s == 145u)   /* AMBIENT, COLORVERTEX, NORMALIZENORMALS, DIFFUSEMATERIALSOURCE */
+            g_light_serial++;
         g_rs.rs[s] = ARG(2);
     }
     stdcall_ret(c, D3D_OK, 3);

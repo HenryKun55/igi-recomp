@@ -19,6 +19,7 @@
 
 RenderState g_rs;
 uint32_t g_rs_serial;
+uint32_t g_light_serial;
 uint32_t g_frame_serial;
 static uint32_t perf_gpu_draws;   /* draws actually submitted to GL this frame */
 static void perf_frame_begin_swap(void);
@@ -79,28 +80,35 @@ static uint64_t pc_frame[PC_COUNT];
 typedef struct CacheSlot {
     uint32_t key;
     int valid;
-    float v[4];
+    uint32_t w[4];   /* the float values' bits */
 } CacheSlot;
 static CacheSlot cache[CACHE_SLOTS];
 static GLenum cur_unit = GL_TEXTURE0, cur_client_unit = GL_TEXTURE0;
 
-/* Returns 1 if the value changed (and records it). */
-static int cache_set(uint32_t key, const float *v, int n)
+/* Returns 1 if the value changed (and records it). Called dozens of times per
+ * draw with a constant n: inlined, and the values compare as words. */
+static inline __attribute__((always_inline)) int cache_set(uint32_t key, const float *v, int n)
 {
+    uint32_t w[4];
+    memcpy(w, v, (size_t)n * sizeof(float));
     uint32_t h = (key * 2654435761u) >> 25;   /* 7 bits */
     for (uint32_t i = 0; i < CACHE_SLOTS; i++) {
         CacheSlot *s = &cache[(h + i) % CACHE_SLOTS];
         if (s->valid && s->key == key) {
-            if (!memcmp(s->v, v, (size_t)n * sizeof(float)))
+            int same = 1;
+            for (int k = 0; k < n; k++)
+                same &= s->w[k] == w[k];
+            if (same)
                 return 0;
-            memcpy(s->v, v, (size_t)n * sizeof(float));
+            for (int k = 0; k < n; k++)
+                s->w[k] = w[k];
             return 1;
         }
         if (!s->valid) {
             s->valid = 1;
             s->key = key;
-            memset(s->v, 0, sizeof(s->v));
-            memcpy(s->v, v, (size_t)n * sizeof(float));
+            for (int k = 0; k < 4; k++)
+                s->w[k] = k < n ? w[k] : 0u;
             return 1;
         }
     }
@@ -314,6 +322,26 @@ static void c_depthrange(float n, float f)
     (glDepthRange)(n, f);
 }
 
+/* 4x4 matrices copied and compared inline: on the Vita memcpy and memset are
+ * calls into SceLibKernel, several per draw otherwise. */
+typedef struct Mat4 {
+    float m[16];
+} Mat4;
+
+static inline void mat_copy(float *d, const float *s)
+{
+    *(Mat4 *)d = *(const Mat4 *)s;
+}
+
+static inline int mat_equal(const float *a, const float *b)
+{
+    const uint32_t *x = (const uint32_t *)a, *y = (const uint32_t *)b;
+    uint32_t diff = 0;
+    for (int i = 0; i < 16; i++)
+        diff |= x[i] ^ y[i];
+    return diff == 0;
+}
+
 /* Loads `m` into the projection or modelview matrix; leaves that matrix mode current. */
 static void c_load_matrix(GLenum mode, const float *m)
 {
@@ -321,9 +349,9 @@ static void c_load_matrix(GLenum mode, const float *m)
     float *slot = proj ? mcache.proj : mcache.mv;
     int *valid = proj ? &mcache.proj_valid : &mcache.mv_valid;
     glMatrixMode(mode);
-    if (*valid && !memcmp(slot, m, sizeof(mcache.proj)))
+    if (*valid && mat_equal(slot, m))
         return;
-    memcpy(slot, m, sizeof(mcache.proj));
+    mat_copy(slot, m);
     *valid = 1;
     glLoadMatrixf(m);
 }
@@ -539,6 +567,7 @@ void render_init(int w, int h)
     /* D3D defaults. */
     memset(&g_rs, 0, sizeof(g_rs));
     g_rs_serial++;
+    g_light_serial++;
     g_rs.rs[7] = 1;          /* ZENABLE */
     g_rs.rs[14] = 1;         /* ZWRITEENABLE */
     g_rs.rs[19] = 2;         /* SRCBLEND ONE */
@@ -1379,9 +1408,13 @@ typedef struct LightSnapshot {
 } LightSnapshot;
 static LightSnapshot light_snap;
 static int light_snap_valid;
+static uint32_t light_snap_serial;   /* g_light_serial when light_snap was taken */
 
 static void apply_lights(void)
 {
+    if (light_snap_valid && light_snap_serial == g_light_serial)
+        return;
+    light_snap_serial = g_light_serial;
     const uint32_t *rs = g_rs.rs;
     static LightSnapshot cur;
     memset(&cur, 0, sizeof(cur));   /* also clears padding for memcmp */
@@ -1568,7 +1601,7 @@ static void mat_mul(const float *a, const float *b, float *out)
         for (int j = 0; j < 4; j++)
             r[i * 4 + j] = a[i * 4 + 0] * b[0 * 4 + j] + a[i * 4 + 1] * b[1 * 4 + j] +
                            a[i * 4 + 2] * b[2 * 4 + j] + a[i * 4 + 3] * b[3 * 4 + j];
-    memcpy(out, r, sizeof(r));
+    mat_copy(out, r);
 }
 
 static void apply_transforms(int pretransformed)
@@ -1583,7 +1616,7 @@ static void apply_transforms(int pretransformed)
     c_viewport(x, y, w, h);
     /* D3D clip-space z is [0, w]; GL wants [-w, w]: z' = 2z - w. */
     float p[16];
-    memcpy(p, g_rs.proj, sizeof(p));
+    mat_copy(p, g_rs.proj);
     int remap = use_z_remap();
     if (remap)
         c_depthrange(g_rs.vp_minz, g_rs.vp_maxz);
