@@ -12,12 +12,14 @@
 #include <OpenGL/gl.h>
 #elif defined(__vita__)
 #include <vitaGL.h>
+#include <psp2/kernel/threadmgr.h>
 #else
 #include <GL/gl.h>
 #endif
 
 RenderState g_rs;
 uint32_t g_rs_serial;
+uint32_t g_light_serial;
 uint32_t g_frame_serial;
 static uint32_t perf_gpu_draws;   /* draws actually submitted to GL this frame */
 static void perf_frame_begin_swap(void);
@@ -78,28 +80,35 @@ static uint64_t pc_frame[PC_COUNT];
 typedef struct CacheSlot {
     uint32_t key;
     int valid;
-    float v[4];
+    uint32_t w[4];   /* the float values' bits */
 } CacheSlot;
 static CacheSlot cache[CACHE_SLOTS];
 static GLenum cur_unit = GL_TEXTURE0, cur_client_unit = GL_TEXTURE0;
 
-/* Returns 1 if the value changed (and records it). */
-static int cache_set(uint32_t key, const float *v, int n)
+/* Returns 1 if the value changed (and records it). Called dozens of times per
+ * draw with a constant n: inlined, and the values compare as words. */
+static inline __attribute__((always_inline)) int cache_set(uint32_t key, const float *v, int n)
 {
+    uint32_t w[4];
+    memcpy(w, v, (size_t)n * sizeof(float));
     uint32_t h = (key * 2654435761u) >> 25;   /* 7 bits */
     for (uint32_t i = 0; i < CACHE_SLOTS; i++) {
         CacheSlot *s = &cache[(h + i) % CACHE_SLOTS];
         if (s->valid && s->key == key) {
-            if (!memcmp(s->v, v, (size_t)n * sizeof(float)))
+            int same = 1;
+            for (int k = 0; k < n; k++)
+                same &= s->w[k] == w[k];
+            if (same)
                 return 0;
-            memcpy(s->v, v, (size_t)n * sizeof(float));
+            for (int k = 0; k < n; k++)
+                s->w[k] = w[k];
             return 1;
         }
         if (!s->valid) {
             s->valid = 1;
             s->key = key;
-            memset(s->v, 0, sizeof(s->v));
-            memcpy(s->v, v, (size_t)n * sizeof(float));
+            for (int k = 0; k < 4; k++)
+                s->w[k] = k < n ? w[k] : 0u;
             return 1;
         }
     }
@@ -221,8 +230,23 @@ static void c_clientactivetexture(GLenum u)
     }
 }
 
+/* Combiner setup last sent to each texture unit by apply_stages (see there). */
+static struct {
+    int valid;
+    uint32_t colorop, colorarg1, colorarg2, alphaop, alphaarg1, alphaarg2, factor;
+} stage_env[MAX_STAGES];
+static int in_stage_env;   /* apply_stages is sending a combiner setup */
+
+static void stage_env_touched(void)
+{
+    uint32_t u = (uint32_t)(cur_unit - GL_TEXTURE0);
+    if (!in_stage_env && u < MAX_STAGES)
+        stage_env[u].valid = 0;
+}
+
 static void c_texenvi(GLenum target, GLenum pname, GLint value)
 {
+    stage_env_touched();
     float v = (float)value;
     if (cache_set(0x40000000u ^ ((uint32_t)(cur_unit - GL_TEXTURE0) << 20) ^ pname, &v, 1))
         (glTexEnvi)(target, pname, value);
@@ -230,6 +254,7 @@ static void c_texenvi(GLenum target, GLenum pname, GLint value)
 
 static void c_texenvfv(GLenum target, GLenum pname, const GLfloat *value)
 {
+    stage_env_touched();
     if (cache_set(0x40000000u ^ ((uint32_t)(cur_unit - GL_TEXTURE0) << 20) ^ pname, value, 4)) {
         GLfloat v[4];   /* vitaGL takes a non-const pointer */
         memcpy(v, value, sizeof(v));
@@ -313,6 +338,26 @@ static void c_depthrange(float n, float f)
     (glDepthRange)(n, f);
 }
 
+/* 4x4 matrices copied and compared inline: on the Vita memcpy and memset are
+ * calls into SceLibKernel, several per draw otherwise. */
+typedef struct Mat4 {
+    float m[16];
+} Mat4;
+
+static inline void mat_copy(float *d, const float *s)
+{
+    *(Mat4 *)d = *(const Mat4 *)s;
+}
+
+static inline int mat_equal(const float *a, const float *b)
+{
+    const uint32_t *x = (const uint32_t *)a, *y = (const uint32_t *)b;
+    uint32_t diff = 0;
+    for (int i = 0; i < 16; i++)
+        diff |= x[i] ^ y[i];
+    return diff == 0;
+}
+
 /* Loads `m` into the projection or modelview matrix; leaves that matrix mode current. */
 static void c_load_matrix(GLenum mode, const float *m)
 {
@@ -320,9 +365,9 @@ static void c_load_matrix(GLenum mode, const float *m)
     float *slot = proj ? mcache.proj : mcache.mv;
     int *valid = proj ? &mcache.proj_valid : &mcache.mv_valid;
     glMatrixMode(mode);
-    if (*valid && !memcmp(slot, m, sizeof(mcache.proj)))
+    if (*valid && mat_equal(slot, m))
         return;
-    memcpy(slot, m, sizeof(mcache.proj));
+    mat_copy(slot, m);
     *valid = 1;
     glLoadMatrixf(m);
 }
@@ -509,8 +554,20 @@ static uint32_t *conv(size_t n)
     return conv_buf;
 }
 
+#if defined(__vita__) && defined(IGI_PROFILE)
+/* Phase markers inside a private vitaGL built with PROF_HOOKS=1 (absent otherwise). */
+extern volatile uint32_t *vgl_prof_slot __attribute__((weak));
+extern uint32_t vgl_prof_base __attribute__((weak));
+#endif
+
 void render_init(int w, int h)
 {
+#if defined(__vita__) && defined(IGI_PROFILE)
+    if (&vgl_prof_slot && &vgl_prof_base) {
+        vgl_prof_base = PROF_H_VGL;
+        vgl_prof_slot = &rt_prof_cur;
+    }
+#endif
     rt_w = w;
     rt_h = h;
     update_letterbox();
@@ -526,6 +583,7 @@ void render_init(int w, int h)
     /* D3D defaults. */
     memset(&g_rs, 0, sizeof(g_rs));
     g_rs_serial++;
+    g_light_serial++;
     g_rs.rs[7] = 1;          /* ZENABLE */
     g_rs.rs[14] = 1;         /* ZWRITEENABLE */
     g_rs.rs[19] = 2;         /* SRCBLEND ONE */
@@ -569,7 +627,12 @@ void render_begin_frame(void)
     update_letterbox();
 }
 
-/* IGI_SHOT=N: save every Nth presented frame as shot_<frame>.bmp (debugging aid). */
+#if defined(__vita__)
+static int shot_hold = -1;   /* benchmark frame to hold on screen after its swap */
+#endif
+
+/* IGI_SHOT=N: save every Nth presented frame as shot_<frame>.bmp (debugging aid); the
+ * benchmark's screenshots go to bench_shot_<measured frame>.bmp. */
 static void maybe_screenshot(void)
 {
     static int every = -1;
@@ -580,17 +643,31 @@ static void maybe_screenshot(void)
     }
     frame++;
     int forced = g_trace_next_frame == 2;
-    if (!forced && (every <= 0 || frame % (unsigned)every))
+    int bench_shot = bench_shot_due();
+#if defined(__vita__)
+    /* Vita3K does not write rendered frames back to guest memory (read backs come
+     * out black): the frame is held on screen instead for an external window
+     * capture (tools/bench_vita3k.sh with SHOT set). */
+    if (bench_shot >= 0) {
+        shot_hold = bench_shot;
+        bench_shot = -1;
+    }
+#endif
+    if (!forced && bench_shot < 0 && (every <= 0 || frame % (unsigned)every))
         return;
     uint8_t *px = malloc((size_t)fb_w * (size_t)fb_h * 4u);
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
     glReadPixels(0, 0, fb_w, fb_h, GL_BGRA, GL_UNSIGNED_BYTE, px);
     char name[64];
 #if defined(__vita__)
-    snprintf(name, sizeof(name), "ux0:data/igi/shot_%05u.bmp", frame);
+    const char *dir = "ux0:data/igi/";
 #else
-    snprintf(name, sizeof(name), "shot_%05u.bmp", frame);
+    const char *dir = "";
 #endif
+    if (bench_shot >= 0)
+        snprintf(name, sizeof(name), "%sbench_shot_%05d.bmp", dir, bench_shot);
+    else
+        snprintf(name, sizeof(name), "%sshot_%05u.bmp", dir, frame);
     FILE *f = fopen(name, "wb");
     if (f) {
         uint32_t size = 54u + (uint32_t)fb_w * (uint32_t)fb_h * 4u;
@@ -636,6 +713,19 @@ void render_present(void)
     }
     perf_frame_begin_swap();
     perf_swap();
+#if defined(__vita__)
+    if (shot_hold >= 0) {
+        sceKernelDelayThread(1000000);   /* until the frame is on screen */
+        /* A file of its own: Vita3K only writes igi.log out when it is closed. */
+        FILE *f = fopen("ux0:data/igi/bench_shot_now.txt", "w");
+        if (f) {
+            fprintf(f, "%d\n", shot_hold);
+            fclose(f);
+        }
+        sceKernelDelayThread(3000000);   /* while it is captured */
+        shot_hold = -1;
+    }
+#endif
     platform_pump();
     render_begin_frame();
 }
@@ -1311,11 +1401,28 @@ static int apply_stages(int ntex)
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wt);
             }
         }
-        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);
-        glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, tf);
-        setup_combiner(0, st->colorop, st->colorarg1, st->colorarg2);
-        setup_combiner(1, st->alphaop == 1u ? 3u : st->alphaop, st->alphaarg1,
-                       st->alphaop == 1u ? 1u : st->alphaarg2);
+        /* The combiner setup is a dozen texenv calls: skipped while this unit's
+         * inputs are the ones it was last sent with. */
+        if (!stage_env[i].valid || stage_env[i].colorop != st->colorop || stage_env[i].colorarg1 != st->colorarg1 ||
+            stage_env[i].colorarg2 != st->colorarg2 || stage_env[i].alphaop != st->alphaop ||
+            stage_env[i].alphaarg1 != st->alphaarg1 || stage_env[i].alphaarg2 != st->alphaarg2 ||
+            stage_env[i].factor != g_rs.rs[60]) {
+            in_stage_env = 1;
+            glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);
+            glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, tf);
+            setup_combiner(0, st->colorop, st->colorarg1, st->colorarg2);
+            setup_combiner(1, st->alphaop == 1u ? 3u : st->alphaop, st->alphaarg1,
+                           st->alphaop == 1u ? 1u : st->alphaarg2);
+            in_stage_env = 0;
+            stage_env[i].valid = 1;
+            stage_env[i].colorop = st->colorop;
+            stage_env[i].colorarg1 = st->colorarg1;
+            stage_env[i].colorarg2 = st->colorarg2;
+            stage_env[i].alphaop = st->alphaop;
+            stage_env[i].alphaarg1 = st->alphaarg1;
+            stage_env[i].alphaarg2 = st->alphaarg2;
+            stage_env[i].factor = g_rs.rs[60];
+        }
         (void)ntex;
     }
     glActiveTexture(GL_TEXTURE0);
@@ -1334,9 +1441,13 @@ typedef struct LightSnapshot {
 } LightSnapshot;
 static LightSnapshot light_snap;
 static int light_snap_valid;
+static uint32_t light_snap_serial;   /* g_light_serial when light_snap was taken */
 
 static void apply_lights(void)
 {
+    if (light_snap_valid && light_snap_serial == g_light_serial)
+        return;
+    light_snap_serial = g_light_serial;
     const uint32_t *rs = g_rs.rs;
     static LightSnapshot cur;
     memset(&cur, 0, sizeof(cur));   /* also clears padding for memcmp */
@@ -1523,7 +1634,7 @@ static void mat_mul(const float *a, const float *b, float *out)
         for (int j = 0; j < 4; j++)
             r[i * 4 + j] = a[i * 4 + 0] * b[0 * 4 + j] + a[i * 4 + 1] * b[1 * 4 + j] +
                            a[i * 4 + 2] * b[2 * 4 + j] + a[i * 4 + 3] * b[3 * 4 + j];
-    memcpy(out, r, sizeof(r));
+    mat_copy(out, r);
 }
 
 static void apply_transforms(int pretransformed)
@@ -1538,7 +1649,7 @@ static void apply_transforms(int pretransformed)
     c_viewport(x, y, w, h);
     /* D3D clip-space z is [0, w]; GL wants [-w, w]: z' = 2z - w. */
     float p[16];
-    memcpy(p, g_rs.proj, sizeof(p));
+    mat_copy(p, g_rs.proj);
     int remap = use_z_remap();
     if (remap)
         c_depthrange(g_rs.vp_minz, g_rs.vp_maxz);
@@ -1566,10 +1677,14 @@ static GLenum gl_prim(int prim)
 }
 
 /* ---- vertex packing -------------------------------------------------------
- * Vertices are copied straight into tight per-attribute arrays holding only
- * what the draw uses (vitaGL copies count * stride bytes of every enabled
- * client array on each draw). Batched draws are packed when they are queued,
- * so every vertex is read once and never copied as a whole RVertex.
+ * Vertices are copied straight into one interleaved array holding only what
+ * the draw uses. Batched draws are packed when they are queued, so every
+ * vertex is read once and never copied as a whole RVertex.
+ *
+ * On the Vita the arrays (and the batch index lists) are written directly into
+ * GPU-mapped memory and drawn from there through buffer objects: with client
+ * arrays vitaGL copies every enabled attribute and the indices again on each
+ * draw.
  */
 typedef struct Layout {
     int pretransformed, has_normal, has_color, has_spec, ntex;   /* draw key */
@@ -1578,27 +1693,9 @@ typedef struct Layout {
     int use_fog;                /* desktop only: game vertex fog taken from the specular alpha */
     int stages;                 /* texture stages apply_stages() will enable */
     int uv_src[MAX_STAGES];     /* RVertex uv set feeding each stage, -1 = none */
+    uint32_t stride;            /* bytes per interleaved vertex */
+    uint32_t off_col, off_nrm, off_fog, off_uv[MAX_STAGES];
 } Layout;
-
-static float *pos_buf;
-static float *fog_buf;
-static uint32_t *col_buf;
-static float *nrm_buf;
-static float *uv_buf[MAX_STAGES];
-static size_t pos_cap;
-
-static void ensure_capacity(size_t n)
-{
-    if (n <= pos_cap)
-        return;
-    pos_cap = n + 1024u;
-    pos_buf = realloc(pos_buf, pos_cap * 16u);
-    fog_buf = realloc(fog_buf, pos_cap * 4u);
-    col_buf = realloc(col_buf, pos_cap * 4u);
-    nrm_buf = realloc(nrm_buf, pos_cap * 12u);
-    for (int s = 0; s < MAX_STAGES; s++)
-        uv_buf[s] = realloc(uv_buf[s], pos_cap * 8u);
-}
 
 /* Number of stages apply_stages() enables for the current state (same rule). */
 static int active_stages(void)
@@ -1615,7 +1712,6 @@ static int active_stages(void)
 
 static void layout_init(Layout *L, int pretransformed, int has_normal, int has_color, int has_spec, int ntex)
 {
-    memset(L, 0, sizeof(*L));
     L->pretransformed = pretransformed;
     L->has_normal = has_normal;
     L->has_color = has_color;
@@ -1625,14 +1721,143 @@ static void layout_init(Layout *L, int pretransformed, int has_normal, int has_c
     L->use_color = has_color || pretransformed;
 #if !defined(__vita__)
     L->use_fog = g_rs.rs[28] && (pretransformed || (!g_rs.rs[35] && !g_rs.rs[140])) && has_spec;
+#else
+    L->use_fog = 0;
 #endif
     L->stages = active_stages();
+    uint32_t o = (uint32_t)L->pos_size * 4u;
+    L->off_col = o;
+    o += L->use_color ? 4u : 0u;
+    L->off_nrm = o;
+    o += has_normal ? 12u : 0u;
+    L->off_fog = o;
+    o += L->use_fog ? 4u : 0u;
     for (int s = 0; s < MAX_STAGES; s++) {
         L->uv_src[s] = -1;
         uint32_t ci = g_rs.stage[s].texcoordindex & 0xFFFFu;
         if (s < L->stages && (int)ci < ntex)
             L->uv_src[s] = ci < MAX_STAGES ? (int)ci : 0;
+        L->off_uv[s] = o;
+        o += L->uv_src[s] >= 0 ? 8u : 0u;
     }
+    L->stride = o;
+}
+
+/* ---- vertex/index storage of the draw or batch being built ------------------ */
+#define BATCH_MAX_V 16384u
+#define BATCH_MAX_I 49152u
+
+static uint8_t *vtx;          /* interleaved vertices (layout stride) */
+static uint32_t vtx_cap;      /* vertices that fit at vtx */
+static uint16_t *idx_out;     /* batch index list */
+static uint32_t idx_cap;      /* indices that fit at idx_out */
+static int vtx_gpu;           /* vtx and idx_out are in the GPU arena */
+
+static uint8_t *heap_vtx;
+static uint16_t *heap_idx;
+static size_t heap_vtx_bytes, heap_idx_count;
+
+#if defined(__vita__)
+/* GPU-mapped arena, one segment per frame in flight rotated with vitaGL's frame
+ * counter like its own temporary pool, so a segment is rewritten only once the
+ * GPU is done with it. A draw that does not fit falls back to client arrays. */
+#define ARENA_SEGS 3u
+#define ARENA_VTX_BYTES (3u << 20)
+#define ARENA_IDX_BYTES (512u << 10)
+static uint8_t *arena_vtx[ARENA_SEGS];
+static uint16_t *arena_idx[ARENA_SEGS];
+static uint32_t arena_vpos, arena_ipos, arena_seg, arena_frame;
+static int arena_state;       /* 0 untried, 1 ready, -1 unavailable */
+static GLuint arena_vbo, arena_ibo;
+
+static int arena_ready(void)
+{
+    if (arena_state == 0) {
+        arena_state = -1;
+        for (uint32_t s = 0; s < ARENA_SEGS; s++) {
+            arena_vtx[s] = vglForceAlloc(ARENA_VTX_BYTES);
+            arena_idx[s] = vglForceAlloc(ARENA_IDX_BYTES);
+            if (!arena_vtx[s] || !arena_idx[s]) {
+                rt_log("render: no GPU memory for the vertex arena; using client arrays");
+                return 0;
+            }
+        }
+        glGenBuffers(1, &arena_vbo);
+        glGenBuffers(1, &arena_ibo);
+        arena_frame = vglGetFrameNumber();
+        arena_seg = arena_frame % ARENA_SEGS;
+        arena_state = 1;
+    }
+    if (arena_state < 0)
+        return 0;
+    uint32_t f = vglGetFrameNumber();
+    if (f != arena_frame) {
+        arena_frame = f;
+        arena_seg = f % ARENA_SEGS;
+        arena_vpos = arena_ipos = 0;
+    }
+    return 1;
+}
+#endif
+
+/* Opens storage for a draw or batch of this layout with room for at least
+ * nv vertices and ni indices. */
+static void stream_begin(const Layout *L, uint32_t nv, uint32_t ni)
+{
+#if defined(__vita__)
+    if (arena_ready()) {
+        uint32_t vpos = (arena_vpos + 15u) & ~15u;
+        uint32_t vc = vpos < ARENA_VTX_BYTES ? (ARENA_VTX_BYTES - vpos) / L->stride : 0u;
+        uint32_t ic = (ARENA_IDX_BYTES - arena_ipos) / 2u;
+        if (vc >= nv && ic >= ni) {
+            vtx = arena_vtx[arena_seg] + vpos;
+            vtx_cap = vc < BATCH_MAX_V ? vc : BATCH_MAX_V;
+            idx_out = arena_idx[arena_seg] + arena_ipos / 2u;
+            idx_cap = ic < BATCH_MAX_I ? ic : BATCH_MAX_I;
+            arena_vpos = vpos;
+            vtx_gpu = 1;
+            return;
+        }
+        static int reported;
+        if (!reported) {
+            reported = 1;
+            rt_log("render: vertex arena full (frame %u); falling back to client arrays", arena_frame);
+        }
+    }
+#endif
+    uint32_t vn = nv > BATCH_MAX_V ? nv : BATCH_MAX_V;
+    uint32_t in = ni > BATCH_MAX_I ? ni : BATCH_MAX_I;
+    if ((size_t)vn * L->stride > heap_vtx_bytes) {
+        heap_vtx_bytes = (size_t)vn * L->stride;
+        free(heap_vtx);
+        heap_vtx = malloc(heap_vtx_bytes);
+    }
+    if (in > heap_idx_count) {
+        heap_idx_count = in;
+        free(heap_idx);
+        heap_idx = malloc(heap_idx_count * sizeof(uint16_t));
+    }
+    vtx = heap_vtx;
+    vtx_cap = vn;
+    idx_out = heap_idx;
+    idx_cap = in;
+    vtx_gpu = 0;
+}
+
+/* The draw of the open storage went to GL: its memory stays in use this frame. */
+static void stream_end(const Layout *L, uint32_t nv, uint32_t ni)
+{
+#if defined(__vita__)
+    if (vtx_gpu) {
+        arena_vpos += nv * L->stride;
+        arena_ipos += (ni * 2u + 3u) & ~3u;
+    }
+#else
+    (void)L;
+    (void)nv;
+    (void)ni;
+#endif
+    vtx_gpu = 0;
 }
 
 /* Writes nv vertices at array position `base`. */
@@ -1640,48 +1865,52 @@ static void pack_vertices(const Layout *L, const RVertex *v, uint32_t nv, uint32
 {
     PROF_SECTION(PROF_H_PACK);
     uint64_t t0 = fine_now();
-    ensure_capacity((size_t)base + nv);
+    const uint32_t st = L->stride;
+    uint8_t *d0 = vtx + (size_t)base * st;
+    uint8_t *d = d0;
     if (L->pretransformed) {
-        float *p = pos_buf + (size_t)base * 4u;
-        for (uint32_t i = 0; i < nv; i++, p += 4) {
+        for (uint32_t i = 0; i < nv; i++, d += st) {
             float w = v[i].w != 0.0f ? 1.0f / v[i].w : 1.0f;
+            float *p = (float *)d;
             p[0] = v[i].x * w;
             p[1] = v[i].y * w;
             p[2] = v[i].z * w;
             p[3] = w;
         }
     } else {
-        float *p = pos_buf + (size_t)base * 3u;
-        for (uint32_t i = 0; i < nv; i++, p += 3) {
+        for (uint32_t i = 0; i < nv; i++, d += st) {
+            float *p = (float *)d;
             p[0] = v[i].x;
             p[1] = v[i].y;
             p[2] = v[i].z;
         }
     }
     if (L->use_color) {
-        uint32_t *c = col_buf + base;
-        for (uint32_t i = 0; i < nv; i++)
-            c[i] = v[i].color;
+        d = d0 + L->off_col;
+        for (uint32_t i = 0; i < nv; i++, d += st)
+            *(uint32_t *)d = v[i].color;
     }
     if (L->has_normal) {
-        float *n = nrm_buf + (size_t)base * 3u;
-        for (uint32_t i = 0; i < nv; i++, n += 3) {
+        d = d0 + L->off_nrm;
+        for (uint32_t i = 0; i < nv; i++, d += st) {
+            float *n = (float *)d;
             n[0] = v[i].nx;
             n[1] = v[i].ny;
             n[2] = v[i].nz;
         }
     }
     if (L->use_fog) {
-        float *f = fog_buf + base;
-        for (uint32_t i = 0; i < nv; i++)
-            f[i] = (float)(v[i].spec >> 24) * (1.0f / 255.0f);
+        d = d0 + L->off_fog;
+        for (uint32_t i = 0; i < nv; i++, d += st)
+            *(float *)d = (float)(v[i].spec >> 24) * (1.0f / 255.0f);
     }
-    for (int s = 0; s < L->stages; s++) {
+    for (int s = 0; s < MAX_STAGES; s++) {
         int k = L->uv_src[s];
         if (k < 0)
             continue;
-        float *uv = uv_buf[s] + (size_t)base * 2u;
-        for (uint32_t i = 0; i < nv; i++, uv += 2) {
+        d = d0 + L->off_uv[s];
+        for (uint32_t i = 0; i < nv; i++, d += st) {
+            float *uv = (float *)d;
             uv[0] = v[i].uv[k][0];
             uv[1] = v[i].uv[k][1];
         }
@@ -1690,43 +1919,74 @@ static void pack_vertices(const Layout *L, const RVertex *v, uint32_t nv, uint32
     PROF_SECTION_END;
 }
 
-/* Client array pointers: re-sent only when they change (GL reads them at draw time). */
+/* Client array pointers: re-sent only when they change (GL reads them at draw
+ * time). The key includes the buffer object the pointer is an offset into. */
 enum { PTR_VERTEX, PTR_COLOR, PTR_NORMAL, PTR_FOG, PTR_TEX0, PTR_COUNT = PTR_TEX0 + MAX_STAGES };
-static const void *ptr_cache[PTR_COUNT];
-static int ptr_size_cache[PTR_COUNT];
+static struct {
+    const void *p;
+    GLuint vbo;
+    int size, stride;
+} ptr_cache[PTR_COUNT];
 
-/* Forgets every cached pointer (offset 0 into a buffer object looks like NULL). */
+/* Forgets every cached pointer (after pointer calls made elsewhere). */
 static void ptr_cache_reset(void)
 {
     for (int i = 0; i < PTR_COUNT; i++)
-        ptr_size_cache[i] = -1;
+        ptr_cache[i].size = -1;
 }
 
-static int ptr_changed(int slot, const void *p, int size)
+static int ptr_changed(int slot, GLuint vbo, const void *p, int size, int stride)
 {
-    if (ptr_cache[slot] == p && ptr_size_cache[slot] == size)
+    if (ptr_cache[slot].p == p && ptr_cache[slot].vbo == vbo && ptr_cache[slot].size == size &&
+        ptr_cache[slot].stride == stride)
         return 0;
-    ptr_cache[slot] = p;
-    ptr_size_cache[slot] = size;
+    ptr_cache[slot].p = p;
+    ptr_cache[slot].vbo = vbo;
+    ptr_cache[slot].size = size;
+    ptr_cache[slot].stride = stride;
     return 1;
 }
 
-/* Sets up the GL state for arrays packed with layout L and draws them. */
-/* Where a draw's attributes live: client arrays (vbo 0) or offsets into a buffer object. */
+/* Where a draw's attributes live: client arrays (vbo 0) or offsets into a buffer
+ * object; ibo: indices at offset 0 of that buffer object (idx ignored). */
 typedef struct DrawArrays {
-    GLuint vbo;
+    GLuint vbo, ibo;
+    int stride;
     const void *pos, *col, *nrm, *fog, *uv[MAX_STAGES];
 } DrawArrays;
 
 static void submit_arrays(int prim, const Layout *L, uint32_t nv, const uint16_t *idx, uint32_t ni,
                           const DrawArrays *A);
 
+/* Draws the open storage (vtx) with indices idx (idx_out for batches). */
 static void submit(int prim, const Layout *L, uint32_t nv, const uint16_t *idx, uint32_t ni)
 {
-    DrawArrays A = { 0, pos_buf, col_buf, nrm_buf, fog_buf, { 0 } };
+    DrawArrays A;
+    memset(&A, 0, sizeof(A));
+    A.stride = (int)L->stride;
+    uintptr_t b = (uintptr_t)vtx;
+#if defined(__vita__)
+    if (vtx_gpu) {
+        /* The arena buffer objects point at this draw's data (no copy in vitaGL). */
+        glBindBuffer(GL_ARRAY_BUFFER, arena_vbo);
+        vglBufferData(GL_ARRAY_BUFFER, vtx);
+        A.vbo = arena_vbo;
+        b = 0;
+        if (idx && idx == idx_out) {
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, arena_ibo);
+            vglBufferData(GL_ELEMENT_ARRAY_BUFFER, idx_out);
+            A.ibo = arena_ibo;
+        }
+    }
+#endif
+    A.pos = (const void *)b;
+    A.col = (const void *)(b + L->off_col);
+    A.nrm = (const void *)(b + L->off_nrm);
+    A.fog = (const void *)(b + L->off_fog);
     for (int s = 0; s < MAX_STAGES; s++)
-        A.uv[s] = uv_buf[s];
+        A.uv[s] = (const void *)(b + L->off_uv[s]);
     submit_arrays(prim, L, nv, idx, ni, &A);
+    stream_end(L, nv, idx == idx_out ? ni : 0u);
 }
 
 static void submit_arrays(int prim, const Layout *L, uint32_t nv, const uint16_t *idx, uint32_t ni,
@@ -1740,34 +2000,35 @@ static void submit_arrays(int prim, const Layout *L, uint32_t nv, const uint16_t
     int stages = apply_stages(L->ntex);
     apply_transforms(L->pretransformed);
 
-    if (A->vbo) {
-        /* Offsets into a buffer object: bind it and re-send every pointer. */
-        glBindBuffer(GL_ARRAY_BUFFER, A->vbo);
-        ptr_cache_reset();
-    }
+    /* Pointers are offsets into A->vbo while it is bound (vitaGL and GL record
+     * the binding with each pointer). */
+    const GLuint vbo = A->vbo;
+    const int st = A->stride;
+    if (vbo)
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
     glEnableClientState(GL_VERTEX_ARRAY);
-    if (ptr_changed(PTR_VERTEX, A->pos, L->pos_size))
-        glVertexPointer(L->pos_size, GL_FLOAT, 0, A->pos);
+    if (ptr_changed(PTR_VERTEX, vbo, A->pos, L->pos_size, st))
+        glVertexPointer(L->pos_size, GL_FLOAT, st, A->pos);
     if (L->use_color) {
         glEnableClientState(GL_COLOR_ARRAY);
-        if (ptr_changed(PTR_COLOR, A->col, 4))
-            glColorPointer(4, GL_UNSIGNED_BYTE, 0, A->col);
+        if (ptr_changed(PTR_COLOR, vbo, A->col, 4, st))
+            glColorPointer(4, GL_UNSIGNED_BYTE, st, A->col);
     } else {
         glDisableClientState(GL_COLOR_ARRAY);
         glColor4f(1, 1, 1, 1);
     }
     if (L->has_normal) {
         glEnableClientState(GL_NORMAL_ARRAY);
-        if (ptr_changed(PTR_NORMAL, A->nrm, 3))
-            glNormalPointer(GL_FLOAT, 0, A->nrm);
+        if (ptr_changed(PTR_NORMAL, vbo, A->nrm, 3, st))
+            glNormalPointer(GL_FLOAT, st, A->nrm);
     } else {
         glDisableClientState(GL_NORMAL_ARRAY);
     }
 #if !defined(__vita__)
     if (L->use_fog) {
         glEnableClientState(GL_FOG_COORDINATE_ARRAY);
-        if (ptr_changed(PTR_FOG, A->fog, 1))
-            glFogCoordPointer(GL_FLOAT, 0, A->fog);
+        if (ptr_changed(PTR_FOG, vbo, A->fog, 1, st))
+            glFogCoordPointer(GL_FLOAT, st, A->fog);
     } else {
         glDisableClientState(GL_FOG_COORDINATE_ARRAY);
         glFogCoordf(1.0f);
@@ -1777,20 +2038,30 @@ static void submit_arrays(int prim, const Layout *L, uint32_t nv, const uint16_t
         glClientActiveTexture(GL_TEXTURE0 + (GLenum)s);
         if (s < L->stages && L->uv_src[s] >= 0) {
             glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-            if (ptr_changed(PTR_TEX0 + s, A->uv[s], 2))
-                glTexCoordPointer(2, GL_FLOAT, 0, A->uv[s]);
+            if (ptr_changed(PTR_TEX0 + s, vbo, A->uv[s], 2, st))
+                glTexCoordPointer(2, GL_FLOAT, st, A->uv[s]);
         } else {
 #if defined(__vita__)
             /* Audit experiment (diagnostic mode 9): zero texcoord array on units
              * without texture coordinates. Off by default. */
             if (diag_mode != DIAG_ZERO_UV) {
                 glDisableClientState(GL_TEXTURE_COORD_ARRAY);
-                ptr_cache[PTR_TEX0 + s] = NULL;
+                ptr_cache[PTR_TEX0 + s].size = -1;
             } else {
-                memset(uv_buf[s], 0, nv * 8u);
+                static float *zero_uv;
+                static uint32_t zero_uv_cap;
+                if (nv > zero_uv_cap) {
+                    zero_uv_cap = nv + 1024u;
+                    free(zero_uv);
+                    zero_uv = calloc(zero_uv_cap, 8u);
+                }
+                if (vbo)
+                    glBindBuffer(GL_ARRAY_BUFFER, 0);
                 glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-                glTexCoordPointer(2, GL_FLOAT, 0, uv_buf[s]);
-                ptr_cache[PTR_TEX0 + s] = uv_buf[s];
+                glTexCoordPointer(2, GL_FLOAT, 0, zero_uv);
+                ptr_cache[PTR_TEX0 + s].size = -1;
+                if (vbo)
+                    glBindBuffer(GL_ARRAY_BUFFER, vbo);
             }
 #else
             glDisableClientState(GL_TEXTURE_COORD_ARRAY);
@@ -1799,25 +2070,27 @@ static void submit_arrays(int prim, const Layout *L, uint32_t nv, const uint16_t
         }
     }
     glClientActiveTexture(GL_TEXTURE0);
+    if (vbo)
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
     uint64_t t1 = fine_now();
     pc_frame[PC_STATE_US] += (t1 - t0) - (pc_frame[PC_TEX_US] - tex_before);
 
     PROF_HOST(PROF_H_GLDRAW);
     /* The index range is known: glDrawRangeElements spares vitaGL a scan of the
      * indices for the highest one before copying the vertex arrays. */
-    if (idx)
+    if (A->ibo) {
+        glDrawRangeElements(gl_prim(prim), 0, nv - 1u, (GLsizei)ni, GL_UNSIGNED_SHORT, (const void *)0);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+    } else if (idx) {
         glDrawRangeElements(gl_prim(prim), 0, nv - 1u, (GLsizei)ni, GL_UNSIGNED_SHORT, idx);
-    else
+    } else {
         glDrawArrays(gl_prim(prim), 0, (GLsizei)nv);
-    if (A->vbo) {
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
-        ptr_cache_reset();
     }
     if (L->use_color)
         color_cache_valid = 0;   /* GL leaves the current color undefined after a color array */
     pc_frame[PC_GL_US] += fine_now() - t1;
     pc_frame[PC_VERTS] += nv;
-    pc_frame[PC_INDICES] += idx ? ni : 0u;
+    pc_frame[PC_INDICES] += idx || A->ibo ? ni : 0u;
     PROF_SECTION_END;
 }
 
@@ -1890,7 +2163,12 @@ static void draw_now(int prim, const RVertex *v, uint32_t nv, const uint16_t *id
         trace_draw(prim, v, nv, ni, pretransformed, has_normal, has_color, has_spec, ntex);
     Layout L;
     layout_init(&L, pretransformed, has_normal, has_color, has_spec, ntex);
+    stream_begin(&L, nv, idx ? ni : 0u);
     pack_vertices(&L, v, nv, 0);
+    if (idx) {
+        memcpy(idx_out, idx, ni * sizeof(uint16_t));
+        idx = idx_out;
+    }
     submit(prim, &L, nv, idx, ni);
 }
 
@@ -1921,10 +2199,6 @@ static int rhw_invisible(int prim, const RVertex *v, uint32_t nv)
  * indexed triangle list: on the Vita every draw costs a round of vitaGL/GXM
  * state setup. IGI_BATCH=0 disables it.
  */
-#define BATCH_MAX_V 16384u
-#define BATCH_MAX_I 49152u
-
-static uint16_t batch_i[BATCH_MAX_I];
 static uint32_t batch_nv, batch_ni;
 static uint32_t batch_serial;
 static Layout batch_layout;
@@ -1959,7 +2233,7 @@ static void flush_batch(void)
         return;
     /* State setters flush before changing g_rs (render_state_changing), so the
      * current state is still the batch's. */
-    submit(PRIM_TRIANGLES, &batch_layout, batch_nv, batch_i, batch_ni);
+    submit(PRIM_TRIANGLES, &batch_layout, batch_nv, idx_out, batch_ni);
     batch_nv = batch_ni = 0;
 }
 
@@ -2141,7 +2415,7 @@ static int bounds_in_front(void)
  * set), offset by `base`, to the batch index list. */
 static void append_indices(int prim, const uint16_t *idx, uint32_t tris, uint32_t base)
 {
-    uint16_t *out = &batch_i[batch_ni];
+    uint16_t *out = &idx_out[batch_ni];
     for (uint32_t t = 0; t < tris; t++) {
         uint32_t a, b, c;
         if (prim == PRIM_TRIANGLES) {
@@ -2220,7 +2494,7 @@ static void batch_draw_impl(int prim, const RVertex *v, uint32_t nv, const uint1
         return;
     const Layout *bl = &batch_layout;
     if (batch_active &&
-        (batch_nv + nv > BATCH_MAX_V || batch_ni + tris * 3u > BATCH_MAX_I || bl->pretransformed != pretransformed ||
+        (batch_nv + nv > vtx_cap || batch_ni + tris * 3u > idx_cap || bl->pretransformed != pretransformed ||
          bl->has_normal != has_normal || bl->has_color != has_color || bl->has_spec != has_spec || bl->ntex != ntex ||
          g_rs_serial != batch_serial))
         render_flush();
@@ -2228,6 +2502,7 @@ static void batch_draw_impl(int prim, const RVertex *v, uint32_t nv, const uint1
         batch_active = 1;
         batch_serial = g_rs_serial;
         layout_init(&batch_layout, pretransformed, has_normal, has_color, has_spec, ntex);
+        stream_begin(&batch_layout, nv, tris * 3u);
         batch_nv = batch_ni = 0;
     }
     /* Same state as the batch start, so the layout (active stages, uv sets) holds. */
@@ -2368,7 +2643,7 @@ int render_draw_vb(void **slot, uint32_t gen, const RVertex *all, uint32_t count
     Layout L;
     layout_init(&L, 0, has_normal, has_color, has_spec, ntex);
     L.use_color = has_color;
-    DrawArrays A = { g->buf, (const void *)(uintptr_t)(start * 12u), (const void *)(g->off_col + start * 4u),
+    DrawArrays A = { g->buf, 0, 0, (const void *)(uintptr_t)(start * 12u), (const void *)(g->off_col + start * 4u),
                      (const void *)(g->off_nrm + start * 12u), (const void *)(g->off_fog + start * 4u), { 0 } };
     for (int s = 0; s < MAX_STAGES; s++) {
         int k = L.uv_src[s] < 0 ? 0 : L.uv_src[s];
@@ -2401,68 +2676,69 @@ static uint32_t d3dcolor_rgba(uint32_t argb)
 static void pack_guest(const Layout *L, const GuestVerts *g, uint32_t nv, uint32_t base)
 {
     PROF_SECTION(PROF_H_PACK);
-    ensure_capacity((size_t)base + nv);
     const uint8_t *vb = g->base;
     const uint32_t stride = g->stride;
     const uint32_t *src = g->src;
+    const uint32_t st = L->stride;
+    uint8_t *d0 = vtx + (size_t)base * st;
+    uint8_t *d = d0;
     if (L->pretransformed) {
-        float *p = pos_buf + (size_t)base * 4u;
-        for (uint32_t i = 0; i < nv; i++, p += 4) {
+        for (uint32_t i = 0; i < nv; i++, d += st) {
             float v[4];
             memcpy(v, vb + (size_t)(src ? src[i] : i) * stride, 16);
             float w = v[3] != 0.0f ? 1.0f / v[3] : 1.0f;
+            float *p = (float *)d;
             p[0] = v[0] * w;
             p[1] = v[1] * w;
             p[2] = v[2] * w;
             p[3] = w;
         }
     } else {
-        float *p = pos_buf + (size_t)base * 3u;
-        for (uint32_t i = 0; i < nv; i++, p += 3)
-            memcpy(p, vb + (size_t)(src ? src[i] : i) * stride, 12);
+        for (uint32_t i = 0; i < nv; i++, d += st)
+            memcpy(d, vb + (size_t)(src ? src[i] : i) * stride, 12);
     }
     if (L->use_color) {
-        uint32_t *c = col_buf + base;
         const uint32_t off = g->col_off;
+        d = d0 + L->off_col;
         if (!g->has_color) {   /* pre-transformed without diffuse: white */
-            for (uint32_t i = 0; i < nv; i++)
-                c[i] = 0xFFFFFFFFu;
+            for (uint32_t i = 0; i < nv; i++, d += st)
+                *(uint32_t *)d = 0xFFFFFFFFu;
         } else {
-            for (uint32_t i = 0; i < nv; i++) {
+            for (uint32_t i = 0; i < nv; i++, d += st) {
                 uint32_t v;
                 memcpy(&v, vb + (size_t)(src ? src[i] : i) * stride + off, 4);
-                c[i] = d3dcolor_rgba(v);
+                *(uint32_t *)d = d3dcolor_rgba(v);
             }
         }
     }
     if (L->has_normal) {
-        float *n = nrm_buf + (size_t)base * 3u;
         const uint32_t off = g->nrm_off;
-        for (uint32_t i = 0; i < nv; i++, n += 3)
-            memcpy(n, vb + (size_t)(src ? src[i] : i) * stride + off, 12);
+        d = d0 + L->off_nrm;
+        for (uint32_t i = 0; i < nv; i++, d += st)
+            memcpy(d, vb + (size_t)(src ? src[i] : i) * stride + off, 12);
     }
     if (L->use_fog) {
-        float *f = fog_buf + base;
         const uint32_t off = g->spec_off;
-        for (uint32_t i = 0; i < nv; i++) {
+        d = d0 + L->off_fog;
+        for (uint32_t i = 0; i < nv; i++, d += st) {
             uint32_t v;
             memcpy(&v, vb + (size_t)(src ? src[i] : i) * stride + off, 4);
-            f[i] = (float)(v >> 24) * (1.0f / 255.0f);
+            *(float *)d = (float)(v >> 24) * (1.0f / 255.0f);
         }
     }
-    for (int s = 0; s < L->stages; s++) {
+    for (int s = 0; s < MAX_STAGES; s++) {
         int k = L->uv_src[s];
         if (k < 0)
             continue;
-        float *uv = uv_buf[s] + (size_t)base * 2u;
         const uint32_t off = g->uv_off[k];
+        d = d0 + L->off_uv[s];
         if (g->uv_bytes[k] == 8u) {
-            for (uint32_t i = 0; i < nv; i++, uv += 2)
-                memcpy(uv, vb + (size_t)(src ? src[i] : i) * stride + off, 8);
+            for (uint32_t i = 0; i < nv; i++, d += st)
+                memcpy(d, vb + (size_t)(src ? src[i] : i) * stride + off, 8);
         } else {
-            for (uint32_t i = 0; i < nv; i++, uv += 2) {
-                memcpy(uv, vb + (size_t)(src ? src[i] : i) * stride + off, 4);
-                uv[1] = 0.0f;
+            for (uint32_t i = 0; i < nv; i++, d += st) {
+                memcpy(d, vb + (size_t)(src ? src[i] : i) * stride + off, 4);
+                ((float *)d)[1] = 0.0f;
             }
         }
     }
@@ -2528,7 +2804,7 @@ int render_draw_guest(int prim, const GuestVerts *g, uint32_t nv, const uint16_t
     if (tris) {
         const Layout *bl = &batch_layout;
         if (batch_active &&
-            (batch_nv + nv > BATCH_MAX_V || batch_ni + tris * 3u > BATCH_MAX_I ||
+            (batch_nv + nv > vtx_cap || batch_ni + tris * 3u > idx_cap ||
              bl->pretransformed != g->pretransformed ||
              bl->has_normal != g->has_normal || bl->has_color != g->has_color || bl->has_spec != g->has_spec ||
              bl->ntex != g->ntex || g_rs_serial != batch_serial))
@@ -2537,6 +2813,7 @@ int render_draw_guest(int prim, const GuestVerts *g, uint32_t nv, const uint16_t
             batch_active = 1;
             batch_serial = g_rs_serial;
             layout_init(&batch_layout, g->pretransformed, g->has_normal, g->has_color, g->has_spec, g->ntex);
+            stream_begin(&batch_layout, nv, tris * 3u);
             batch_nv = batch_ni = 0;
         }
         uint32_t base = batch_nv;

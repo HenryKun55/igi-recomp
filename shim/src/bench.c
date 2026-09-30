@@ -25,9 +25,11 @@
 #if defined(__vita__)
 #define BENCH_CFG "ux0:data/igi/bench.txt"
 #define BENCH_RESULT "ux0:data/igi/bench_result.txt"
+#define BENCH_RUNNING "ux0:data/igi/bench_running.txt"
 #define BENCH_PLATFORM "vita"
 #else
 #define BENCH_RESULT "bench_result.txt"
+#define BENCH_RUNNING "bench_running.txt"
 #define BENCH_PLATFORM "desktop"
 #endif
 
@@ -64,6 +66,7 @@ typedef enum Phase {
 } Phase;
 
 static int bench_secs = -1;
+static int shot_every;          /* screenshot every N measured frames (0: none) */
 static Phase phase;
 static uint64_t phase_start_us, start_us, run_start_us, last_us;
 static uint32_t phase_frames, state_frames, last_state = IGI_UI_NONE, steps;
@@ -87,14 +90,20 @@ int bench_enabled(void)
         FILE *f = fopen(BENCH_CFG, "r");
         if (f) {
             char buf[32] = { 0 };
-            if (fgets(buf, sizeof(buf), f))
-                bench_secs = atoi(buf);
+            if (fgets(buf, sizeof(buf), f)) {
+                char *end;
+                bench_secs = (int)strtol(buf, &end, 10);
+                shot_every = atoi(end);   /* optional second number */
+            }
             fclose(f);
         }
 #else
         const char *e = getenv("IGI_BENCH");
         if (e)
             bench_secs = atoi(e);
+        e = getenv("IGI_BENCH_SHOT");
+        if (e)
+            shot_every = atoi(e);
 #endif
         if (bench_secs > 0)
             rt_log("bench: enabled, %d s of gameplay", bench_secs);
@@ -222,6 +231,13 @@ static void finish(uint64_t now)
     exit(0);
 }
 
+int bench_shot_due(void)
+{
+    if (!bench_enabled() || phase != PH_RUN || shot_every <= 0 || !samples || n_samples % (uint32_t)shot_every)
+        return -1;
+    return (int)n_samples;
+}
+
 void bench_frame(uint64_t now, uint64_t frame_us, uint64_t draw_us, uint64_t swap_us, uint32_t draws,
                  uint32_t gpu_draws, uint32_t verts)
 {
@@ -306,6 +322,11 @@ void bench_frame(uint64_t now, uint64_t frame_us, uint64_t draw_us, uint64_t swa
 #endif
             run_start_us = now;
             set_phase(PH_RUN, now);
+            /* Tells external tools (tools/profile_vita3k.sh) the measured part began:
+             * Vita3K only writes igi.log out when the game exits. */
+            FILE *f = fopen(BENCH_RUNNING, "w");
+            if (f)
+                fclose(f);
         }
         break;
     case PH_RUN: {

@@ -1,0 +1,580 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: HenryKun55 <henriqueflavio55@gmail.com>
+Date: Wed, 30 Sep 2026 13:58:36 -0300
+Subject: [PATCH] Cache ffp shader patching: attribute lookups, patched
+ vertex/fragment programs, bound programs
+
+---
+ source/custom_shaders.c |   8 +-
+ source/ffp.c            | 229 +++++++++++++++++++++++++++++++++-------
+ source/framebuffers.c   |   2 +
+ source/gxm.c            |   3 +
+ source/misc.c           |   2 +
+ source/shared.h         |   6 ++
+ source/splashscreen.c   |   8 ++
+ source/tests.c          |   2 +
+ 8 files changed, 220 insertions(+), 40 deletions(-)
+
+diff --git a/source/custom_shaders.c b/source/custom_shaders.c
+index 8e1f440..6cb4f16 100644
+--- a/source/custom_shaders.c
++++ b/source/custom_shaders.c
+@@ -224,7 +224,8 @@ char vgl_file_cache_path[256];
+ 		p->blend_info.raw = blend_info.raw; \
+ 		rebuild_frag_shader(p->fshader->id, &p->fprog, (SceGxmProgram *)p->vshader->prog, is_fbo_float ? SCE_GXM_OUTPUT_REGISTER_FORMAT_HALF4 : SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4); \
+ 	} \
+-	sceGxmSetFragmentProgram(gxm_context, p->fprog);
++	sceGxmSetFragmentProgram(gxm_context, p->fprog); \
++	vgl_invalidate_bound_programs();
+ 	
+ #define align_attributes(attributes, streams) \
+ 	if (p->has_unaligned_attrs) { \
+@@ -396,6 +397,7 @@ void release_shader(shader *s) {
+ 	if (s->valid) {
+ 		if (s->prog) {
+ 			sceGxmShaderPatcherForceUnregisterProgram(gxm_shader_patcher, s->id);
++			vgl_invalidate_bound_programs();
+ 			vgl_free((void *)s->prog);
+ 			while (s->mat) {
+ 				matrix_uniform *m = (matrix_uniform *)s->mat->chain;
+@@ -873,6 +875,7 @@ void _glMultiDrawArrays_CustomShadersIMPL(SceGxmPrimitiveType gxm_p, uint16_t *i
+ 	// Uploading new vertex program
+ 	patch_vertex_program(gxm_shader_patcher, p->vshader->id, attributes, p->attr_num, streams, p->attr_num, &p->vprog);
+ 	sceGxmSetVertexProgram(gxm_context, p->vprog);
++	vgl_invalidate_bound_programs();
+ 
+ 	// Uploading both fragment and vertex uniforms data
+ 	upload_uniforms();
+@@ -1117,6 +1120,7 @@ GLboolean _glDrawArrays_CustomShadersIMPL(GLint first, GLsizei count, GLboolean
+ 	// Uploading new vertex program
+ 	patch_vertex_program(gxm_shader_patcher, p->vshader->id, attributes, p->attr_num, streams, p->attr_num, &p->vprog);
+ 	sceGxmSetVertexProgram(gxm_context, p->vprog);
++	vgl_invalidate_bound_programs();
+ 
+ 	// Uploading both fragment and vertex uniforms data
+ 	upload_uniforms();
+@@ -1397,6 +1401,7 @@ GLboolean _glDrawElements_CustomShadersIMPL(uint16_t *idx_buf, GLsizei count, ui
+ 	// Uploading new vertex program
+ 	patch_vertex_program(gxm_shader_patcher, p->vshader->id, attributes, p->attr_num, streams, p->attr_num, &p->vprog);
+ 	sceGxmSetVertexProgram(gxm_context, p->vprog);
++	vgl_invalidate_bound_programs();
+ 
+ 	// Uploading both fragment and vertex uniforms data
+ 	upload_uniforms();
+@@ -1446,6 +1451,7 @@ void _vglDrawObjects_CustomShadersIMPL(GLboolean implicit_wvp) {
+ 
+ 	// Setting up required vertex shader
+ 	sceGxmSetVertexProgram(gxm_context, p->vprog);
++	vgl_invalidate_bound_programs();
+ 
+ 	// Uploading textures on relative texture units
+ 	for (int i = 0; i < p->max_frag_texunit_idx; i++) {
+diff --git a/source/ffp.c b/source/ffp.c
+index 693acae..61af08d 100644
+--- a/source/ffp.c
++++ b/source/ffp.c
+@@ -41,11 +41,11 @@
+ 	if (mask.has_colors && color_material_state && (color_material_mode == type || color_material_mode == type2)) { \
+ 		vgl_fast_memcpy(&ffp_vertex_attribute[ffp_vertex_num_params], &ffp_vertex_attrib_config[FFP_ATTRIB_COLOR], sizeof(SceGxmVertexAttribute)); \
+ 		ffp_vertex_attribute[ffp_vertex_num_params].streamIndex = ffp_vertex_num_params; \
+-		ffp_vertex_attribute[ffp_vertex_num_params].regIndex = sceGxmProgramParameterGetResourceIndex(param); \
++		ffp_vertex_attribute[ffp_vertex_num_params].regIndex = ffp_param_index(param); \
+ 		ffp_vertex_stream[ffp_vertex_num_params].stride = ffp_vertex_stream_config[FFP_ATTRIB_COLOR].stride; \
+ 	} else { \
+ 		ffp_vertex_attribute[ffp_vertex_num_params].streamIndex = ffp_vertex_num_params; \
+-		ffp_vertex_attribute[ffp_vertex_num_params].regIndex = sceGxmProgramParameterGetResourceIndex(param); \
++		ffp_vertex_attribute[ffp_vertex_num_params].regIndex = ffp_param_index(param); \
+ 		ffp_vertex_attribute[ffp_vertex_num_params].format = SCE_GXM_ATTRIBUTE_FORMAT_F32; \
+ 		ffp_vertex_attribute[ffp_vertex_num_params].offset = 0; \
+ 		ffp_vertex_attribute[ffp_vertex_num_params].componentCount = 4; \
+@@ -286,6 +286,8 @@ combiner_mask ffp_combiner_mask = {.raw = 0};
+ SceGxmVertexAttribute ffp_vertex_attribute[FFP_VERTEX_ATTRIBS_NUM];
+ SceGxmVertexStream ffp_vertex_stream[FFP_VERTEX_ATTRIBS_NUM];
+ SceGxmVertexStream *ffp_lighting_streams = NULL;
++const void *vgl_bound_vprog = NULL;
++const void *vgl_bound_fprog = NULL;
+ 
+ void adjust_color_material_state() {
+ 	if (color_material_state) {
+@@ -416,6 +418,143 @@ void setup_combiner_pass(int i, char *dst) {
+ }
+ #endif
+ 
++// Vertex attribute lookups of the ffp vertex programs, memoized: the by-name search
++// would otherwise run for every attribute on every draw.
++#define FFP_PARAM_MEMO_SIZE 64
++static int ffp_param_memo_num = 0, ffp_param_memo_next = 0;
++static struct {
++	const SceGxmProgram *prog;
++	const char *name;
++	const SceGxmProgramParameter *param;
++	unsigned int index;
++} ffp_param_memo[FFP_PARAM_MEMO_SIZE];
++
++static void ffp_param_memo_reset(void) {
++	ffp_param_memo_num = 0;
++	ffp_param_memo_next = 0;
++}
++
++static const SceGxmProgramParameter *ffp_find_param(const char *name) {
++	for (int i = 0; i < ffp_param_memo_num; i++) {
++		if (ffp_param_memo[i].prog == ffp_vertex_program && (ffp_param_memo[i].name == name || !strcmp(ffp_param_memo[i].name, name)))
++			return ffp_param_memo[i].param;
++	}
++	const SceGxmProgramParameter *param = sceGxmProgramFindParameterByName(ffp_vertex_program, name);
++	if (param) {
++		ffp_param_memo[ffp_param_memo_next].prog = ffp_vertex_program;
++		ffp_param_memo[ffp_param_memo_next].name = name;
++		ffp_param_memo[ffp_param_memo_next].param = param;
++		ffp_param_memo[ffp_param_memo_next].index = sceGxmProgramParameterGetResourceIndex(param);
++		ffp_param_memo_next = (ffp_param_memo_next + 1) % FFP_PARAM_MEMO_SIZE;
++		if (ffp_param_memo_num < FFP_PARAM_MEMO_SIZE)
++			ffp_param_memo_num++;
++	}
++	return param;
++}
++
++static unsigned int ffp_param_index(const SceGxmProgramParameter *param) {
++	for (int i = 0; i < ffp_param_memo_num; i++) {
++		if (ffp_param_memo[i].param == param)
++			return ffp_param_memo[i].index;
++	}
++	return sceGxmProgramParameterGetResourceIndex(param);
++}
++
++// Patched ffp vertex programs by (program, attributes, streams): patching goes
++// through the shader patcher's hash lookup on every draw otherwise.
++#define FFP_PATCH_CACHE_SIZE 32
++typedef struct {
++	SceGxmShaderPatcherId id;
++	int num;
++	SceGxmVertexAttribute attrs[FFP_VERTEX_ATTRIBS_NUM];
++	SceGxmVertexStream streams[FFP_VERTEX_ATTRIBS_NUM];
++	SceGxmVertexProgram *prog;
++} ffp_patch_entry;
++static ffp_patch_entry ffp_patch_cache[FFP_PATCH_CACHE_SIZE];
++static int ffp_patch_cache_num = 0, ffp_patch_cache_next = 0, ffp_patch_cache_last = -1;
++
++static void ffp_patch_cache_reset(void) {
++	ffp_patch_cache_num = 0;
++	ffp_patch_cache_next = 0;
++	ffp_patch_cache_last = -1;
++}
++
++static inline int ffp_patch_entry_matches(const ffp_patch_entry *e, SceGxmShaderPatcherId id, const SceGxmVertexAttribute *attrs, const SceGxmVertexStream *streams, int num) {
++	return e->id == id && e->num == num && !memcmp(e->attrs, attrs, num * sizeof(SceGxmVertexAttribute)) && !memcmp(e->streams, streams, num * sizeof(SceGxmVertexStream));
++}
++
++static void ffp_patch_vertex_program(SceGxmShaderPatcherId id, const SceGxmVertexAttribute *attrs, const SceGxmVertexStream *streams, int num, SceGxmVertexProgram **prog) {
++	if (num > FFP_VERTEX_ATTRIBS_NUM) {
++		patch_vertex_program(gxm_shader_patcher, id, attrs, num, streams, num, prog);
++		return;
++	}
++	if (ffp_patch_cache_last >= 0 && ffp_patch_entry_matches(&ffp_patch_cache[ffp_patch_cache_last], id, attrs, streams, num)) {
++		*prog = ffp_patch_cache[ffp_patch_cache_last].prog;
++		return;
++	}
++	for (int i = 0; i < ffp_patch_cache_num; i++) {
++		if (ffp_patch_entry_matches(&ffp_patch_cache[i], id, attrs, streams, num)) {
++			ffp_patch_cache_last = i;
++			*prog = ffp_patch_cache[i].prog;
++			return;
++		}
++	}
++	*prog = NULL;
++	patch_vertex_program(gxm_shader_patcher, id, attrs, num, streams, num, prog);
++	if (!*prog)
++		return;
++	ffp_patch_entry *e = &ffp_patch_cache[ffp_patch_cache_next];
++	e->id = id;
++	e->num = num;
++	memcpy(e->attrs, attrs, num * sizeof(SceGxmVertexAttribute));
++	memcpy(e->streams, streams, num * sizeof(SceGxmVertexStream));
++	e->prog = *prog;
++	ffp_patch_cache_last = ffp_patch_cache_next;
++	ffp_patch_cache_next = (ffp_patch_cache_next + 1) % FFP_PATCH_CACHE_SIZE;
++	if (ffp_patch_cache_num < FFP_PATCH_CACHE_SIZE)
++		ffp_patch_cache_num++;
++}
++
++// Patched ffp fragment programs by (program, blend, linked vertex program).
++#define FFP_FRAG_PATCH_CACHE_SIZE 32
++typedef struct {
++	SceGxmShaderPatcherId id;
++	uint32_t blend;
++	const SceGxmProgram *vprog;
++	SceGxmMultisampleMode msaa;
++	SceGxmFragmentProgram *prog;
++} ffp_frag_patch_entry;
++static ffp_frag_patch_entry ffp_frag_patch_cache[FFP_FRAG_PATCH_CACHE_SIZE];
++static int ffp_frag_patch_cache_num = 0, ffp_frag_patch_cache_next = 0;
++
++static void ffp_frag_patch_cache_reset(void) {
++	ffp_frag_patch_cache_num = 0;
++	ffp_frag_patch_cache_next = 0;
++}
++
++static void ffp_patch_fragment_program(SceGxmShaderPatcherId id, const SceGxmProgram *vprog, SceGxmFragmentProgram **prog) {
++	for (int i = 0; i < ffp_frag_patch_cache_num; i++) {
++		ffp_frag_patch_entry *e = &ffp_frag_patch_cache[i];
++		if (e->id == id && e->blend == blend_info.raw && e->vprog == vprog && e->msaa == msaa_mode) {
++			*prog = e->prog;
++			return;
++		}
++	}
++	*prog = NULL;
++	rebuild_frag_shader(id, prog, vprog, SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4);
++	if (!*prog)
++		return;
++	ffp_frag_patch_entry *e = &ffp_frag_patch_cache[ffp_frag_patch_cache_next];
++	e->id = id;
++	e->blend = blend_info.raw;
++	e->vprog = vprog;
++	e->msaa = msaa_mode;
++	e->prog = *prog;
++	ffp_frag_patch_cache_next = (ffp_frag_patch_cache_next + 1) % FFP_FRAG_PATCH_CACHE_SIZE;
++	if (ffp_frag_patch_cache_num < FFP_FRAG_PATCH_CACHE_SIZE)
++		ffp_frag_patch_cache_num++;
++}
++
+ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *streams, SceGxmIndexSource index_type) {
+ #ifdef HAVE_PROFILING
+ 	uint32_t reload_ffp_shaders_start = sceKernelGetProcessTimeLow();
+@@ -671,6 +810,7 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
+ #endif
+ 		}
+ 		sceGxmShaderPatcherRegisterProgram(gxm_shader_patcher, ffp_vertex_program, &ffp_vertex_program_id);
++		ffp_param_memo_reset(); // A new program may reuse a freed one's address
+ 		ffp_vertex_unif_buf_size = sceGxmProgramGetDefaultUniformBufferSize(ffp_vertex_program);
+ 		ffp_vertex_unif_buf = vglMalloc(ffp_vertex_unif_buf_size);
+ 
+@@ -680,6 +820,9 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
+ 			vert_shader_cache_size++;
+ 		} else {
+ 			sceGxmShaderPatcherForceUnregisterProgram(gxm_shader_patcher, vert_shader_cache[vert_shader_cache_idx].id);
++			vgl_invalidate_bound_programs();
++			ffp_patch_cache_reset();
++			ffp_frag_patch_cache_reset();
+ 			vgl_free(vert_shader_cache[vert_shader_cache_idx].prog);
+ 			vgl_free(vert_shader_cache[vert_shader_cache_idx].unif_buf);
+ 		}
+@@ -706,58 +849,58 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
+ 	ffp_vertex_num_params = 1;
+ 	if (attrs && base_texture_id == 0) { // Immediate mode and non-immediate only when #textures == 1 and no lights
+ 		// Vertex positions
+-		const SceGxmProgramParameter *param = sceGxmProgramFindParameterByName(ffp_vertex_program, "position");
+-		attrs[0].regIndex = sceGxmProgramParameterGetResourceIndex(param);
++		const SceGxmProgramParameter *param = ffp_find_param("position");
++		attrs[0].regIndex = ffp_param_index(param);
+ 
+ 		if (mask.num_textures > 0) {
+ 			// Vertex texture coordinates (First Pass)
+-			param = sceGxmProgramFindParameterByName(ffp_vertex_program, "texcoord0");
+-			attrs[1].regIndex = sceGxmProgramParameterGetResourceIndex(param);
++			param = ffp_find_param("texcoord0");
++			attrs[1].regIndex = ffp_param_index(param);
+ 			ffp_vertex_num_params++;
+ 			
+ 			// Vertex texture coordinates (Second Pass)
+ 			if (mask.num_textures > 1) {
+-				param = sceGxmProgramFindParameterByName(ffp_vertex_program, "texcoord1");
+-				attrs[2].regIndex = sceGxmProgramParameterGetResourceIndex(param);
++				param = ffp_find_param("texcoord1");
++				attrs[2].regIndex = ffp_param_index(param);
+ 				ffp_vertex_num_params++;
+ 			}
+ 		}
+ 
+ 		// Vertex colors
+ 		if (mask.has_colors) {
+-			param = sceGxmProgramFindParameterByName(ffp_vertex_program, "color");
+-			attrs[ffp_vertex_num_params++].regIndex = sceGxmProgramParameterGetResourceIndex(param);
++			param = ffp_find_param("color");
++			attrs[ffp_vertex_num_params++].regIndex = ffp_param_index(param);
+ 		}
+ 
+ 		// Lighting data
+ 		if (mask.lights_num > 0) {
+ 			ffp_lighting_streams = &attrs[ffp_vertex_num_params];
+-			param = sceGxmProgramFindParameterByName(ffp_vertex_program, "diff");
+-			attrs[ffp_vertex_num_params++].regIndex = sceGxmProgramParameterGetResourceIndex(param);
+-			param = sceGxmProgramFindParameterByName(ffp_vertex_program, "spec");
+-			attrs[ffp_vertex_num_params++].regIndex = sceGxmProgramParameterGetResourceIndex(param);
+-			param = sceGxmProgramFindParameterByName(ffp_vertex_program, "emission");
+-			attrs[ffp_vertex_num_params++].regIndex = sceGxmProgramParameterGetResourceIndex(param);
+-			param = sceGxmProgramFindParameterByName(ffp_vertex_program, "normals");
+-			attrs[ffp_vertex_num_params++].regIndex = sceGxmProgramParameterGetResourceIndex(param);
++			param = ffp_find_param("diff");
++			attrs[ffp_vertex_num_params++].regIndex = ffp_param_index(param);
++			param = ffp_find_param("spec");
++			attrs[ffp_vertex_num_params++].regIndex = ffp_param_index(param);
++			param = ffp_find_param("emission");
++			attrs[ffp_vertex_num_params++].regIndex = ffp_param_index(param);
++			param = ffp_find_param("normals");
++			attrs[ffp_vertex_num_params++].regIndex = ffp_param_index(param);
+ 		} else {
+ 			ffp_lighting_streams = NULL;
+ 		}
+ 	} else { // Non immediate mode
+ 		// Vertex positions
+-		const SceGxmProgramParameter *param = sceGxmProgramFindParameterByName(ffp_vertex_program, "position");
++		const SceGxmProgramParameter *param = ffp_find_param("position");
+ 		vgl_fast_memcpy(&ffp_vertex_attribute[0], &ffp_vertex_attrib_config[FFP_ATTRIB_POSITION], sizeof(SceGxmVertexAttribute));
+ 		ffp_vertex_attribute[0].streamIndex = 0;
+-		ffp_vertex_attribute[0].regIndex = sceGxmProgramParameterGetResourceIndex(param);
++		ffp_vertex_attribute[0].regIndex = ffp_param_index(param);
+ 		ffp_vertex_stream[0].stride = ffp_vertex_stream_config[FFP_ATTRIB_POSITION].stride;
+ 		ffp_vertex_stream[0].indexSource = SCE_GXM_INDEX_SOURCE_INDEX_16BIT;
+ 
+ 		// Vertex texture coordinates (First pass)
+ 		if (mask.num_textures > 0) {
+-			param = sceGxmProgramFindParameterByName(ffp_vertex_program, "texcoord0");
++			param = ffp_find_param("texcoord0");
+ 			vgl_fast_memcpy(&ffp_vertex_attribute[1], &ffp_vertex_attrib_config[FFP_ATTRIB_TEX(base_texture_id)], sizeof(SceGxmVertexAttribute));
+ 			ffp_vertex_attribute[1].streamIndex = 1;
+-			ffp_vertex_attribute[1].regIndex = sceGxmProgramParameterGetResourceIndex(param);
++			ffp_vertex_attribute[1].regIndex = ffp_param_index(param);
+ 			ffp_vertex_stream[1].stride = ffp_vertex_stream_config[FFP_ATTRIB_TEX(base_texture_id)].stride;
+ 			ffp_vertex_stream[1].indexSource = SCE_GXM_INDEX_SOURCE_INDEX_16BIT;
+ 			ffp_vertex_num_params++;
+@@ -767,24 +910,24 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
+ 			ffp_lighting_streams = &ffp_vertex_stream[ffp_vertex_num_params];
+ 
+ 			// Lighting equation attributes
+-			param = sceGxmProgramFindParameterByName(ffp_vertex_program, "color");
++			param = ffp_find_param("color");
+ 			setup_lighting_attributes(GL_AMBIENT, GL_AMBIENT_AND_DIFFUSE);
+-			param = sceGxmProgramFindParameterByName(ffp_vertex_program, "diff");
++			param = ffp_find_param("diff");
+ 			setup_lighting_attributes(GL_DIFFUSE, GL_AMBIENT_AND_DIFFUSE);
+-			param = sceGxmProgramFindParameterByName(ffp_vertex_program, "spec");
++			param = ffp_find_param("spec");
+ 			setup_lighting_attributes(GL_SPECULAR, GL_SPECULAR);
+-			param = sceGxmProgramFindParameterByName(ffp_vertex_program, "emission");
++			param = ffp_find_param("emission");
+ 			setup_lighting_attributes(GL_EMISSION, GL_EMISSION);
+ 			
+-			param = sceGxmProgramFindParameterByName(ffp_vertex_program, "normals");
++			param = ffp_find_param("normals");
+ 			if (ffp_vertex_attrib_state & (1 << FFP_ATTRIB_NORMAL)) {
+ 				vgl_fast_memcpy(&ffp_vertex_attribute[ffp_vertex_num_params], &ffp_vertex_attrib_config[FFP_ATTRIB_NORMAL], sizeof(SceGxmVertexAttribute));
+ 				ffp_vertex_attribute[ffp_vertex_num_params].streamIndex = ffp_vertex_num_params;
+-				ffp_vertex_attribute[ffp_vertex_num_params].regIndex = sceGxmProgramParameterGetResourceIndex(param);
++				ffp_vertex_attribute[ffp_vertex_num_params].regIndex = ffp_param_index(param);
+ 				ffp_vertex_stream[ffp_vertex_num_params].stride = ffp_vertex_stream_config[FFP_ATTRIB_NORMAL].stride;
+ 			} else {
+ 				ffp_vertex_attribute[ffp_vertex_num_params].streamIndex = ffp_vertex_num_params;
+-				ffp_vertex_attribute[ffp_vertex_num_params].regIndex = sceGxmProgramParameterGetResourceIndex(param);
++				ffp_vertex_attribute[ffp_vertex_num_params].regIndex = ffp_param_index(param);
+ 				ffp_vertex_attribute[ffp_vertex_num_params].format = SCE_GXM_ATTRIBUTE_FORMAT_F32;
+ 				ffp_vertex_attribute[ffp_vertex_num_params].offset = 0;
+ 				ffp_vertex_attribute[ffp_vertex_num_params].componentCount = 3;
+@@ -795,10 +938,10 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
+ 			ffp_lighting_streams = NULL;
+ 			if (mask.has_colors) {
+ 				// Vertex colors
+-				param = sceGxmProgramFindParameterByName(ffp_vertex_program, "color");
++				param = ffp_find_param("color");
+ 				vgl_fast_memcpy(&ffp_vertex_attribute[ffp_vertex_num_params], &ffp_vertex_attrib_config[FFP_ATTRIB_COLOR], sizeof(SceGxmVertexAttribute));
+ 				ffp_vertex_attribute[ffp_vertex_num_params].streamIndex = ffp_vertex_num_params;
+-				ffp_vertex_attribute[ffp_vertex_num_params].regIndex = sceGxmProgramParameterGetResourceIndex(param);
++				ffp_vertex_attribute[ffp_vertex_num_params].regIndex = ffp_param_index(param);
+ 				ffp_vertex_stream[ffp_vertex_num_params].stride = ffp_vertex_stream_config[FFP_ATTRIB_COLOR].stride;
+ 				ffp_vertex_stream[ffp_vertex_num_params].indexSource = SCE_GXM_INDEX_SOURCE_INDEX_16BIT;
+ 				ffp_vertex_num_params++;
+@@ -807,20 +950,20 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
+ 
+ 		// Vertex texture coordinates (Second pass)
+ 		if (mask.num_textures > 1) {
+-			param = sceGxmProgramFindParameterByName(ffp_vertex_program, "texcoord1");
++			param = ffp_find_param("texcoord1");
+ 			vgl_fast_memcpy(&ffp_vertex_attribute[ffp_vertex_num_params], &ffp_vertex_attrib_config[FFP_ATTRIB_TEX(base_texture_id + 1)], sizeof(SceGxmVertexAttribute));
+ 			ffp_vertex_attribute[ffp_vertex_num_params].streamIndex = ffp_vertex_num_params;
+-			ffp_vertex_attribute[ffp_vertex_num_params].regIndex = sceGxmProgramParameterGetResourceIndex(param);
++			ffp_vertex_attribute[ffp_vertex_num_params].regIndex = ffp_param_index(param);
+ 			ffp_vertex_stream[ffp_vertex_num_params].stride = ffp_vertex_stream_config[FFP_ATTRIB_TEX(base_texture_id + 1)].stride;
+ 			ffp_vertex_stream[ffp_vertex_num_params].indexSource = SCE_GXM_INDEX_SOURCE_INDEX_16BIT;
+ 			ffp_vertex_num_params++;
+ #ifdef HAVE_HIGH_FFP_TEXUNITS
+ 			// Vertex texture coordinates (Third pass)
+ 			if (mask.num_textures > 2) {
+-				param = sceGxmProgramFindParameterByName(ffp_vertex_program, "texcoord2");
++				param = ffp_find_param("texcoord2");
+ 				vgl_fast_memcpy(&ffp_vertex_attribute[ffp_vertex_num_params], &ffp_vertex_attrib_config[FFP_ATTRIB_TEX(base_texture_id + 2)], sizeof(SceGxmVertexAttribute));
+ 				ffp_vertex_attribute[ffp_vertex_num_params].streamIndex = ffp_vertex_num_params;
+-				ffp_vertex_attribute[ffp_vertex_num_params].regIndex = sceGxmProgramParameterGetResourceIndex(param);
++				ffp_vertex_attribute[ffp_vertex_num_params].regIndex = ffp_param_index(param);
+ 				ffp_vertex_stream[ffp_vertex_num_params].stride = ffp_vertex_stream_config[FFP_ATTRIB_TEX(base_texture_id + 2)].stride;
+ 				ffp_vertex_stream[ffp_vertex_num_params].indexSource = SCE_GXM_INDEX_SOURCE_INDEX_16BIT;
+ 				ffp_vertex_num_params++;
+@@ -839,7 +982,7 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
+ 
+ 	VGL_PROF(3);
+ 	// Creating patched vertex shader
+-	patch_vertex_program(gxm_shader_patcher, ffp_vertex_program_id, attrs, ffp_vertex_num_params, streams, ffp_vertex_num_params, &ffp_vertex_program_patched);
++	ffp_patch_vertex_program(ffp_vertex_program_id, attrs, streams, ffp_vertex_num_params, &ffp_vertex_program_patched);
+ 
+ 	VGL_PROF(4);
+ 	// Checking if fragment shader requires a recompilation
+@@ -982,6 +1125,8 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
+ 			frag_shader_cache_size++;
+ 		} else {
+ 			sceGxmShaderPatcherForceUnregisterProgram(gxm_shader_patcher, frag_shader_cache[frag_shader_cache_idx].id);
++			vgl_invalidate_bound_programs();
++			ffp_frag_patch_cache_reset();
+ 			vgl_free(frag_shader_cache[frag_shader_cache_idx].prog);
+ 			if (frag_shader_cache[frag_shader_cache_idx].unif_buf) {
+ 				vgl_free(frag_shader_cache[frag_shader_cache_idx].unif_buf);
+@@ -1010,14 +1155,20 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
+ 
+ 	// Checking if fragment shader requires a blend settings change
+ 	if (ffp_dirty_frag_blend) {
+-		rebuild_frag_shader(ffp_fragment_program_id, &ffp_fragment_program_patched, ffp_vertex_program, SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4);
++		ffp_patch_fragment_program(ffp_fragment_program_id, ffp_vertex_program, &ffp_fragment_program_patched);
+ 
+ 		// Updating current fixed function pipeline blend config
+ 		ffp_blend_info.raw = blend_info.raw;
+ 	}
+ 
+-	sceGxmSetVertexProgram(gxm_context, ffp_vertex_program_patched);
+-	sceGxmSetFragmentProgram(gxm_context, ffp_fragment_program_patched);
++	if (vgl_bound_vprog != ffp_vertex_program_patched) {
++		sceGxmSetVertexProgram(gxm_context, ffp_vertex_program_patched);
++		vgl_bound_vprog = ffp_vertex_program_patched;
++	}
++	if (vgl_bound_fprog != ffp_fragment_program_patched) {
++		sceGxmSetFragmentProgram(gxm_context, ffp_fragment_program_patched);
++		vgl_bound_fprog = ffp_fragment_program_patched;
++	}
+ 
+ 	VGL_PROF(5);
+ 	// Recalculating MVP matrix if necessary
+diff --git a/source/framebuffers.c b/source/framebuffers.c
+index 45a3f0d..82b154d 100644
+--- a/source/framebuffers.c
++++ b/source/framebuffers.c
+@@ -806,10 +806,12 @@ void glBlitNamedFramebuffer(GLuint readFramebuffer, GLuint drawFramebuffer, GLin
+ 
+ 	// Set framebuffer blit shader
+ 	sceGxmSetVertexProgram(gxm_context, blit_vertex_program_patched);
++	vgl_invalidate_bound_programs();
+ 	if (is_fbo_float)
+ 		sceGxmSetFragmentProgram(gxm_context, blit_fragment_program_float_patched);
+ 	else
+ 		sceGxmSetFragmentProgram(gxm_context, blit_fragment_program_patched);
++	vgl_invalidate_bound_programs();
+ 	
+ 	// Set fragment texture to read framebuffer bound color attachment
+ 	framebuffer *read_fb = (framebuffer *)readFramebuffer;
+diff --git a/source/gxm.c b/source/gxm.c
+index 1c71013..0ac32cf 100644
+--- a/source/gxm.c
++++ b/source/gxm.c
+@@ -611,6 +611,7 @@ void scene_reset(void) {
+ 				shared_fb_info.vsync = vsync_interval;
+ 				gxm_front_buffer_index = (shared_fb_info.index + 1) % 2;
+ 			}
++			vgl_invalidate_bound_programs();
+ 			int r = sceGxmBeginScene(gxm_context, 0, gxm_render_target,
+ 				NULL, NULL,
+ 				gxm_sync_objects[gxm_back_buffer_index],
+@@ -661,8 +662,10 @@ void scene_reset(void) {
+ #ifdef RECYCLE_RENDERTARGETS
+ 			fbo_rt->last_frame = vgl_framecount;
+ #endif
++			vgl_invalidate_bound_programs();
+ 			int r = sceGxmBeginScene(gxm_context, 0, fbo_rt->rt,
+ #else
++			vgl_invalidate_bound_programs();
+ 			int r = sceGxmBeginScene(gxm_context, 0, active_write_fb->target,
+ #endif
+ 					NULL, NULL, NULL,
+diff --git a/source/misc.c b/source/misc.c
+index 1a27d55..091adfb 100644
+--- a/source/misc.c
++++ b/source/misc.c
+@@ -668,7 +668,9 @@ void glClear(GLbitfield mask) {
+ 	sceGxmSetBackPolygonMode(gxm_context, SCE_GXM_POLYGON_MODE_TRIANGLE_FILL);
+ 
+ 	sceGxmSetVertexProgram(gxm_context, clear_vertex_program_patched);
++	vgl_invalidate_bound_programs();
+ 	sceGxmSetFragmentProgram(gxm_context, is_fbo_float ? clear_fragment_program_float_patched : clear_fragment_program_patched);
++	vgl_invalidate_bound_programs();
+ 
+ 	sceGxmReserveVertexDefaultUniformBuffer(gxm_context, &vbuffer);
+ 	sceGxmSetUniformDataF(vbuffer, clear_position, 0, 4, &clear_vertices->x);
+diff --git a/source/shared.h b/source/shared.h
+index 65109aa..955f598 100644
+--- a/source/shared.h
++++ b/source/shared.h
+@@ -483,6 +483,12 @@ extern uint32_t vgl_prof_base;
+ #define VGL_PROF_RESTORE ((void)0)
+ #endif
+ 
++// Programs last set on gxm_context by the ffp pipeline (NULL: unknown). Every other
++// sceGxmSet*Program call, program unregistration and scene begin invalidates them.
++extern const void *vgl_bound_vprog;
++extern const void *vgl_bound_fprog;
++#define vgl_invalidate_bound_programs() (vgl_bound_vprog = NULL, vgl_bound_fprog = NULL)
++
+ #define recalculate_normal_matrix() \
+ 	matrix3x3 inverted; \
+ 	matrix3x3 top_modelview_matrix; \
+diff --git a/source/splashscreen.c b/source/splashscreen.c
+index 81840a0..b60ef5a 100644
+--- a/source/splashscreen.c
++++ b/source/splashscreen.c
+@@ -6409,7 +6409,9 @@ int splashscreen_thread(unsigned int args, void *arg) {
+ 		void *fbuffer, *vbuffer;
+ 		sceGxmSetFrontDepthFunc(splash_gxm_context, SCE_GXM_DEPTH_FUNC_ALWAYS);
+ 		sceGxmSetVertexProgram(splash_gxm_context, clear_vertex_program_patched);
++		vgl_invalidate_bound_programs();
+ 		sceGxmSetFragmentProgram(splash_gxm_context, clear_fragment_program_patched);
++		vgl_invalidate_bound_programs();
+ 		sceGxmReserveVertexDefaultUniformBuffer(splash_gxm_context, &vbuffer);
+ 		sceGxmSetUniformDataF(vbuffer, clear_position, 0, 4, &splash_clear_vertices.x);
+ 		sceGxmSetUniformDataF(vbuffer, clear_depth, 0, 1, &clear_depth_value);
+@@ -6420,7 +6422,9 @@ int splashscreen_thread(unsigned int args, void *arg) {
+ 		// Draw the rotating splashscreen
+ 		sceGxmSetFrontDepthFunc(splash_gxm_context, SCE_GXM_DEPTH_FUNC_LESS_EQUAL);
+ 		sceGxmSetVertexProgram(splash_gxm_context, splash_vertex_program_patched);
++		vgl_invalidate_bound_programs();
+ 		sceGxmSetFragmentProgram(splash_gxm_context, splash_fragment_program_patched);
++		vgl_invalidate_bound_programs();
+ 		sceGxmSetVertexStream(splash_gxm_context, 0, gpu_splash_vtxs);
+ 		sceGxmReserveVertexDefaultUniformBuffer(splash_gxm_context, &vbuffer);
+ 		sceGxmSetUniformDataF(vbuffer, splash_wvp, 0, 16, (const float *)mvp);
+@@ -6434,7 +6438,9 @@ int splashscreen_thread(unsigned int args, void *arg) {
+ 		float hash_color[4] = {1.0f, 1.0f, 1.0f, ambient[3]};
+ 		sceGxmSetFrontDepthFunc(splash_gxm_context, SCE_GXM_DEPTH_FUNC_ALWAYS);
+ 		sceGxmSetVertexProgram(splash_gxm_context, clear_vertex_program_patched);
++		vgl_invalidate_bound_programs();
+ 		sceGxmSetFragmentProgram(splash_gxm_context, font_fragment_program_patched);
++		vgl_invalidate_bound_programs();
+ 		for (int i = 0; i < hash_quad_count; i++) {
+ 			sceGxmReserveVertexDefaultUniformBuffer(splash_gxm_context, &vbuffer);
+ 			sceGxmSetUniformDataF(vbuffer, clear_position, 0, 4, &hash_quads[i].x);
+@@ -6532,7 +6538,9 @@ void invoke_splashscreen() {
+ 
+ void clear_splashscreen() {
+ 	sceGxmShaderPatcherForceUnregisterProgram(gxm_shader_patcher, splash_vertex_id);
++	vgl_invalidate_bound_programs();
+ 	sceGxmShaderPatcherForceUnregisterProgram(gxm_shader_patcher, splash_fragment_id);
++	vgl_invalidate_bound_programs();
+ 	sceGxmShaderPatcherReleaseFragmentProgram(gxm_shader_patcher, font_fragment_program_patched);
+ }
+ #endif
+diff --git a/source/tests.c b/source/tests.c
+index aad6b0e..182a505 100644
+--- a/source/tests.c
++++ b/source/tests.c
+@@ -255,7 +255,9 @@ void update_scissor_test() {
+ 
+ 	// Setting current vertex program to clear screen one and fragment program to scissor test one
+ 	sceGxmSetVertexProgram(gxm_context, clear_vertex_program_patched);
++	vgl_invalidate_bound_programs();
+ 	sceGxmSetFragmentProgram(gxm_context, scissor_test_fragment_program);
++	vgl_invalidate_bound_programs();
+ 
+ 	// Invalidating viewport and culling
+ 	invalidate_viewport();

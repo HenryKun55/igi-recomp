@@ -1,0 +1,98 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: HenryKun55 <henriqueflavio55@gmail.com>
+Date: Wed, 30 Sep 2026 14:44:56 -0300
+Subject: [PATCH] Reuse the ffp vertex attribute setup and patched program
+ while their inputs are unchanged
+
+---
+ source/ffp.c | 56 ++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 56 insertions(+)
+
+diff --git a/source/ffp.c b/source/ffp.c
+index 675bfbc..a6326e6 100644
+--- a/source/ffp.c
++++ b/source/ffp.c
+@@ -566,6 +566,44 @@ static inline GLboolean ffp_attrib_from_vbo(int id) {
+ 	return GL_TRUE;
+ }
+ 
++// Everything the vertex attribute setup and patching below depend on. When it is
++// unchanged since the last draw, the previous setup and patched program are reused.
++typedef struct {
++	SceGxmVertexAttribute *attrs_in;
++	SceGxmVertexStream *streams_in;
++	const SceGxmProgram *prog;
++	SceGxmShaderPatcherId id;
++	uint32_t mask;
++	int base_texture;
++	uint16_t attrib_state;
++	uint16_t color_material;
++	GLenum color_material_mode;
++	SceGxmIndexSource index_type;
++	SceGxmVertexAttribute attrib_config[FFP_VERTEX_ATTRIBS_NUM];
++	SceGxmVertexStream stream_config[FFP_VERTEX_ATTRIBS_NUM];
++} ffp_binding_key;
++static ffp_binding_key ffp_binding_last;
++static GLboolean ffp_binding_valid = GL_FALSE;
++static SceGxmVertexAttribute *ffp_binding_attrs;
++static SceGxmVertexStream *ffp_binding_streams;
++static int ffp_binding_num_params;
++static SceGxmVertexStream *ffp_binding_lighting_streams;
++
++static inline void ffp_binding_make_key(ffp_binding_key *k, SceGxmVertexAttribute *attrs, SceGxmVertexStream *streams, uint32_t mask, SceGxmIndexSource index_type) {
++	k->attrs_in = attrs;
++	k->streams_in = streams;
++	k->prog = ffp_vertex_program;
++	k->id = ffp_vertex_program_id;
++	k->mask = mask;
++	k->base_texture = base_texture_id;
++	k->attrib_state = ffp_vertex_attrib_state;
++	k->color_material = color_material_state;
++	k->color_material_mode = color_material_mode;
++	k->index_type = index_type;
++	memcpy(k->attrib_config, ffp_vertex_attrib_config, sizeof(k->attrib_config));
++	memcpy(k->stream_config, ffp_vertex_stream_config, sizeof(k->stream_config));
++}
++
+ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *streams, SceGxmIndexSource index_type) {
+ #ifdef HAVE_PROFILING
+ 	uint32_t reload_ffp_shaders_start = sceKernelGetProcessTimeLow();
+@@ -833,6 +871,7 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
+ 			sceGxmShaderPatcherForceUnregisterProgram(gxm_shader_patcher, vert_shader_cache[vert_shader_cache_idx].id);
+ 			vgl_invalidate_bound_programs();
+ 			ffp_patch_cache_reset();
++			ffp_binding_valid = GL_FALSE;
+ 			ffp_frag_patch_cache_reset();
+ 			vgl_free(vert_shader_cache[vert_shader_cache_idx].prog);
+ 			vgl_free(vert_shader_cache[vert_shader_cache_idx].unif_buf);
+@@ -851,6 +890,14 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
+ 	}
+ 
+ 	VGL_PROF(2);
++	ffp_binding_key binding_key;
++	ffp_binding_make_key(&binding_key, attrs, streams, mask.raw, index_type);
++	if (ffp_binding_valid && !memcmp(&binding_key, &ffp_binding_last, sizeof(binding_key))) {
++		attrs = ffp_binding_attrs;
++		streams = ffp_binding_streams;
++		ffp_vertex_num_params = ffp_binding_num_params;
++		ffp_lighting_streams = ffp_binding_lighting_streams;
++	} else {
+ 	// Not going for the vertex config setup if we have aligned datas
+ 	if (!attrs && mask.num_textures == 1 && mask.lights_num == 0) {
+ 		attrs = ffp_vertex_attrib_config;
+@@ -995,6 +1042,15 @@ uint8_t reload_ffp_shaders(SceGxmVertexAttribute *attrs, SceGxmVertexStream *str
+ 	// Creating patched vertex shader
+ 	ffp_patch_vertex_program(ffp_vertex_program_id, attrs, streams, ffp_vertex_num_params, &ffp_vertex_program_patched);
+ 
++	// The setup above may have written into the attribute configs: key on the result
++	ffp_binding_make_key(&ffp_binding_last, binding_key.attrs_in, binding_key.streams_in, mask.raw, index_type);
++	ffp_binding_valid = ffp_vertex_program_patched != NULL;
++	ffp_binding_attrs = attrs;
++	ffp_binding_streams = streams;
++	ffp_binding_num_params = ffp_vertex_num_params;
++	ffp_binding_lighting_streams = ffp_lighting_streams;
++	}
++
+ 	VGL_PROF(4);
+ 	// Checking if fragment shader requires a recompilation
+ 	if (ffp_dirty_frag) {

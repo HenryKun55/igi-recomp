@@ -122,6 +122,13 @@ static const char *name_of(uint32_t id, char *buf, size_t n)
         snprintf(buf, n, "host %s", host[id & 0xFFu]);
         return buf;
     }
+    static const char *const vgl[] = { "draw entry", "ffp mask", "ffp attribs", "vertex patch",
+                                       "fragment/programs", "uniforms", "textures", "indices",
+                                       "sceGxmDraw", "vertex streams" };
+    if (id >= PROF_H_VGL && id < PROF_H_VGL + sizeof(vgl) / sizeof(vgl[0])) {
+        snprintf(buf, n, "vgl %s", vgl[id - PROF_H_VGL]);
+        return buf;
+    }
     if (id >= THUNK_BASE && id < THUNK_BASE + THUNK_MAX * THUNK_STRIDE) {
         snprintf(buf, n, "thunk %s", thunk_name(id));
         return buf;

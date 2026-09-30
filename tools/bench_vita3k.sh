@@ -10,6 +10,10 @@
 #        MHZ      emulated CPU clock for Vita3K (default 444)
 #        VITA3K   Vita3K binary (default the local source build)
 #        TIMEOUT  seconds before giving up (default seconds + 900)
+#        SHOT     capture every SHOT-th measured frame (the game holds it on screen for a
+#                 few seconds) from the Vita3K window into $SHOT_DIR/bench_shot_<frame>.png;
+#                 for visual checks only, the timings are off
+#        SHOT_DIR where the captures go (default $BUILD/shots)
 #
 # Only the instance started here is killed ("Vita3K -r PIGI00001"); other Vita3K
 # instances and other apps' data are left alone.
@@ -40,7 +44,7 @@ unzip -p "$BUILD/igi.vpk" eboot.bin > "$APP/eboot.bin" || exit 1
 echo "installed $BUILD/igi.vpk eboot.bin"
 rm -f "$DATA/bench_result.txt"
 touch "$DATA/.bench_start"
-echo "$SECS" > "$DATA/bench.txt"
+echo "$SECS ${SHOT:-0}" > "$DATA/bench.txt"
 
 stop() {
     pkill -9 -f "Vita3K -r PIGI00001" 2>/dev/null
@@ -48,14 +52,41 @@ stop() {
 }
 trap 'stop; exit 1' INT TERM
 
+if [ "${SHOT:-0}" -gt 0 ]; then
+    SHOT_DIR=${SHOT_DIR:-$BUILD/shots}
+    mkdir -p "$SHOT_DIR"
+    rm -f "$SHOT_DIR"/bench_shot_*.png "$DATA/bench_shot_now.txt"
+    WINID_BIN=${TMPDIR:-/tmp}/igi_window_id
+    [ "$WINID_BIN" -nt "$ROOT/tools/window_id.swift" ] || swiftc -O "$ROOT/tools/window_id.swift" -o "$WINID_BIN" || exit 1
+fi
+
 # In a subshell, so the shell does not report the kill below.
 (VITA3K_CPU_MHZ=${MHZ:-444} "$VITA3K" -r PIGI00001 > "$LOG" 2>&1 &)
 echo "Vita3K started (CPU ${MHZ:-444} MHz), waiting for the result (timeout $TIMEOUT s)"
 
+shots=0
 waited=0
 while [ ! -s "$DATA/bench_result.txt" ] && [ $waited -lt "$TIMEOUT" ]; do
     if ! pgrep -f "Vita3K -r PIGI00001" > /dev/null; then
         break
+    fi
+    if [ "${SHOT:-0}" -gt 0 ]; then
+        # The game writes bench_shot_now.txt (N) while measured frame N is held on screen.
+        if [ -s "$DATA/bench_shot_now.txt" ]; then
+            n=$(cat "$DATA/bench_shot_now.txt")
+            rm -f "$DATA/bench_shot_now.txt"
+            f=$(printf "%s/bench_shot_%05d.png" "$SHOT_DIR" "$n")
+            pid=$(pgrep -f "Vita3K -r PIGI00001" | head -n 1)
+            win=$("$WINID_BIN" "$pid" "(PIGI00001)" | head -n 1)
+            if [ -z "$win" ]; then
+                echo "shot $n: no window found for Vita3K (pid $pid)" >&2
+            elif screencapture -x -o -l "$win" "$f"; then
+                shots=$((shots + 1))
+            fi
+        fi
+        sleep 1
+        waited=$((waited + 1))
+        continue
     fi
     sleep 2
     waited=$((waited + 2))
@@ -72,5 +103,8 @@ fi
 if [ "$DATA/profile.txt" -nt "$DATA/.bench_start" ]; then
     echo "---- ux0:data/igi/profile.txt (top) ----"
     head -n 40 "$DATA/profile.txt"
+fi
+if [ "${SHOT:-0}" -gt 0 ]; then
+    echo "screenshots: $shots in $SHOT_DIR"
 fi
 cat "$DATA/bench_result.txt"
