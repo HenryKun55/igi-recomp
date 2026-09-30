@@ -2382,6 +2382,21 @@ static const uint16_t *glyph(char ch)
     return NULL;
 }
 
+/* Overlay quads as a vertex array (immediate mode is a call per vertex in vitaGL),
+ * rebuilt only when the text changes. */
+#define OVERLAY_MAX_VERTS 32768
+static float ov_verts[OVERLAY_MAX_VERTS * 2];
+static int ov_count;
+
+static void ov_quad(float x0, float y0, float x1, float y1)
+{
+    if (ov_count + 4 > OVERLAY_MAX_VERTS)
+        return;
+    float *v = &ov_verts[ov_count * 2];
+    v[0] = x0; v[1] = y0; v[2] = x1; v[3] = y0; v[4] = x1; v[5] = y1; v[6] = x0; v[7] = y1;
+    ov_count += 4;
+}
+
 static void overlay_text(float x, float y, float px, const char *s)
 {
     for (; *s; s++, x += 4.0f * px) {
@@ -2392,10 +2407,7 @@ static void overlay_text(float x, float y, float px, const char *s)
             for (int col = 0; col < 3; col++)
                 if (g[row] & (4u >> col)) {
                     float x0 = x + (float)col * px, y0 = y + (float)row * px;
-                    glVertex2f(x0, y0);
-                    glVertex2f(x0 + px, y0);
-                    glVertex2f(x0 + px, y0 + px);
-                    glVertex2f(x0, y0 + px);
+                    ov_quad(x0, y0, x0 + px, y0 + px);
                 }
     }
 }
@@ -2417,7 +2429,7 @@ static void perf_overlay_draw(void)
     float ds = a[PC_STATE_US] / 1000.0f, dt = a[PC_TEX_US] / 1000.0f, dp = a[PC_PACK_US] / 1000.0f;
     float dg = a[PC_GL_US] / 1000.0f;
     float dother = perf.ms_draw - ds - dt - dp - dg;
-    char lines[OVERLAY_LINES][40];
+    char lines[OVERLAY_LINES][40] = { { 0 } };
     snprintf(lines[0], sizeof(lines[0]), "F %.1f", (double)perf.fps);
     snprintf(lines[1], sizeof(lines[1]), "T %.1f", (double)perf.ms_frame);
     snprintf(lines[2], sizeof(lines[2]), "G %.1f", (double)perf.ms_game);
@@ -2459,18 +2471,24 @@ static void perf_overlay_draw(void)
     c_load_matrix(GL_MODELVIEW, identity_matrix);
     float px = (float)fb_h / 181.0f;   /* ~3 px per font pixel at 544 lines */
     float bw = px * (float)(width * 4u + 2u), bh = px * (float)(OVERLAY_LINES * 6 + 1);
+    static char prev[OVERLAY_LINES][40];
+    static float prev_px;
+    if (memcmp(prev, lines, sizeof(prev)) || prev_px != px) {
+        memcpy(prev, lines, sizeof(prev));
+        prev_px = px;
+        ov_count = 0;
+        ov_quad(0, 0, bw, bh);   /* background: first quad */
+        for (int i = 0; i < OVERLAY_LINES; i++)
+            overlay_text(px, px * (1.0f + 6.0f * (float)i), px, lines[i]);
+    }
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glVertexPointer(2, GL_FLOAT, 0, ov_verts);
+    ptr_cache_reset();
     glColor4f(0, 0, 0, 1);
-    glBegin(GL_QUADS);
-    glVertex2f(0, 0);
-    glVertex2f(bw, 0);
-    glVertex2f(bw, bh);
-    glVertex2f(0, bh);
-    glEnd();
+    glDrawArrays(GL_QUADS, 0, 4);
     glColor4f(1, 1, 0, 1);
-    glBegin(GL_QUADS);
-    for (int i = 0; i < OVERLAY_LINES; i++)
-        overlay_text(px, px * (1.0f + 6.0f * (float)i), px, lines[i]);
-    glEnd();
+    if (ov_count > 4)
+        glDrawArrays(GL_QUADS, 4, ov_count - 4);
     glColor4f(1, 1, 1, 1);
 }
 
