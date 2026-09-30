@@ -80,6 +80,10 @@ NATIVE = {
         (0x00512C30, 6317, '0babcc6a828c5ba5fa10360608a72abc7b88dc57'),
         (0x00514760, 7839, '40c1f468e13cd4a2dbf61721e78741da9e81aaa6'),
     ]),
+    # Skinned mesh transform into the dynamic vertex buffer (runtime/src/native_skin.c).
+    0x0049B700: ('rt_native_skin_mesh', [
+        (0x0049B700, 1086, '8d5e649fcba66a5c0499ad80f5f5bfaf7589f6cb'),
+    ]),
 }
 
 # Instruction emitters produce C with a few tokens that are expanded per code copy
