@@ -84,6 +84,10 @@ NATIVE = {
     0x0049B700: ('rt_native_skin_mesh', [
         (0x0049B700, 1086, '8d5e649fcba66a5c0499ad80f5f5bfaf7589f6cb'),
     ]),
+    # Object mesh renderer (runtime/src/native_mesh.c).
+    0x004A1570: ('rt_native_mesh_draw', [
+        (0x004A1570, 3674, 'd92fcea1520b922a0f5cf1b176415cce29a3707f'),
+    ]),
 }
 
 # Instruction emitters produce C with a few tokens that are expanded per code copy

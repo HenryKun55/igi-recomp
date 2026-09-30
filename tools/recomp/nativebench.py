@@ -11,8 +11,9 @@ compares
   - eax, ecx, edx, esp, ebx, ebp, esi, edi, the x87 top, condition codes and
     the x87 registers that were live at the entry;
   - every guest call made at any depth, in order: entries of generated functions
-    and host thunk calls, with their esp, eax, ecx, edx, x87 top and the top six
-    stack words (return address and arguments).
+    (target, all registers, x87 top and condition codes, return address and
+    arguments) and host thunk calls (target, esp, eax, ecx, edx, return address
+    and arguments).
 The states are synthetic (per-function generators below, with random and
 special values) or captured from the running game (IGI_NATIVE_DUMP,
 runtime/src/capture.c). Host thunks are stubs that record the call, pop the
@@ -151,7 +152,7 @@ def fake_com(m, al, methods):
     return obj
 
 
-def synth_skin(seed):
+def synth_skin(seed, bases):
     """0x49B700: a mesh with up to 80 vertices and 24 extra influences on a random
     skeleton; append or discard lock, lock failures, rigid or weighted."""
     rnd = random.Random(seed)
@@ -195,7 +196,100 @@ def synth_skin(seed):
     return State(m, GSTACK, regs, thunks)
 
 
-SYNTH = {0x0049B700: synth_skin}
+class Peek:
+    """Reads the guest memory of a captured state (pages plus later writes)."""
+    def __init__(self, m):
+        self.m = m
+
+    def raw(self, a, n):
+        out = b''
+        while n:
+            k = min(n, 4096 - (a & 0xFFF))
+            pg = self.m.w.get(a & ~0xFFF)
+            out += pg[a & 0xFFF:(a & 0xFFF) + k] if pg is not None and len(pg) == 4096 else bytes(k)
+            a += k
+            n -= k
+        return out
+
+    def u32(self, a):
+        return struct.unpack('<I', self.raw(a, 4))[0]
+
+    def u16(self, a):
+        return struct.unpack('<H', self.raw(a, 2))[0]
+
+    def f32(self, a):
+        return struct.unpack('<f', self.raw(a, 4))[0]
+
+    def f64(self, a):
+        return struct.unpack('<d', self.raw(a, 8))[0]
+
+
+def base_state(rnd, bases, fn):
+    if not bases:
+        sys.exit('synthetic states of %08X start from captured ones: pass --base FILE (or glob)' % fn)
+    cfn, st = load_capture(rnd.choice(bases))
+    assert cfn == fn
+    return st
+
+
+def jitter(rnd, v, amount):
+    r = rnd.random()
+    if r < 0.02:
+        return rnd.choice([0.0, -0.0, float('nan'), float('inf'), -1e-40, 1e30])
+    return v + rnd.uniform(-amount, amount) * max(1.0, abs(v))
+
+
+def synth_mesh(seed, bases):
+    """0x4A1570: a captured call with the camera, the object's transform and scale,
+    the projection, clip rectangle, near plane and far limit, the vertices and the
+    stale locals the guest reads randomised (the mesh type too, sometimes)."""
+    rnd = random.Random(seed)
+    st = base_state(rnd, bases, 0x004A1570)
+    m, pk = st.mem, Peek(st.mem)
+    obj, ctx = pk.u32(st.esp + 4), pk.u32(st.esp + 8)
+    small = rnd.choice([0.0, 0.001, 0.01, 0.05])
+    for i in range(9):
+        m.f32(0xBCAAE0 + 4 * i, jitter(rnd, pk.f32(0xBCAAE0 + 4 * i), small))
+        m.f32(obj + 0x70 + 4 * i, jitter(rnd, pk.f32(obj + 0x70 + 4 * i), small))
+    for i in range(3):
+        m.f64(0xBCAB08 + 8 * i, pk.f64(0xBCAB08 + 8 * i) + rnd.uniform(-2.0, 2.0) * small * 20)
+        m.f64(obj + 0x20 + 8 * i, pk.f64(obj + 0x20 + 8 * i) + rnd.uniform(-2.0, 2.0) * small * 20)
+    sc = rnd.choice(['keep', 'one', 'rand', 'tie', 'nan'])
+    for i in range(3):
+        v = {'keep': pk.f32(obj + 0x98 + 4 * i), 'one': 1.0, 'rand': rnd.uniform(0.3, 3.0), 'tie': 1.5,
+             'nan': rnd.choice([1.0, float('nan')])}[sc]
+        m.f32(obj + 0x98 + 4 * i, v)
+    for a in (0xBCAB28, 0xBCAB2C, 0xBCAB30, 0xBCAB34):
+        m.f32(a, jitter(rnd, pk.f32(a), small))
+    inset = rnd.choice([0.0, 0.0, 40.0, 200.0])
+    for a, sgn in ((0xBCABD0, 1), (0xBCABD4, 1), (0xBCABD8, -1), (0xBCABDC, -1)):
+        m.f32(a, pk.f32(a) + sgn * inset)
+    m.f32(0xBCADC0, rnd.choice([pk.f32(0xBCADC0), 0.1, 1.0, 20.0, 200.0]))
+    m.f32(ctx + 8, rnd.choice([pk.f32(ctx + 8), 1e9, rnd.uniform(1.0, 3000.0)]))
+    S = st.esp - 0xB0
+    for k in range(3):
+        m.u32(S + 0x40 + 4 * k, rnd.getrandbits(32))
+    model = pk.u32(obj + 0x6C)
+    mesh = pk.u32(pk.u32(pk.u32(model) + 0xC) + 0xC) if model and pk.u32(model) else 0
+    if mesh:
+        typ = pk.u32(mesh + 0x20)
+        geom = pk.u32(mesh + 0x24)
+        if typ in (0, 3):
+            n, src, stride = (pk.u32(geom + 0xC), pk.u32(geom + 0x10), 0x20) if typ == 0 else \
+                (pk.u32(geom + 0x10), pk.u32(geom + 0x14), 0x28)
+            amount = rnd.choice([0.0, 0.01, 0.2])
+            for i in range(min(n, 2000)):
+                for k in range(3):
+                    a = src + stride * i + 4 * k
+                    m.f32(a, jitter(rnd, pk.f32(a), amount))
+        if rnd.random() < 0.08:
+            m.u32(mesh + 0x20, 5)
+    if rnd.random() < 0.03:
+        m.u32(obj + 0xEC, 0)
+    return st
+
+
+SYNTH = {0x0049B700: synth_skin, 0x004A1570: synth_mesh}
 
 
 # ---- running -----------------------------------------------------------------
@@ -283,13 +377,19 @@ def run(exe, path, fn, state, native, prof_gen=None, trace=True):
         edx, = struct.unpack_from('<I', c, 8)
         ftop, = struct.unpack_from('<I', c, 112)
         if isinstance(target, str):
+            # Host thunks see only their arguments.
             nargs = THUNKS.get(target.partition('#')[0], (0, 0))[0] // 4
+            more = ()
         else:
+            # Guest code may also push the other registers or the status word
+            # (read through fnstsw) into its frame.
             nargs = CALL_ARGS.get(target, 4)
+            more = struct.unpack_from('<4I', c, 12)[0:1] + struct.unpack_from('<3I', c, 20) + \
+                (struct.unpack_from('<I', c, 120)[0] & 0x4700,)
         n = 4 * (nargs + 1)
         words = struct.unpack('<%dI' % (nargs + 1), bytes(uc.mem_read(ab.GMEM + esp, n))) \
             if esp + n <= gsize + EXTRA else ()
-        calls.append((target, esp, eax, ecx, edx, ftop, words))
+        calls.append((target, esp, eax, ecx, edx, ftop, words, more))
 
     def hook(uc_, addr, size, user):
         i0 = bisect.bisect_left(addrs, addr)
@@ -369,9 +469,10 @@ def compare(ra, rb, state):
 
 
 def fmt_call(c):
-    t, esp, eax, ecx, edx, ftop, words = c
-    return '%s esp %08X eax %08X ecx %08X edx %08X top %d [%s]' % (
-        t if isinstance(t, str) else 'f_%08X' % t, esp, eax, ecx, edx, ftop, ' '.join('%08X' % w for w in words))
+    t, esp, eax, ecx, edx, ftop, words, more = c
+    return '%s esp %08X eax %08X ecx %08X edx %08X top %d [%s]%s' % (
+        t if isinstance(t, str) else 'f_%08X' % t, esp, eax, ecx, edx, ftop, ' '.join('%08X' % w for w in words),
+        ' ebx %08X ebp %08X esi %08X edi %08X sw %04X' % more if more else '')
 
 
 def cases(args, fn):
@@ -386,8 +487,9 @@ def cases(args, fn):
         gen = SYNTH.get(fn)
         if not gen:
             sys.exit('no synthetic states for %08X' % fn)
+        bases = [q for p in args.base for q in (sorted(glob.glob(p)) or [p])]
         for seed in range(args.seed, args.seed + (args.synth or 1)):
-            yield 'seed %4d' % seed, gen(seed)
+            yield 'seed %4d' % seed, gen(seed, bases)
 
 
 def diff_mode(args, fn):
@@ -424,6 +526,8 @@ def main():
     ap.add_argument('--synth', type=int, default=0, help='number of synthetic states')
     ap.add_argument('--seed', type=int, default=1)
     ap.add_argument('--capture', action='append', default=[], help='captured state (file or glob pattern)')
+    ap.add_argument('--base', action='append', default=[],
+                    help='captured states the synthetic ones of some functions start from')
     ap.add_argument('--native', type=int, choices=[0, 1], default=1)
     ap.add_argument('--profile', metavar='GEN_DIR')
     ap.add_argument('--trace', type=int, default=0, help='run: print the first N guest calls')
