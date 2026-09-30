@@ -83,7 +83,10 @@ void platform_scripted_input(void)
     static Uint32 release_at;
     Uint32 now = win32_tick_count() - t0;
     static Uint32 dbg;
-    if (getenv("IGI_INPUT_DEBUG") && now / 2000u != dbg) {
+    static int input_debug = -1;
+    if (input_debug < 0)
+        input_debug = getenv("IGI_INPUT_DEBUG") != NULL;
+    if (input_debug && now / 2000u != dbg) {
         dbg = now / 2000u;
         rt_log("[input-debug] now %u rel %u/%d at %u next '%.12s'", now, release_dik, release_lmb, release_at,
                script ? script : "(end)");
