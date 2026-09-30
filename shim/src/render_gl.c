@@ -349,11 +349,11 @@ static int aspect_fill = -1;
 static int cull_override;
 /* Live diagnostic mode (Vita: L+R+SELECT cycles it), shown on the overlay; diag_mode is declared above. */
 enum { DIAG_NONE, DIAG_NO_BATCH, DIAG_NO_CULL, DIAG_FLIP_ZREMAP, DIAG_NO_SCREEN, DIAG_NO_3D, DIAG_DEPTH_LEQUAL,
-       DIAG_NO_COMPACT, DIAG_USEPROGRAM, DIAG_ZERO_UV, DIAG_LEVEL0, DIAG_NO_NEARCLIP, DIAG_NO_VB_CACHE, DIAG_NO_VBO, DIAG_COUNT };
+       DIAG_NO_COMPACT, DIAG_USEPROGRAM, DIAG_ZERO_UV, DIAG_LEVEL0, DIAG_NO_NEARCLIP, DIAG_NO_VB_CACHE, DIAG_VBO, DIAG_COUNT };
 static const char *const diag_names[DIAG_COUNT] = { "NORMAL", "NO BATCH", "NO CULL", "FLIP ZREMAP",
                                                      "NO 2D VERTS", "NO 3D VERTS", "DEPTH LEQUAL", "NO COMPACT",
                                                      "USEPROGRAM", "ZERO UV", "LEVEL0",
-                                                     "NO NEARCLIP", "NO VB CACHE", "NO VBO" };
+                                                     "NO NEARCLIP", "NO VB CACHE", "VBO" };
 int render_diag_no_vb_cache(void)
 {
     return diag_mode == DIAG_NO_VB_CACHE;
@@ -2274,7 +2274,9 @@ int render_draw_vb(void **slot, uint32_t gen, const RVertex *all, uint32_t count
                    uint32_t nv, const uint16_t *idx, uint32_t ni, int has_normal, int has_color, int has_spec,
                    int ntex)
 {
-    if (diag_mode == DIAG_NO_VBO || diag_mode == DIAG_ZERO_UV || diag_mode == DIAG_NO_3D ||
+    /* Off by default: unbatched buffer-object draws raised the GPU draw count
+     * and cost more in vitaGL than the packing they saved (diagnostic mode 13). */
+    if (diag_mode != DIAG_VBO || diag_mode == DIAG_ZERO_UV || diag_mode == DIAG_NO_3D ||
         diag_mode == DIAG_NO_COMPACT || g_trace_next_frame == 2 || !nv || start + nv > count)
         return 0;
     if (prim != PRIM_TRIANGLES && prim != PRIM_TRIANGLE_STRIP && prim != PRIM_TRIANGLE_FAN)
