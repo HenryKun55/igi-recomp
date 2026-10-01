@@ -1,4 +1,5 @@
 /* Loads IGI.exe into guest memory, wires imports to host thunks, and runs it. */
+#include "native.h"
 #include "runtime.h"
 
 #include <stdio.h>
@@ -203,7 +204,8 @@ static void setup_tib(Ctx *c)
 extern void win32_init(int argc, char **argv);
 
 /* Hand-decompiled game functions (runtime/src/native_*.c) are on unless
- * IGI_NATIVE=0 (desktop) or native=0 in ux0:data/igi/igi.cfg (Vita). */
+ * IGI_NATIVE=0 (desktop) or native=0 in ux0:data/igi/igi.cfg (Vita); -FN turns off
+ * only the function at guest address FN (hex). */
 static void native_setting(void)
 {
     const char *v = getenv("IGI_NATIVE");
@@ -220,6 +222,12 @@ static void native_setting(void)
         fclose(f);
     }
 #endif
+    if (v && v[0] == '-') {
+        /* -FN (hex guest address): only that one runs the recompiled code (A/B timing). */
+        g_native_decline = (uint32_t)strtoul(v + 1, NULL, 16);
+        rt_log("native game functions: on, except %08X", g_native_decline);
+        return;
+    }
     if (v)
         g_igi_native = v[0] != '0';
     rt_log("native game functions: %s", g_igi_native ? "on" : "off (recompiled code)");
