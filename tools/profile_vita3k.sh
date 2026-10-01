@@ -11,7 +11,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 BUILD=${BUILD:-$ROOT/build-vita-prof}
 export BUILD
 DATA="$HOME/Library/Application Support/Vita3K/Vita3K/fs/ux0/data/igi"
-OUT=${TMPDIR:-/tmp}/igi_v3k_profile
+OUT=${TMPDIR:-/tmp}/igi_v3k_profile.$$   # per run: concurrent runs must not share it
 mkdir -p "$OUT"
 rm -f "$OUT"/live.txt "$OUT"/start.txt "$OUT"/end.txt
 export VITA3K_PROFILE="$OUT/live.txt"
