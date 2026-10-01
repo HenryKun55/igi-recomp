@@ -2684,6 +2684,39 @@ static void pack_guest_to(uint8_t *d0, const Layout *L, const GuestVerts *g, uin
     const uint32_t *src = g->src;
     const uint32_t st = L->stride;
     uint8_t *d = d0;
+    /* The terrain's layout (pre-transformed, colour, desktop fog factor, one
+     * texture coordinate set): one pass over the vertices. */
+    const uint32_t fog = L->use_fog ? 1u : 0u;
+    int one_uv = L->uv_src[0] == 0 && g->uv_bytes[0] == 8u && L->off_uv[0] == 20u + 4u * fog;
+    for (int s = 1; s < MAX_STAGES; s++)
+        one_uv &= L->uv_src[s] < 0;
+    if (L->pretransformed && !src && L->use_color && g->has_color && !L->has_normal && L->off_col == 16u &&
+        (!fog || (g->has_spec && L->off_fog == 20u)) && st == 28u + 4u * fog && one_uv) {
+        const uint32_t col = g->col_off, spec = g->spec_off, uv = g->uv_off[0];
+        float *p = (float *)d;
+        for (uint32_t i = 0; i < nv; i++, p += 7u + fog, vb += stride) {
+            float v[4], t[2];
+            uint32_t c;
+            memcpy(v, vb, 16);
+            memcpy(&c, vb + col, 4);
+            memcpy(t, vb + uv, 8);
+            float w = v[3] != 0.0f ? 1.0f / v[3] : 1.0f;
+            p[0] = v[0] * w;
+            p[1] = v[1] * w;
+            p[2] = v[2] * w;
+            p[3] = w;
+            ((uint32_t *)p)[4] = d3dcolor_rgba(c);
+            if (fog) {
+                uint32_t s;
+                memcpy(&s, vb + spec, 4);
+                p[5] = (float)(s >> 24) * (1.0f / 255.0f);
+            }
+            p[5 + fog] = t[0];
+            p[6 + fog] = t[1];
+        }
+        PROF_SECTION_END;
+        return;
+    }
     if (L->pretransformed) {
         for (uint32_t i = 0; i < nv; i++, d += st) {
             float v[4];
