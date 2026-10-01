@@ -192,6 +192,12 @@ static inline float rdf(const uint8_t *p) { float v; memcpy(&v, p, 4); return v;
 static inline uint32_t rd32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
 static inline float gf(uint32_t a) { return rdf(g_mem + a); }
 static inline uint32_t fist(Ctx *c, double v) { return (uint32_t)rt_fist64(c, v); }
+/* fist of a value known to be in [0, 2^31) (no NaN): the range check is left out
+ * when truncating, the game's mode while it draws. */
+static inline uint32_t fist_u31(Ctx *c, double v)
+{
+    return (c->fcw & 0x0C00u) == 0x0C00u ? (uint32_t)(int32_t)v : fist(c, v);
+}
 
 static void note_stale(void)
 {
@@ -598,13 +604,19 @@ static void make_clip_vert(const Frame *f, const PatchWork *w, uint32_t i, ClipV
  * Only the integer reaches the game, so the common case avoids the library
  * exp2 and the division: 2^-e from a polynomial (relative error below 1e-11 for
  * e in [0, 1000)) gives 255 * fog within 1e-8 of the guest's value, whose own
- * error against the exact result is a few ulp. When both ends of a +-1e-6
- * interval around the estimate convert to the same integer (fist is monotonic
- * in every rounding mode), that is the guest's result; otherwise, or outside
- * that range (NaN included), the guest's computation runs as is. */
+ * error against the exact result is a few ulp. The estimate goes to 20-bit
+ * fixed point with one truncating conversion (plus one half for round to
+ * nearest); when it is more than 4 / 2^20 away from the next rounding boundary,
+ * its integer part is the guest's result (the guest's value is positive, so
+ * zero has no lower boundary when truncating). Otherwise, in other rounding
+ * modes, or outside that range (-0, NaN included: checked on the bits, without
+ * floating-point compares), the guest's computation runs as is. */
 static uint32_t fog_byte(Ctx *c, double e)
 {
-    if (e >= 0.0 && e < 1000.0) {
+    uint64_t eb;
+    memcpy(&eb, &e, 8);
+    uint32_t mode = c->fcw & 0x0C00u;
+    if ((uint32_t)(eb >> 32) < 0x408F4000u && (mode == 0x0C00u || mode == 0u)) {   /* +0 <= e < 1000 */
         int32_t n = (int32_t)(e + 0.5);
         double r = (double)n - e;               /* 2^-e = 2^r * 2^-n, |r| <= 0.5 */
         /* 2^r = sum (r ln 2)^k / k!, k <= 9 */
@@ -615,10 +627,12 @@ static uint32_t fog_byte(Ctx *c, double e)
         uint64_t b = (uint64_t)(1023 - n) << 52;
         double s;
         memcpy(&s, &b, 8);
-        double y = p * s * 255.0;
-        uint32_t lo = fist(c, y - 1e-6), hi = fist(c, y + 1e-6);
-        if (lo == hi)
-            return lo;
+        int32_t q = (int32_t)(p * s * (255.0 * 1048576.0));   /* 255 * fog * 2^20, below 2^28 */
+        if (mode == 0u)
+            q += 0x80000;
+        uint32_t frac = (uint32_t)q & 0xFFFFFu;
+        if ((frac >= 4u || q < 0x100000) && frac < 0xFFFFBu)
+            return (uint32_t)(q >> 20);
     }
     double n = rt_fround(c, e);
     double fog = 1.0 / rt_fscale((exp2(e - n) - 1.0) + 1.0, n);
@@ -790,8 +804,8 @@ static void draw_patch(const Frame *f, PatchWork *w, uint32_t patch)
         double omt = 1.0 - t;
         z = (float)(omt * dzm + z);
         double a = omt * 255.0;
-        uint32_t g1 = grey3(fist(c, a));
-        uint32_t g2 = grey3(fist(c, a * omt));
+        uint32_t g1 = grey3(fist_u31(c, a));           /* t, omt in [0, 1] */
+        uint32_t g2 = grey3(fist_u31(c, a * omt));
         uint32_t inv1 = 0xFFFFFFu - g1;
 
         double zc = (double)z + f->ncam[2];
