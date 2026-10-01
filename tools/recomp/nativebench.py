@@ -739,7 +739,58 @@ def synth_poly2d(seed, bases):
     return st
 
 
-SYNTH = {0x0050D4C0: synth_poly2d, 0x0049B700: synth_skin, 0x004A1570: synth_mesh, 0x004D14E0: synth_tree, 0x00496280: synth_adpcm,
+def synth_bounds(seed, bases):
+    """0x4DD7F0: a captured face group with the camera moved and turned (often
+    behind the group's plane, sometimes onto it), the object's rotation and
+    position, the group's vertices (some behind the near plane), the material
+    switch, the given rectangle, the projection, clip rectangle, rounding mode
+    and the stale frame randomised."""
+    rnd = random.Random(seed)
+    st = base_state(rnd, bases, 0x004DD7F0)
+    m, pk = st.mem, Peek(st.mem)
+    E = st.esp
+    obj, a1, a2 = pk.u32(E + 4), pk.u32(E + 8), pk.u32(E + 12)
+    model = pk.u32(pk.u32(obj + 0x6C) + 4 * a1)
+    mesh = pk.u32(pk.u32(model + 0xC) + 0xC)
+    g = pk.u32(mesh + 0x98) + 20 * a2
+    small = rnd.choice([0.0, 0.001, 0.05, 0.5])
+    move = rnd.choice([0.0, 1.0, 20.0, 500.0])
+    for k in range(3):
+        m.f64(0xBCAB08 + 8 * k, pk.f64(0xBCAB08 + 8 * k) + rnd.uniform(-move, move))
+        if rnd.random() < 0.1:
+            m.f64(0xBCAB08 + 8 * k, pk.f64(obj + 0x20 + 8 * k))
+    for i in range(9):
+        m.f32(0xBCAAE0 + 4 * i, jitter(rnd, pk.f32(0xBCAAE0 + 4 * i), small))
+        m.f32(obj + 0x70 + 4 * i, jitter(rnd, pk.f32(obj + 0x70 + 4 * i), small))
+    verts = pk.u32(mesh + 0x94)
+    first, nv = pk.u32(g), pk.u32(g + 4)
+    amount = rnd.choice([0.0, 0.01, 0.3])
+    for i in range(first, first + min(nv, 64)):
+        for k in range(3):
+            a = verts + 12 * i + 4 * k
+            m.f32(a, jitter(rnd, pk.f32(a), amount))
+    if rnd.random() < 0.1:
+        mat = pk.u32(g + 0x10) + pk.u32(0xA5E354) + 0x14C
+        m.raw(mat, bytes([rnd.choice([0, 1, 0x80])]))
+    rmin, rmax = pk.u32(E + 16), pk.u32(E + 20)
+    if rnd.random() < 0.5:
+        x0, y0 = rnd.uniform(-100, 900), rnd.uniform(-100, 700)
+        for a, v in ((rmin, x0), (rmin + 4, y0), (rmax, x0 + rnd.uniform(0, 400)), (rmax + 4, y0 + rnd.uniform(0, 300))):
+            m.f32(a, v)
+    for a in (0xBCAB28, 0xBCAB2C, 0xBCAB30, 0xBCAB34):
+        m.f32(a, jitter(rnd, pk.f32(a), small))
+    inset = rnd.choice([0.0, 0.0, 40.0, 300.0])
+    for a, sgn in ((0xBCABD0, 1), (0xBCABD4, 1), (0xBCABD8, -1), (0xBCABDC, -1)):
+        m.f32(a, pk.f32(a) + sgn * inset)
+    if rnd.random() < 0.3:
+        st.fcw = (st.fcw & ~0xC00) | (rnd.randrange(4) << 10)
+    if rnd.random() < 0.5:
+        for off in range(-0xB80, 0, 4):
+            m.u32(E + off, rnd.getrandbits(32))
+    return st
+
+
+SYNTH = {0x004DD7F0: synth_bounds, 0x0050D4C0: synth_poly2d, 0x0049B700: synth_skin, 0x004A1570: synth_mesh, 0x004D14E0: synth_tree, 0x00496280: synth_adpcm,
          0x0049CC80: synth_deform, 0x0049FEB0: synth_sphere, 0x0049BE10: synth_bend,
          0x00510010: synth_patch, 0x004C1840: synth_raycast}
 
