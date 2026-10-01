@@ -154,7 +154,11 @@ typedef struct VertexBuffer {
     struct RVertex *cache;     /* whole buffer decoded (static geometry is drawn every frame) */
     void *gl;                  /* renderer's GPU copy (render_draw_vb) */
     float lo[3], hi[3];        /* bounds of the decoded copy */
+    uint32_t lock_id;          /* unique id of the last writable Lock (all buffers) */
+    uint32_t drawn_lock, drawn_start, drawn_nv;   /* lock_id and range of the last indexed draw */
 } VertexBuffer;
+
+static uint32_t vb_lock_serial;
 
 static uint32_t fvf_stride(uint32_t fvf);
 
@@ -237,40 +241,46 @@ static RVertex *decode(uint32_t fvf, uint32_t base, uint32_t stride, const uint3
 
 /* Hands untransformed vertices to the renderer in the game's layout when it can
  * take them directly; otherwise decodes them to RVertex. */
+/* The game's vertex layout for the renderer (vertex i at base + (src ? src[i] : i) * stride). */
+static void guest_verts(uint32_t fvf, uint32_t base, uint32_t stride, const uint32_t *src, GuestVerts *g)
+{
+    uint32_t pos = fvf & 0x0Eu;
+    memset(g, 0, sizeof(*g));
+    g->base = g_mem + base;
+    g->stride = stride;
+    g->src = src;
+    g->has_normal = (fvf & 0x10u) != 0;
+    g->has_color = (fvf & 0x40u) != 0;
+    g->has_spec = (fvf & 0x80u) != 0;
+    g->ntex = (int)((fvf >> 8) & 0xFu);
+    g->pretransformed = pos == 0x4u;
+    uint32_t o = pos == 0x4u ? 16u : pos == 0x2u ? 12u : 12u + ((pos - 0x4u) / 2u) * 4u;
+    g->nrm_off = o;
+    if (g->has_normal)
+        o += 12;
+    if (fvf & 0x20u)
+        o += 4;
+    g->col_off = o;
+    if (g->has_color)
+        o += 4;
+    g->spec_off = o;
+    if (g->has_spec)
+        o += 4;
+    for (int t = 0; t < g->ntex && t < MAX_STAGES; t++) {
+        uint32_t f = (fvf >> (16 + t * 2)) & 3u;
+        uint32_t sz = f == 0 ? 8u : f == 1 ? 12u : f == 2 ? 16u : 4u;
+        g->uv_off[t] = o;
+        g->uv_bytes[t] = sz >= 8u ? 8u : 4u;
+        o += sz;
+    }
+}
+
 static void emit(uint32_t prim, uint32_t fvf, uint32_t base, uint32_t stride, const uint32_t *src, uint32_t count,
                  const uint16_t *idx, uint32_t ni)
 {
-    uint32_t pos = fvf & 0x0Eu;
     {
         GuestVerts g;
-        memset(&g, 0, sizeof(g));
-        g.base = g_mem + base;
-        g.stride = stride;
-        g.src = src;
-        g.has_normal = (fvf & 0x10u) != 0;
-        g.has_color = (fvf & 0x40u) != 0;
-        g.has_spec = (fvf & 0x80u) != 0;
-        g.ntex = (int)((fvf >> 8) & 0xFu);
-        g.pretransformed = pos == 0x4u;
-        uint32_t o = pos == 0x4u ? 16u : pos == 0x2u ? 12u : 12u + ((pos - 0x4u) / 2u) * 4u;
-        g.nrm_off = o;
-        if (g.has_normal)
-            o += 12;
-        if (fvf & 0x20u)
-            o += 4;
-        g.col_off = o;
-        if (g.has_color)
-            o += 4;
-        g.spec_off = o;
-        if (g.has_spec)
-            o += 4;
-        for (int t = 0; t < g.ntex && t < MAX_STAGES; t++) {
-            uint32_t f = (fvf >> (16 + t * 2)) & 3u;
-            uint32_t sz = f == 0 ? 8u : f == 1 ? 12u : f == 2 ? 16u : 4u;
-            g.uv_off[t] = o;
-            g.uv_bytes[t] = sz >= 8u ? 8u : 4u;
-            o += sz;
-        }
+        guest_verts(fvf, base, stride, src, &g);
         if (render_draw_guest((int)prim, &g, count, idx, ni))
             return;
     }
@@ -913,6 +923,22 @@ static void dev_DrawIndexedPrimitiveVB(Ctx *c)
         stdcall_ret(c, D3D_OK, 8);
         return;
     }
+    /* A pre-transformed buffer filled for this frame and drawn again over the
+     * same range (the terrain: one draw per texture batch): packed once. */
+    if (!cache && idx && ni && vb->lock_id && (vb->fvf & 0x0Eu) == 0x4u && start + nv <= vb->count &&
+        !(!g_rs.stage[0].texture && igi_skip_untextured_2d())) {
+        if (vb->drawn_lock == vb->lock_id && vb->drawn_start == start && vb->drawn_nv == nv) {
+            GuestVerts g;
+            guest_verts(vb->fvf, vb->mem + start * vb->stride, vb->stride, NULL, &g);
+            if (render_draw_dynvb(vb->lock_id, start, &g, nv, (int)prim, (const uint16_t *)gptr(idx), ni)) {
+                stdcall_ret(c, D3D_OK, 8);
+                return;
+            }
+        }
+        vb->drawn_lock = vb->lock_id;
+        vb->drawn_start = start;
+        vb->drawn_nv = nv;
+    }
     if (cache)
         render_set_bounds(vb->lo, vb->hi);
     draw(prim, vb->fvf, vb->mem + start * vb->stride, vb->stride, nv, idx, ni, cache ? cache + start : NULL, &d);
@@ -1042,6 +1068,9 @@ static void vb_Lock(Ctx *c)
     if (!(ARG(1) & 0x10u)) {   /* DDLOCK_READONLY */
         vb->gen++;
         vb->lock_frame = g_frame_serial;
+        if (++vb_lock_serial == 0)
+            vb_lock_serial = 1;
+        vb->lock_id = vb_lock_serial;
     }
     WR32(ARG(2), vb->mem);
     if (ARG(3))

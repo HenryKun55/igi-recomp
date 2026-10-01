@@ -81,6 +81,12 @@ typedef struct GuestVerts {
  * Returns 0 when the draw needs the general path (near-plane clipping, big
  * or non-triangle draws, diagnostics). */
 int render_draw_guest(int prim, const GuestVerts *g, uint32_t nv, const uint16_t *idx, uint32_t ni);
+/* Indexed triangle list from a pre-transformed vertex buffer drawn more than once
+ * since its last writable Lock (lock_id: unique per Lock; start: first vertex,
+ * g->base points at it): packs the nv vertices once for all such draws. Returns 0
+ * when the draw needs the general path. */
+int render_draw_dynvb(uint32_t lock_id, uint32_t start, const GuestVerts *g, uint32_t nv, int prim,
+                      const uint16_t *idx, uint32_t ni);
 /* Draws from a GPU copy of an unchanged vertex buffer (`all`: the whole buffer decoded,
  * `gen`: its version). Returns 0 when the draw must take the normal path. */
 int render_draw_vb(void **slot, uint32_t gen, const RVertex *all, uint32_t count, uint32_t start, int prim,

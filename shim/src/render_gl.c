@@ -6,6 +6,9 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
+#endif
 
 #if defined(__APPLE__)
 #define GL_SILENCE_DEPRECATION
@@ -2672,15 +2675,14 @@ static uint32_t d3dcolor_rgba(uint32_t argb)
     return (argb & 0xFF00FF00u) | ((argb & 0xFFu) << 16) | ((argb >> 16) & 0xFFu);
 }
 
-/* Same as pack_vertices, reading the game's vertex layout directly. */
-static void pack_guest(const Layout *L, const GuestVerts *g, uint32_t nv, uint32_t base)
+/* Same as pack_vertices, reading the game's vertex layout directly, into d0. */
+static void pack_guest_to(uint8_t *d0, const Layout *L, const GuestVerts *g, uint32_t nv)
 {
     PROF_SECTION(PROF_H_PACK);
     const uint8_t *vb = g->base;
     const uint32_t stride = g->stride;
     const uint32_t *src = g->src;
     const uint32_t st = L->stride;
-    uint8_t *d0 = vtx + (size_t)base * st;
     uint8_t *d = d0;
     if (L->pretransformed) {
         for (uint32_t i = 0; i < nv; i++, d += st) {
@@ -2743,6 +2745,11 @@ static void pack_guest(const Layout *L, const GuestVerts *g, uint32_t nv, uint32
         }
     }
     PROF_SECTION_END;
+}
+
+static void pack_guest(const Layout *L, const GuestVerts *g, uint32_t nv, uint32_t base)
+{
+    pack_guest_to(vtx + (size_t)base * L->stride, L, g, nv);
 }
 
 int render_draw_guest(int prim, const GuestVerts *g, uint32_t nv, const uint16_t *idx, uint32_t ni)
@@ -2821,6 +2828,181 @@ int render_draw_guest(int prim, const GuestVerts *g, uint32_t nv, const uint16_t
         batch_nv += nv;
         append_indices(prim, idx, tris, base);
     }
+    PROF_SECTION_END;
+    perf.draw_us += fine_now() - t0;
+    perf.draws++;
+    return 1;
+}
+
+/* ---- pre-transformed vertex buffers drawn several times per lock -----------
+ * The terrain fills one pre-transformed vertex buffer per frame and draws it
+ * with one indexed draw per texture batch, each referencing vertices spread
+ * over the whole buffer. Rather than scanning, compacting and packing the
+ * referenced vertices for every draw, the range is packed once per lock (and
+ * layout) and every draw only copies its indices. */
+static struct {
+    uint32_t lock_id, start, nv, frame;
+    Layout L;
+    uint8_t *data;
+    int valid;
+} dyn;
+#if !defined(__vita__)
+static uint8_t *dyn_heap;
+static size_t dyn_heap_bytes;
+static uint16_t *dyn_idx_heap;
+static uint32_t dyn_idx_cap;
+#endif
+
+static int layout_equal(const Layout *a, const Layout *b)
+{
+    const uint32_t *x = (const uint32_t *)(const void *)a, *y = (const uint32_t *)(const void *)b;
+    uint32_t d = 0;
+    for (size_t i = 0; i < sizeof(Layout) / 4u; i++)
+        d |= x[i] ^ y[i];
+    return d == 0;
+}
+
+/* Copies n indices and returns the largest. */
+static uint32_t copy_indices_max(uint16_t *d, const uint16_t *s, uint32_t n)
+{
+    uint32_t i = 0, mx = 0;
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+    uint16x8_t m = vdupq_n_u16(0);
+    for (; i + 8u <= n; i += 8u) {
+        uint16x8_t v = vld1q_u16(s + i);
+        vst1q_u16(d + i, v);
+        m = vmaxq_u16(m, v);
+    }
+    uint16x4_t m4 = vmax_u16(vget_low_u16(m), vget_high_u16(m));
+    m4 = vpmax_u16(m4, m4);
+    m4 = vpmax_u16(m4, m4);
+    mx = vget_lane_u16(m4, 0);
+#endif
+    for (; i < n; i++) {
+        d[i] = s[i];
+        mx = s[i] > mx ? s[i] : mx;
+    }
+    return mx;
+}
+
+/* Packs the range for this lock and layout unless that is already done; returns 0
+ * when there is no room. Vertices no draw references may hold anything. */
+static int dyn_prepare(uint32_t lock_id, uint32_t start, const GuestVerts *g, uint32_t nv, const Layout *L)
+{
+    uint32_t frame = g_frame_serial;
+#if defined(__vita__)
+    if (!arena_ready())
+        return 0;
+    frame = arena_frame;
+#endif
+    if (dyn.valid && dyn.lock_id == lock_id && dyn.nv == nv && dyn.frame == frame && dyn.start == start &&
+        layout_equal(&dyn.L, L))
+        return 1;
+    dyn.valid = 0;
+#if defined(__vita__)
+    uint32_t vpos = (arena_vpos + 15u) & ~15u;
+    if (vpos > ARENA_VTX_BYTES || (ARENA_VTX_BYTES - vpos) / L->stride < nv)
+        return 0;
+    dyn.data = arena_vtx[arena_seg] + vpos;
+    arena_vpos = vpos + nv * L->stride;
+#else
+    if ((size_t)nv * L->stride > dyn_heap_bytes) {
+        dyn_heap_bytes = (size_t)nv * L->stride;
+        free(dyn_heap);
+        dyn_heap = malloc(dyn_heap_bytes);
+    }
+    dyn.data = dyn_heap;
+#endif
+    pack_guest_to(dyn.data, L, g, nv);
+    pc_frame[PC_VERTS] += nv;
+    dyn.lock_id = lock_id;
+    dyn.start = start;
+    dyn.nv = nv;
+    dyn.frame = frame;
+    dyn.L = *L;
+    dyn.valid = 1;
+    return 1;
+}
+
+int render_draw_dynvb(uint32_t lock_id, uint32_t start, const GuestVerts *g, uint32_t nv, int prim,
+                      const uint16_t *idx, uint32_t ni)
+{
+    if (!nv || !ni || nv > 65536u || prim != PRIM_TRIANGLES || !g->pretransformed || g->src ||
+        ((uintptr_t)idx & 1u) || g_trace_next_frame == 2 || diag_mode != DIAG_NONE)
+        return 0;
+    if (batch_enabled < 0) {
+        const char *e = getenv("IGI_BATCH");
+        batch_enabled = !(e && e[0] == '0');
+    }
+    if (!batch_enabled || ni < 3u)
+        return 0;
+    /* rhw_invisible drops a draw whose vertices all have rhw below 1e-6: one
+     * vertex of the first triangle above it shows the draw is kept, otherwise
+     * the general path decides. */
+    int visible = 0;
+    for (int k = 0; k < 3; k++) {
+        float w;
+        if (idx[k] >= nv)
+            return 0;
+        memcpy(&w, g->base + (size_t)idx[k] * g->stride + 12u, 4);
+        visible |= w >= 1e-6f;
+    }
+    if (!visible)
+        return 0;
+    /* Whatever is batched comes first, and its storage must be closed before
+     * the arena is used here. */
+    render_flush();
+    uint64_t t0 = fine_now();
+    PROF_SECTION(PROF_H_BATCH);
+    Layout L;
+    layout_init(&L, 1, g->has_normal, g->has_color, g->has_spec, g->ntex);
+    if (!dyn_prepare(lock_id, start, g, nv, &L)) {
+        PROF_SECTION_END;
+        return 0;
+    }
+    uint16_t *ip;
+#if defined(__vita__)
+    uint32_t ibytes = (ni * 2u + 3u) & ~3u;
+    if (ibytes > ARENA_IDX_BYTES - arena_ipos) {
+        PROF_SECTION_END;
+        return 0;
+    }
+    ip = arena_idx[arena_seg] + arena_ipos / 2u;
+#else
+    if (ni > dyn_idx_cap) {
+        dyn_idx_cap = ni + 4096u;
+        free(dyn_idx_heap);
+        dyn_idx_heap = malloc(dyn_idx_cap * sizeof(uint16_t));
+    }
+    ip = dyn_idx_heap;
+#endif
+    uint32_t tris = ni / 3u;
+    if (!tris || copy_indices_max(ip, idx, tris * 3u) >= nv) {
+        PROF_SECTION_END;
+        return 0;   /* the general path clamps out-of-range indices */
+    }
+    DrawArrays A;
+    memset(&A, 0, sizeof(A));
+    A.stride = (int)L.stride;
+    uintptr_t b = (uintptr_t)dyn.data;
+#if defined(__vita__)
+    arena_ipos += ibytes;
+    glBindBuffer(GL_ARRAY_BUFFER, arena_vbo);
+    vglBufferData(GL_ARRAY_BUFFER, dyn.data);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, arena_ibo);
+    vglBufferData(GL_ELEMENT_ARRAY_BUFFER, ip);
+    A.vbo = arena_vbo;
+    A.ibo = arena_ibo;
+    b = 0;
+#endif
+    A.pos = (const void *)b;
+    A.col = (const void *)(b + L.off_col);
+    A.nrm = (const void *)(b + L.off_nrm);
+    A.fog = (const void *)(b + L.off_fog);
+    for (int s = 0; s < MAX_STAGES; s++)
+        A.uv[s] = (const void *)(b + L.off_uv[s]);
+    submit_arrays(PRIM_TRIANGLES, &L, nv, ip, tris * 3u, &A);
+    pc_frame[PC_VERTS] -= nv;   /* counted once, when packed */
     PROF_SECTION_END;
     perf.draw_us += fine_now() - t0;
     perf.draws++;
