@@ -341,12 +341,18 @@ static void *render_entry(void *arg)
 }
 #endif
 
+/* 2 (debug): the game waits for every frame to be drawn before going on (same
+ * command streams with single-thread timing, for comparing images). */
+static int lockstep;
+
 static int want_thread(void)
 {
     int on = 1;
     const char *e = getenv("IGI_RENDER_THREAD");
-    if (e)
+    if (e) {
         on = e[0] != '0';
+        lockstep = e[0] == '2';
+    }
 #if defined(__vita__)
     FILE *f = fopen("ux0:data/igi/igi.cfg", "r");
     if (f) {
@@ -417,7 +423,7 @@ uint64_t rq_swap_end_frame(void)
     rq_cmd(cmd_end_frame, 0);
     publish();
     /* At most one frame in flight: the slot recorded next held the frame before this one. */
-    wait_frames(rec_frame);
+    wait_frames(lockstep ? rec_frame + 1u : rec_frame);
     rec_frame++;
     Slot *s = &slots[rec_frame % NSLOTS];
     rec_chunk = s->cmd_first;
@@ -493,6 +499,60 @@ static GLuint *name_slot(Names *n, GLuint v)
         n->map_cap = cap;
     }
     return &n->map[v];
+}
+
+GLuint rq_tex_name(GLuint name)
+{
+    if (!rq_on || !name)
+        return name;
+    GLuint *s = name_slot(&tex_names, name);
+    if (!*s)
+        glGenTextures(1, s);
+    return *s;
+}
+
+GLuint rq_buf_name(GLuint name)
+{
+    if (!rq_on || !name)
+        return name;
+    GLuint *s = name_slot(&buf_names, name);
+    if (!*s)
+        glGenBuffers(1, s);
+    return *s;
+}
+
+/* ---- generic commands ---------------------------------------------------------- */
+
+static _Alignas(16) uint8_t direct_args[RQ_MAX_ARGS];
+static CmdFn direct_fn;
+
+void rq_exec(void (*fn)(const void *args), const void *args, size_t size)
+{
+    if (!rq_on) {
+        fn(args);
+        return;
+    }
+    if (size)
+        memcpy(rq_cmd(fn, (uint32_t)size), args, size);
+    else
+        rq_cmd(fn, 0);
+}
+
+void *rq_begin(void (*fn)(const void *args), size_t size)
+{
+    if (size > RQ_MAX_ARGS)
+        rt_fatal(NULL, "render queue: command arguments too large (%zu)", size);
+    if (!rq_on) {
+        direct_fn = fn;
+        return direct_args;
+    }
+    return rq_cmd(fn, (uint32_t)size);
+}
+
+void rq_end(void)
+{
+    if (!rq_on)
+        direct_fn(direct_args);
 }
 
 /* ---- wrappers ------------------------------------------------------------------- */
@@ -728,27 +788,13 @@ typedef struct {
 static void x_bind_texture(const void *p)
 {
     const a_bind *a = p;
-    GLuint real = 0;
-    if (a->name) {
-        GLuint *s = name_slot(&tex_names, a->name);
-        if (!*s)
-            glGenTextures(1, s);
-        real = *s;
-    }
-    glBindTexture(a->target, real);
+    glBindTexture(a->target, rq_tex_name(a->name));
 }
 
 static void x_bind_buffer(const void *p)
 {
     const a_bind *a = p;
-    GLuint real = 0;
-    if (a->name) {
-        GLuint *s = name_slot(&buf_names, a->name);
-        if (!*s)
-            glGenBuffers(1, s);
-        real = *s;
-    }
-    glBindBuffer(a->target, real);
+    glBindBuffer(a->target, rq_buf_name(a->name));
 }
 
 static void x_delete_texture(const void *p)
