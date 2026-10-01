@@ -104,6 +104,10 @@ NATIVE = {
     0x0049BE10: ('rt_native_bend_draw', [
         (0x0049BE10, 2492, '0423357c06956b0f6f3d14bb4af63136bb8d7ce5'),
     ]),
+    # Terrain patch builder (runtime/src/native_patch.c).
+    0x00510010: ('rt_native_patch_build', [
+        (0x00510010, 5348, '21407b549cbf4e119f4ef272a534c0d9ed127285'),
+    ]),
     # IMA ADPCM decoder (runtime/src/native_adpcm.c).
     0x00496280: ('rt_native_adpcm_decode', [
         (0x00496280, 409, 'a4e5b69d2e3cf1c83797f92ee34bd5b9512949ae'),

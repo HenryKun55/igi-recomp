@@ -565,8 +565,50 @@ def synth_bend(seed, bases):
     return st
 
 
+def synth_patch(seed, bases):
+    """0x510010: a captured frame's requests with their flags (mirroring), level,
+    light, height and material sources randomised, sometimes fewer of them, the
+    pools nearly full (blocks moved to larger pools, requests dropped), the
+    rounding mode and the stale frame randomised."""
+    rnd = random.Random(seed)
+    st = base_state(rnd, bases, 0x00510010)
+    m, pk = st.mem, Peek(st.mem)
+    n = pk.u32(0xB16CA4)
+    if n > 1 and rnd.random() < 0.3:
+        n = rnd.randrange(1, n + 1)
+        m.u32(0xB16CA4, n)
+    for i in range(n):
+        req = 0xB16CE0 + 0x30 * i
+        if rnd.random() < 0.5:
+            m.u32(req + 0x1C, (pk.u32(req + 0x1C) & ~7) | rnd.randrange(8))
+        if rnd.random() < 0.2:
+            m.u32(req + 0x18, rnd.choice([12, 13, 14, 15, 16, pk.u32(req + 0x18)]))
+        r24 = pk.u32(req + 0x24)
+        if rnd.random() < 0.2:
+            r24 = (r24 & 0xFFFF0000) | 0xFFFF
+        if rnd.random() < 0.2:
+            r24 &= 0xFF00FFFF
+        m.u32(req + 0x24, r24)
+        if rnd.random() < 0.15:
+            r28 = pk.u32(req + 0x28)
+            m.u32(req + 0x28, rnd.choice([0, r28 & 0xFF, r28 & 0xFFFF00FF, 0xFFFFFFFF]))
+    for pool in (0xB12B60, 0xB12C40, 0xB16CC0):
+        if rnd.random() < 0.25:
+            cap = pk.u32(pool + 0xC)
+            m.u32(pool + 8, max(0, cap - rnd.choice([2, 3, 4, 5])))
+    if rnd.random() < 0.3:
+        st.fcw = (st.fcw & ~0xC00) | (rnd.randrange(4) << 10)
+    if rnd.random() < 0.5:
+        S = (((st.esp - 4) & ~7) - 0xC20) - 0x10
+        for off in range(0x10, 0x330, 4):
+            if off not in range(0x148, 0x1AC):   # the material sources may be kept
+                m.u32(S + off, rnd.getrandbits(32))
+    return st
+
+
 SYNTH = {0x0049B700: synth_skin, 0x004A1570: synth_mesh, 0x004D14E0: synth_tree, 0x00496280: synth_adpcm,
-         0x0049CC80: synth_deform, 0x0049FEB0: synth_sphere, 0x0049BE10: synth_bend}
+         0x0049CC80: synth_deform, 0x0049FEB0: synth_sphere, 0x0049BE10: synth_bend,
+         0x00510010: synth_patch}
 
 
 # ---- running -----------------------------------------------------------------
