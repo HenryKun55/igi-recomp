@@ -5,8 +5,13 @@
 #include "runtime.h"
 
 #include <SDL.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
+#if defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h>
+#include <pthread.h>
+#endif
 
 
 static SDL_Window *window;
@@ -217,6 +222,11 @@ void platform_get_drawable_size(int *w, int *h)
     SDL_GL_GetDrawableSize(window, w, h);
 }
 
+/* Window title with the frame rate, made on the GL thread at the swap and set on
+ * the main thread (window calls belong there) by platform_pump. */
+static char pending_title[96];
+static atomic_int title_pending;
+
 void platform_swap(void)
 {
     /* Frame rate and average frame time in the title, refreshed once a second. */
@@ -228,15 +238,35 @@ void platform_swap(void)
     }
     frames++;
     Uint64 now = SDL_GetPerformanceCounter();
-    if (now - last >= freq) {
+    if (now - last >= freq && !atomic_load(&title_pending)) {
         double secs = (double)(now - last) / (double)freq;
-        char title[96];
-        snprintf(title, sizeof(title), "Project IGI - %.1f fps (%.1f ms)", frames / secs, secs * 1000.0 / frames);
-        SDL_SetWindowTitle(window, title);
+        snprintf(pending_title, sizeof(pending_title), "Project IGI - %.1f fps (%.1f ms)", frames / secs,
+                 secs * 1000.0 / frames);
+        atomic_store(&title_pending, 1);
         frames = 0;
         last = now;
     }
     SDL_GL_SwapWindow(window);
+}
+
+void platform_gl_init(void)
+{
+    if (SDL_GL_MakeCurrent(window, gl) != 0)
+        rt_fatal(NULL, "SDL_GL_MakeCurrent: %s", SDL_GetError());
+}
+
+void platform_gl_release(void)
+{
+    SDL_GL_MakeCurrent(window, NULL);
+}
+
+void platform_service_main(void)
+{
+#if defined(__APPLE__)
+    /* Runs blocks the GL thread queued on the main queue (context updates in the swap). */
+    if (pthread_main_np())
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0, true);
+#endif
 }
 
 /* Mouse capture requested by DirectInput; re-applied whenever the window gets focus,
@@ -261,6 +291,7 @@ void platform_capture_mouse(int on)
 /* Stop the audio thread (it reads guest memory) before the process goes away. */
 void platform_shutdown(void)
 {
+    render_shutdown();
     SDL_Quit();
 }
 
@@ -369,6 +400,10 @@ void platform_pump(void)
     if (last_pump && now - last_pump < SDL_GetPerformanceFrequency() / 1000u)
         return;
     last_pump = now;
+    if (atomic_load(&title_pending)) {
+        SDL_SetWindowTitle(window, pending_title);
+        atomic_store(&title_pending, 0);
+    }
     platform_scripted_input();
     SDL_Event e;
     while (SDL_PollEvent(&e))

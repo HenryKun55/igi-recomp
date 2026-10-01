@@ -19,6 +19,8 @@
 #else
 #include <GL/gl.h>
 #endif
+/* Every gl* call below goes through the render thread's recorder. */
+#include "render_queue.h"
 
 RenderState g_rs;
 uint32_t g_rs_serial;
@@ -288,6 +290,26 @@ static void c_fogfv(GLenum pname, const GLfloat *value)
         (glFogfv)(pname, value);
 }
 
+/* Calls through the caches from here on (the wrappers above reach the recorder). */
+#undef glEnable
+#undef glDisable
+#undef glEnableClientState
+#undef glDisableClientState
+#undef glBlendFunc
+#undef glDepthFunc
+#undef glDepthMask
+#undef glAlphaFunc
+#undef glCullFace
+#undef glFrontFace
+#undef glShadeModel
+#undef glPolygonMode
+#undef glActiveTexture
+#undef glClientActiveTexture
+#undef glTexEnvi
+#undef glTexEnvfv
+#undef glFogi
+#undef glFogf
+#undef glFogfv
 #define glEnable(c) c_enable(c, 1)
 #define glDisable(c) c_enable(c, 0)
 #define glEnableClientState(c) c_client(c, 1)
@@ -407,6 +429,7 @@ static void c_color(float r, float g, float b, float a)
     color_cache[3] = a;
     (glColor4f)(r, g, b, a);
 }
+#undef glColor4f
 #define glColor4f c_color
 
 
@@ -548,8 +571,12 @@ static int blit_tex_w, blit_tex_h;
 static uint32_t *conv_buf;
 static size_t conv_cap;
 
+/* Scratch for converted pixels; while recording, memory of the frame (uploaded
+ * from there without another copy: q_glTexImage2D_owned). */
 static uint32_t *conv(size_t n)
 {
+    if (rq_on)
+        return rq_data(n * 4u);
     if (n > conv_cap) {
         conv_cap = n;
         conv_buf = realloc(conv_buf, n * 4u);
@@ -563,12 +590,19 @@ extern volatile uint32_t *vgl_prof_slot __attribute__((weak));
 extern uint32_t vgl_prof_base __attribute__((weak));
 #endif
 
+#if defined(__vita__) && defined(IGI_PROFILE)
+/* vitaGL's phase markers while it runs on the render thread (not sampled): they
+ * must not land in the game thread's rt_prof_cur. */
+static volatile uint32_t render_thread_prof;
+#endif
+
 void render_init(int w, int h)
 {
+    rq_start();
 #if defined(__vita__) && defined(IGI_PROFILE)
     if (&vgl_prof_slot && &vgl_prof_base) {
         vgl_prof_base = PROF_H_VGL;
-        vgl_prof_slot = &rt_prof_cur;
+        vgl_prof_slot = rq_on ? &render_thread_prof : &rt_prof_cur;
     }
 #endif
     rt_w = w;
@@ -718,6 +752,7 @@ void render_present(void)
     perf_swap();
 #if defined(__vita__)
     if (shot_hold >= 0) {
+        rq_sync();                       /* the render thread has swapped it */
         sceKernelDelayThread(1000000);   /* until the frame is on screen */
         /* A file of its own: Vita3K only writes igi.log out when it is closed. */
         FILE *f = fopen("ux0:data/igi/bench_shot_now.txt", "w");
@@ -1057,7 +1092,8 @@ static uint32_t texture_get(Surface *s)
         Surface *m = lv[level];
         if (level == 0 || UPLOAD_MIP_PIXELS) {
             uint32_t *px = surface_rgba(m);
-            glTexImage2D(GL_TEXTURE_2D, level, GL_RGBA, (GLsizei)m->w, (GLsizei)m->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+            q_glTexImage2D_owned(GL_TEXTURE_2D, level, GL_RGBA, (GLsizei)m->w, (GLsizei)m->h, 0, GL_RGBA,
+                                 GL_UNSIGNED_BYTE, px);
             hash_store(m, hv[level]);
             pc_frame[PC_TEX_BYTES] += (uint64_t)m->w * m->h * 4u;
         }
@@ -1079,16 +1115,21 @@ static uint32_t texture_get(Surface *s)
 
 /* ---- 2D ----------------------------------------------------------------- */
 
-static void draw_rgba_quad(const uint32_t *px, int w, int h, const Rect *sr, const Rect *dr, int blend)
+/* owned: px is conv() memory (see there); else it is copied when recorded. */
+static void draw_rgba_quad(const uint32_t *px, int owned, int w, int h, const Rect *sr, const Rect *dr, int blend)
 {
     glBindTexture(GL_TEXTURE_2D, blit_tex);
 #if defined(__vita__)
     /* vitaGL's glTexSubImage2D writes in place while earlier draws of this frame are
      * still queued on the GPU; a full glTexImage2D gets fresh storage. */
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    if (owned)
+        q_glTexImage2D_owned(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    else
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
     blit_tex_w = w;
     blit_tex_h = h;
 #else
+    (void)owned;
     if (w != blit_tex_w || h != blit_tex_h) {
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
         blit_tex_w = w;
@@ -1150,7 +1191,7 @@ void render_blit(Surface *src, const Rect *sr, const Rect *dr, int use_ck)
                     (int32_t)((int64_t)sr->t * vs->height / (int32_t)src->h),
                     (int32_t)((int64_t)sr->r * vs->width / (int32_t)src->w),
                     (int32_t)((int64_t)sr->b * vs->height / (int32_t)src->h) };
-        draw_rgba_quad(px, vs->width, vs->height, &vr, dr, 0);
+        draw_rgba_quad(px, 0, vs->width, vs->height, &vr, dr, 0);
         pc_frame[PC_2D_US] += fine_now() - t0;
         return;
     }
@@ -1164,12 +1205,12 @@ void render_blit(Surface *src, const Rect *sr, const Rect *dr, int use_ck)
         uint32_t *px = surface_rgba_rect(src, (uint32_t)sr->l, (uint32_t)sr->t, w, h);
         src->has_ck = saved_ck;
         Rect local = { 0, 0, (int32_t)w, (int32_t)h };
-        draw_rgba_quad(px, (int)w, (int)h, &local, dr, use_ck && saved_ck);
+        draw_rgba_quad(px, 1, (int)w, (int)h, &local, dr, use_ck && saved_ck);
         pc_frame[PC_2D_BYTES] += (uint64_t)w * h * 4u;
     } else {
         uint32_t *px = surface_rgba(src);
         src->has_ck = saved_ck;
-        draw_rgba_quad(px, (int)src->w, (int)src->h, sr, dr, use_ck && saved_ck);
+        draw_rgba_quad(px, 1, (int)src->w, (int)src->h, sr, dr, use_ck && saved_ck);
         pc_frame[PC_2D_BYTES] += (uint64_t)src->w * src->h * 4u;
     }
     pc_frame[PC_2D_US] += fine_now() - t0;
@@ -1238,7 +1279,7 @@ void render_writeback(Surface *s)
     s->has_ck = ck;
     Rect r = { 0, 0, (int32_t)s->w, (int32_t)s->h };
     Rect d = { 0, 0, rt_w, rt_h };
-    draw_rgba_quad(px, (int)s->w, (int)s->h, &r, &d, 0);
+    draw_rgba_quad(px, 1, (int)s->w, (int)s->h, &r, &d, 0);
     pc_frame[PC_2D_BYTES] += (uint64_t)s->w * s->h * 4u;
     pc_frame[PC_2D_US] += fine_now() - t0;
 }
@@ -1763,8 +1804,10 @@ static size_t heap_vtx_bytes, heap_idx_count;
 #if defined(__vita__)
 /* GPU-mapped arena, one segment per frame in flight rotated with vitaGL's frame
  * counter like its own temporary pool, so a segment is rewritten only once the
- * GPU is done with it. A draw that does not fit falls back to client arrays. */
-#define ARENA_SEGS 3u
+ * GPU is done with it. A draw that does not fit falls back to client arrays.
+ * With the render thread the game records up to one frame ahead of vitaGL:
+ * one more segment, rotated with the frames presented here. */
+#define ARENA_SEGS 4u
 #define ARENA_VTX_BYTES (3u << 20)
 #define ARENA_IDX_BYTES (512u << 10)
 static uint8_t *arena_vtx[ARENA_SEGS];
@@ -1773,11 +1816,21 @@ static uint32_t arena_vpos, arena_ipos, arena_seg, arena_frame;
 static int arena_state;       /* 0 untried, 1 ready, -1 unavailable */
 static GLuint arena_vbo, arena_ibo;
 
+static uint32_t arena_segs(void)
+{
+    return rq_on ? ARENA_SEGS : 3u;
+}
+
+static uint32_t arena_frame_number(void)
+{
+    return rq_on ? g_frame_serial : vglGetFrameNumber();
+}
+
 static int arena_ready(void)
 {
     if (arena_state == 0) {
         arena_state = -1;
-        for (uint32_t s = 0; s < ARENA_SEGS; s++) {
+        for (uint32_t s = 0; s < arena_segs(); s++) {
             arena_vtx[s] = vglForceAlloc(ARENA_VTX_BYTES);
             arena_idx[s] = vglForceAlloc(ARENA_IDX_BYTES);
             if (!arena_vtx[s] || !arena_idx[s]) {
@@ -1787,16 +1840,16 @@ static int arena_ready(void)
         }
         glGenBuffers(1, &arena_vbo);
         glGenBuffers(1, &arena_ibo);
-        arena_frame = vglGetFrameNumber();
-        arena_seg = arena_frame % ARENA_SEGS;
+        arena_frame = arena_frame_number();
+        arena_seg = arena_frame % arena_segs();
         arena_state = 1;
     }
     if (arena_state < 0)
         return 0;
-    uint32_t f = vglGetFrameNumber();
+    uint32_t f = arena_frame_number();
     if (f != arena_frame) {
         arena_frame = f;
-        arena_seg = f % ARENA_SEGS;
+        arena_seg = f % arena_segs();
         arena_vpos = arena_ipos = 0;
     }
     return 1;
@@ -1830,17 +1883,21 @@ static void stream_begin(const Layout *L, uint32_t nv, uint32_t ni)
 #endif
     uint32_t vn = nv > BATCH_MAX_V ? nv : BATCH_MAX_V;
     uint32_t in = ni > BATCH_MAX_I ? ni : BATCH_MAX_I;
-    if ((size_t)vn * L->stride > heap_vtx_bytes) {
+    if (rq_on) {
+        /* Client arrays are read when the render thread draws: frame memory. */
+        vtx = rq_vtx_reserve((size_t)vn * L->stride);
+    } else if ((size_t)vn * L->stride > heap_vtx_bytes) {
         heap_vtx_bytes = (size_t)vn * L->stride;
         free(heap_vtx);
         heap_vtx = malloc(heap_vtx_bytes);
     }
+    if (!rq_on)
+        vtx = heap_vtx;
     if (in > heap_idx_count) {
         heap_idx_count = in;
         free(heap_idx);
         heap_idx = malloc(heap_idx_count * sizeof(uint16_t));
     }
-    vtx = heap_vtx;
     vtx_cap = vn;
     idx_out = heap_idx;
     idx_cap = in;
@@ -1856,10 +1913,10 @@ static void stream_end(const Layout *L, uint32_t nv, uint32_t ni)
         arena_ipos += (ni * 2u + 3u) & ~3u;
     }
 #else
-    (void)L;
-    (void)nv;
     (void)ni;
 #endif
+    if (!vtx_gpu && rq_on)
+        rq_vtx_commit((size_t)nv * L->stride);
     vtx_gpu = 0;
 }
 
@@ -2053,7 +2110,10 @@ static void submit_arrays(int prim, const Layout *L, uint32_t nv, const uint16_t
             } else {
                 static float *zero_uv;
                 static uint32_t zero_uv_cap;
-                if (nv > zero_uv_cap) {
+                if (rq_on) {
+                    zero_uv = rq_data((size_t)nv * 8u);
+                    memset(zero_uv, 0, (size_t)nv * 8u);
+                } else if (nv > zero_uv_cap) {
                     zero_uv_cap = nv + 1024u;
                     free(zero_uv);
                     zero_uv = calloc(zero_uv_cap, 8u);
@@ -2995,12 +3055,16 @@ static int dyn_prepare(uint32_t lock_id, uint32_t start, const GuestVerts *g, ui
     dyn.data = arena_vtx[arena_seg] + vpos;
     arena_vpos = vpos + nv * L->stride;
 #else
-    if ((size_t)nv * L->stride > dyn_heap_bytes) {
-        dyn_heap_bytes = (size_t)nv * L->stride;
-        free(dyn_heap);
-        dyn_heap = malloc(dyn_heap_bytes);
+    if (rq_on) {
+        dyn.data = rq_data((size_t)nv * L->stride);
+    } else {
+        if ((size_t)nv * L->stride > dyn_heap_bytes) {
+            dyn_heap_bytes = (size_t)nv * L->stride;
+            free(dyn_heap);
+            dyn_heap = malloc(dyn_heap_bytes);
+        }
+        dyn.data = dyn_heap;
     }
-    dyn.data = dyn_heap;
 #endif
     pack_guest_to(dyn.data, L, g, nv);
     pc_frame[PC_VERTS] += nv;
@@ -3235,7 +3299,13 @@ static void perf_overlay_draw(void)
             overlay_text(px, px * (1.0f + 6.0f * (float)i), px, lines[i]);
     }
     glEnableClientState(GL_VERTEX_ARRAY);
-    glVertexPointer(2, GL_FLOAT, 0, ov_verts);
+    const float *ov = ov_verts;
+    if (rq_on) {   /* rebuilt by the next frame while the render thread may still read it */
+        float *copy = rq_data((size_t)ov_count * 8u);
+        memcpy(copy, ov_verts, (size_t)ov_count * 8u);
+        ov = copy;
+    }
+    glVertexPointer(2, GL_FLOAT, 0, ov);
     ptr_cache_reset();
     glColor4f(0, 0, 0, 1);
     glDrawArrays(GL_QUADS, 0, 4);
@@ -3297,9 +3367,11 @@ static void perf_frame_begin_swap(void)
             perf.acc_pc[i] = 0;
         }
         const float *a = perf.avg_pc;
-        rt_log("perf: %.1f fps, frame %.1f ms = game %.1f + draw %.1f + swap %.1f, %u draws -> %u gpu draws",
+        rt_log("perf: %.1f fps, frame %.1f ms = game %.1f + draw %.1f + swap %.1f, %u draws -> %u gpu draws; "
+               "render thread busy %.1f ms",
                (double)perf.fps, (double)perf.ms_frame, (double)perf.ms_game, (double)perf.ms_draw,
-               (double)perf.ms_swap, perf.draws_per_frame, perf.gpu_draws_per_frame);
+               (double)perf.ms_swap, perf.draws_per_frame, perf.gpu_draws_per_frame,
+               (double)rq_take_busy_us() / n / 1000.0);
         rt_log("perf: draw = state %.2f + tex %.2f + pack %.2f + gl %.2f ms (+ rest); %.0f verts %.0f idx; "
                "tex %.1f uploads %.1f skipped %.0f KB; 2d %.1f blits %.2f ms %.0f KB; %.1f readbacks",
                (double)(a[PC_STATE_US] / 1000.0f), (double)(a[PC_TEX_US] / 1000.0f),
@@ -3316,10 +3388,9 @@ static void perf_frame_begin_swap(void)
         perf_overlay_draw();
 }
 
+/* With the render thread: the time the game waited for the previous frame. */
 static void perf_swap(void)
 {
-    uint64_t t0 = win32_perf_counter();
-    platform_swap();
-    perf.last_swap_us = win32_perf_counter() - t0;
+    perf.last_swap_us = rq_swap_end_frame();
     perf.acc_swap += perf.last_swap_us;
 }

@@ -17,6 +17,16 @@ void platform_get_video_mode(int *w, int *h);
 /* Drawable size in pixels (may differ from the game resolution). */
 void platform_get_drawable_size(int *w, int *h);
 void platform_swap(void);
+/* GL context ownership: platform_gl_init runs on the thread that makes every GL
+ * call (initializes the context or makes it current there); platform_gl_release
+ * gives up the calling thread's claim before another thread takes it. */
+void platform_gl_init(void);
+void platform_gl_release(void);
+/* Called by the game thread while it waits for the GL thread (macOS: runs work
+ * the GL thread queued on the main thread). */
+void platform_service_main(void);
+/* Stops the render thread (drains its queue); safe to call when it is not running. */
+void render_shutdown(void);
 
 /* Pump host events: posts Win32 messages and updates the input state below. */
 void platform_pump(void);

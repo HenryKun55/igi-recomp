@@ -114,6 +114,12 @@ else()
     find_package(SDL2 REQUIRED)
     find_package(OpenGL REQUIRED)
     target_link_libraries(igi PRIVATE igi_recomp SDL2::SDL2 OpenGL::GL m)
+    if(APPLE)
+        # The render thread's main-thread servicing (platform_service_main).
+        target_link_libraries(igi PRIVATE "-framework CoreFoundation")
+    else()
+        target_link_libraries(igi PRIVATE pthread)
+    endif()
     # Cutscene video (Indeo 5) through libavcodec when available.
     find_package(PkgConfig)
     if(PKG_CONFIG_FOUND)
