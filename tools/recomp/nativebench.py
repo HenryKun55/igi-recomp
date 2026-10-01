@@ -481,8 +481,92 @@ def synth_sphere(seed, bases):
     return st
 
 
+def synth_bend(seed, bases):
+    """0x49BE10: a captured call with the camera, the object's transform, sphere
+    offset and radius, the rigid and reversed flags, extent, segments and
+    vertices (some on segment boundaries), the projection, clip rectangle, near
+    plane and far limit, the rounding mode and the stale locals randomised (the
+    mesh type and the model too, sometimes)."""
+    rnd = random.Random(seed)
+    st = base_state(rnd, bases, 0x0049BE10)
+    m, pk = st.mem, Peek(st.mem)
+    obj, ctx = pk.u32(st.esp + 4), pk.u32(st.esp + 8)
+    small = rnd.choice([0.0, 0.001, 0.01, 0.05])
+    for i in range(9):
+        m.f32(0xBCAAE0 + 4 * i, jitter(rnd, pk.f32(0xBCAAE0 + 4 * i), small))
+        m.f32(obj + 0x70 + 4 * i, jitter(rnd, pk.f32(obj + 0x70 + 4 * i), small))
+    for i in range(3):
+        m.f64(0xBCAB08 + 8 * i, pk.f64(0xBCAB08 + 8 * i) + rnd.uniform(-2.0, 2.0) * small * 20)
+        m.f64(obj + 0x20 + 8 * i, pk.f64(obj + 0x20 + 8 * i) + rnd.uniform(-2.0, 2.0) * small * 20)
+    sph = pk.u32(obj + 0x5A0)
+    if sph:
+        for k in range(4):
+            m.f32(sph + 4 * k, jitter(rnd, pk.f32(sph + 4 * k), small))
+        if rnd.random() < 0.2:
+            m.u32(obj + 0x5A0, 0)
+    m.f32(obj + 0x44, rnd.choice([pk.f32(obj + 0x44), 0.0, rnd.uniform(0.0, 50.0)]))
+    for a in (0xBCAB28, 0xBCAB2C, 0xBCAB30, 0xBCAB34):
+        m.f32(a, jitter(rnd, pk.f32(a), small))
+    inset = rnd.choice([0.0, 0.0, 40.0, 200.0])
+    for a, sgn in ((0xBCABD0, 1), (0xBCABD4, 1), (0xBCABD8, -1), (0xBCABDC, -1)):
+        m.f32(a, pk.f32(a) + sgn * inset)
+    m.f32(0xBCADC0, rnd.choice([pk.f32(0xBCADC0), 0.1, 1.0, 20.0, 200.0, 2000.0]))
+    m.f32(ctx + 8, rnd.choice([pk.f32(ctx + 8), 1e9, rnd.uniform(1.0, 3000.0)]))
+    if rnd.random() < 0.3:
+        m.raw(obj + 0x5B4, bytes([rnd.choice([0, 1, 0x80])]))
+    if rnd.random() < 0.3:
+        m.raw(obj + 0x5B5, bytes([rnd.choice([0, 1])]))
+    x0, x1 = pk.f32(obj + 0xFC), pk.f32(obj + 0x100)
+    if rnd.random() < 0.4:
+        x0, x1 = rnd.choice([(x0, x1), (x1, x0), (x0 + (x1 - x0) * 0.25, x1), (x0, x0 + (x1 - x0) * 0.7),
+                             (x0, x0)])
+        m.f32(obj + 0xFC, x0)
+        m.f32(obj + 0x100, x1)
+    nseg = pk.u32(obj + 0x59C)
+    if rnd.random() < 0.3:
+        nseg = rnd.choice([0, 1, 2, nseg, nseg + 1, 63, 64, 65, 100])
+        m.u32(obj + 0x59C, nseg)
+    for k in range(min(nseg + 2, 27)):
+        for j in range(10):
+            a = obj + 0x200 + 40 * k + 4 * j
+            if a < obj + 0x59C:   # the segment count and the sphere pointer follow
+                m.f32(a, jitter(rnd, pk.f32(a), small))
+        for j in range(3):
+            a = obj + 0x104 + 12 * k + 4 * j
+            m.f32(a, jitter(rnd, pk.f32(a), small))
+    model = pk.u32(obj + 0x6C)
+    mesh = pk.u32(pk.u32(pk.u32(model) + 0xC) + 0xC) if model and pk.u32(model) else 0
+    if mesh:
+        geom = pk.u32(mesh + 0x24)
+        n, src = pk.u32(geom + 0xC), pk.u32(geom + 0x10)
+        span = (x1 - x0) if x1 != x0 else 1.0
+        amount = rnd.choice([0.0, 0.01, 0.2])
+        for i in range(min(n, 4000)):
+            a = src + 0x20 * i
+            r = rnd.random()
+            if r < 0.1 and nseg:
+                m.f32(a, x0 + span * rnd.randrange(0, nseg + 1) / nseg)
+            elif r < 0.15:
+                m.f32(a, rnd.uniform(x0 - span, x1 + span))
+            else:
+                m.f32(a, jitter(rnd, pk.f32(a), amount))
+            for k in (1, 2):
+                m.f32(a + 4 * k, jitter(rnd, pk.f32(a + 4 * k), amount))
+        if rnd.random() < 0.06:
+            m.u32(mesh + 0x20, 3)
+    if rnd.random() < 0.03:
+        m.u32(obj + 0x6C, 0)
+    if rnd.random() < 0.3:
+        st.fcw = (st.fcw & ~0xC00) | (rnd.randrange(4) << 10)
+    S = st.esp - 0x84
+    if rnd.random() < 0.5:
+        for off in range(0x10, 0x84, 4):
+            m.u32(S + off, rnd.getrandbits(32))
+    return st
+
+
 SYNTH = {0x0049B700: synth_skin, 0x004A1570: synth_mesh, 0x004D14E0: synth_tree, 0x00496280: synth_adpcm,
-         0x0049CC80: synth_deform, 0x0049FEB0: synth_sphere}
+         0x0049CC80: synth_deform, 0x0049FEB0: synth_sphere, 0x0049BE10: synth_bend}
 
 
 # ---- running -----------------------------------------------------------------

@@ -100,6 +100,10 @@ NATIVE = {
     0x0049FEB0: ('rt_native_sphere_cull', [
         (0x0049FEB0, 603, 'd95fabbb53bb599991d5df1ae4eb32aaa1e7468d'),
     ]),
+    # Deformed (rigid or bent) object renderer (runtime/src/native_bend.c).
+    0x0049BE10: ('rt_native_bend_draw', [
+        (0x0049BE10, 2492, '0423357c06956b0f6f3d14bb4af63136bb8d7ce5'),
+    ]),
     # IMA ADPCM decoder (runtime/src/native_adpcm.c).
     0x00496280: ('rt_native_adpcm_decode', [
         (0x00496280, 409, 'a4e5b69d2e3cf1c83797f92ee34bd5b9512949ae'),
