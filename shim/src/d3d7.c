@@ -464,10 +464,25 @@ static float *transform_slot(uint32_t type)
     }
 }
 
+/* Inequality of n bytes (n a multiple of 4) as 32-bit words: newlib's memcmp
+ * is a byte loop, and these run on every state call. */
+static int words_differ(const void *a, const void *b, size_t n)
+{
+    const uint8_t *pa = a, *pb = b;
+    uint32_t acc = 0;
+    for (size_t i = 0; i < n; i += 4) {
+        uint32_t x, y;
+        memcpy(&x, pa + i, 4);
+        memcpy(&y, pb + i, 4);
+        acc |= x ^ y;
+    }
+    return acc != 0;
+}
+
 static void dev_SetTransform(Ctx *c)
 {
     float *m = transform_slot(ARG(1));
-    if (m && memcmp(m, gptr(ARG(2)), 64)) {
+    if (m && words_differ(m, gptr(ARG(2)), 64)) {
         render_state_changing();
         memcpy(m, gptr(ARG(2)), 64);
         if (m == g_rs.view)
@@ -493,7 +508,7 @@ static void dev_MultiplyTransform(Ctx *c)
         for (int i = 0; i < 4; i++)
             for (int j = 0; j < 4; j++)
                 r[i * 4 + j] = m[i * 4] * b[j] + m[i * 4 + 1] * b[4 + j] + m[i * 4 + 2] * b[8 + j] + m[i * 4 + 3] * b[12 + j];
-        if (memcmp(m, r, 64)) {
+        if (words_differ(m, r, 64)) {
             render_state_changing();
             memcpy(m, r, 64);
             if (m == g_rs.view)
@@ -541,9 +556,9 @@ static void dev_SetMaterial(Ctx *c)
 {
     uint32_t m = ARG(1);
     const uint8_t *g = gptr(m);
-    if (memcmp(g_rs.mat_diffuse, g, 16) || memcmp(g_rs.mat_ambient, g + 16, 16) ||
-        memcmp(g_rs.mat_specular, g + 32, 16) || memcmp(g_rs.mat_emissive, g + 48, 16) ||
-        memcmp(&g_rs.mat_power, g + 64, 4)) {
+    if (words_differ(g_rs.mat_diffuse, g, 16) || words_differ(g_rs.mat_ambient, g + 16, 16) ||
+        words_differ(g_rs.mat_specular, g + 32, 16) || words_differ(g_rs.mat_emissive, g + 48, 16) ||
+        words_differ(&g_rs.mat_power, g + 64, 4)) {
         render_state_changing();
         g_light_serial++;
         memcpy(g_rs.mat_diffuse, g, 16);
@@ -578,7 +593,7 @@ static void dev_SetLight(Ctx *c)
         memcpy(n.pos, gptr(p + 52u), 12);
         memcpy(n.dir, gptr(p + 64u), 12);
         memcpy(&n.range, gptr(p + 76u), 28);
-        if (memcmp(&n, &g_rs.lights[i], sizeof(n))) {
+        if (words_differ(&n, &g_rs.lights[i], sizeof(n))) {
             render_state_changing();
             g_light_serial++;
             g_rs.lights[i] = n;

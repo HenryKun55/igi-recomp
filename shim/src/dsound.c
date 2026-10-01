@@ -212,10 +212,12 @@ static void mix(void *userdata, Uint8 *stream, int len)
         else if (out[f] < -1.0f)
             out[f] = -1.0f;
     }
-    /* Benchmark runs are silent (the mixing work above still happens). */
+    /* IGI_BENCH_MUTE=1 silences benchmark runs (the mixing work above still happens). */
     static int muted = -1;
-    if (muted < 0)
-        muted = bench_enabled();
+    if (muted < 0) {
+        const char *e = getenv("IGI_BENCH_MUTE");
+        muted = bench_enabled() && e && e[0] == '1';
+    }
     if (muted)
         memset(stream, 0, (size_t)len);
 }
