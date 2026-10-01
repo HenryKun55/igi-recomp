@@ -3,6 +3,7 @@
  * (render_backend.c, on the render thread when it runs). */
 #include "platform.h"
 #include "bench.h"
+#include "tick_test.h"
 #include "igi_fixes.h"
 #include "render.h"
 
@@ -331,6 +332,7 @@ static void maybe_screenshot(void)
     frame++;
     int forced = g_trace_next_frame == 2;
     int bench_shot = bench_shot_due();
+    const char *tick_shot = tick_test_shot_due();
 #if defined(__vita__)
     /* Vita3K does not write rendered frames back to guest memory (read backs come
      * out black): the frame is held on screen instead for an external window
@@ -340,18 +342,20 @@ static void maybe_screenshot(void)
         bench_shot = -1;
     }
 #endif
-    if (!forced && bench_shot < 0 && (every <= 0 || frame % (unsigned)every))
+    if (!forced && bench_shot < 0 && !tick_shot && (every <= 0 || frame % (unsigned)every))
         return;
     uint8_t *px = malloc((size_t)fb_w * (size_t)fb_h * 4u);
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
     glReadPixels(0, 0, fb_w, fb_h, GL_BGRA, GL_UNSIGNED_BYTE, px);
-    char name[64];
+    char name[640];
 #if defined(__vita__)
     const char *dir = "ux0:data/igi/";
 #else
     const char *dir = "";
 #endif
-    if (bench_shot >= 0)
+    if (tick_shot)
+        snprintf(name, sizeof(name), "%s", tick_shot);
+    else if (bench_shot >= 0)
         snprintf(name, sizeof(name), "%sbench_shot_%05d.bmp", dir, bench_shot);
     else
         snprintf(name, sizeof(name), "%sshot_%05u.bmp", dir, frame);

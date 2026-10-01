@@ -462,6 +462,19 @@ int rt_native_patch_build(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint
 int rt_native_poly2d(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
 int rt_native_group_bounds(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
 
+/* Update-rate fixes (runtime/src/tick_rate.c, tools/recomp/tick_rate.py). A gated
+ * update handler calls rt_tick_gate first: nonzero means the call was handled
+ * (skipped or repeated) and *ret holds the function's return. Constant slots
+ * hold value * (30 / rate) ** exp while gameplay runs at another rate. */
+int rt_tick_gate(Ctx *c, uint32_t fn, uint32_t esp, uint32_t flags, uint64_t *ret);
+typedef struct TickSlot {
+    uint32_t addr, orig;   /* slot, original constant (0: immediate in bits) */
+    uint64_t bits;         /* original value */
+    int32_t size, kind, exp;
+} TickSlot;
+extern const TickSlot g_tick_slots[];
+extern const uint32_t g_tick_slot_count;
+
 /* ---- profiler ------------------------------------------------------------
  * With IGI_PROFILE, generated functions keep a shadow call stack and the id of
  * the code currently running (a guest function address, an import's IAT slot,

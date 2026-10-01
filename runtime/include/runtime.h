@@ -10,7 +10,8 @@
 /* Guest address space layout. */
 #define GUEST_NULL_GUARD   0x00010000u   /* [0, guard) is never mapped */
 #define GUEST_SCRATCH_BASE 0x00010000u   /* host-owned static structures (TIB, strings) */
-#define GUEST_SCRATCH_END  0x00400000u
+#define GUEST_SCRATCH_END  0x003FF000u
+#define GUEST_TICK_CONSTS  0x003FF000u   /* update-rate constant slots (tools/recomp/tick_rate.py) */
 #define GUEST_IMAGE_BASE   0x00400000u
 #define GUEST_STACK_BASE   0x01000000u
 #define GUEST_STACK_SIZE   0x00800000u
