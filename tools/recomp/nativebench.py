@@ -606,9 +606,88 @@ def synth_patch(seed, bases):
     return st
 
 
+def synth_raycast(seed, bases):
+    """0x4C1840: a captured query with its segments moved (often through the
+    object's centre, sometimes degenerate), the earlier hits (none, near, far,
+    on either side), the object's scale and rotation, the class filter and
+    the surface flag randomised, and the stale frame randomised."""
+    rnd = random.Random(seed)
+    st = base_state(rnd, bases, 0x004C1840)
+    m, pk = st.mem, Peek(st.mem)
+    obj, q = pk.u32(st.esp + 4), pk.u32(st.esp + 8)
+    n = pk.u32(q + 8)
+    c = [pk.f64(obj + 0x20 + 8 * k) for k in range(3)]
+    p0a, p1a, res = pk.u32(q), pk.u32(q + 4), pk.u32(q + 0x20)
+    # Triangles of the collision mesh, to aim segments at.
+    model = pk.u32(obj + 0x6C)
+    tris = []
+    if model and pk.u32(obj + 0xA4) != 0xFFFFFFFF:
+        mesh = pk.u32(pk.u32(pk.u32(model + 4 * pk.u32(obj + 0xA4)) + 0xC) + 0xC)
+        coll = pk.u32(mesh + 0x2C) + (pk.u32(q + 0x14) << 5) if mesh else 0
+        if coll and pk.u32(coll):
+            ntri, tarr, verts = pk.u32(coll), pk.u32(coll + 0x10), pk.u32(coll + 0x14)
+            for _ in range(min(ntri, 8)):
+                t = tarr + 8 * rnd.randrange(max(1, min(ntri, 4096)))
+                vs = [verts + 16 * pk.u16(t + 2 * k) for k in range(3)]
+                tris.append([sum(pk.f32(v + 4 * k) for v in vs) / 3.0 for k in range(3)])
+    rot = [pk.f32(obj + 0x70 + 4 * k) for k in range(9)]
+    sx = pk.f32(obj + 0x98)
+    for i in range(min(n, 64)):
+        a, b = p0a + 0x18 * i, p1a + 0x18 * i
+        r = rnd.random()
+        if tris and r < 0.6:
+            lc = rnd.choice(tris)
+            w = [c[j] + sx * sum(rot[3 * j + k] * lc[k] for k in range(3)) for j in range(3)]
+            d = [rnd.uniform(-1, 1) for _ in range(3)]
+            ln = rnd.choice([0.5, 5.0, 50.0])
+            far = rnd.choice([1.0, 1.0, 0.5, -0.3])
+            for k in range(3):
+                m.f64(a + 8 * k, w[k] + d[k] * ln)
+                m.f64(b + 8 * k, w[k] - d[k] * ln * far)
+        elif r < 0.75:
+            d = [rnd.uniform(-1, 1) for _ in range(3)]
+            ln = rnd.choice([1.0, 10.0, 100.0, 1000.0])
+            off = [rnd.uniform(-1, 1) * rnd.choice([0.0, 0.1, 1.0, 20.0]) for _ in range(3)]
+            for k in range(3):
+                m.f64(a + 8 * k, c[k] + off[k] + d[k] * ln)
+                m.f64(b + 8 * k, c[k] + off[k] - d[k] * ln * rnd.choice([1.0, 0.3, -0.2]))
+        elif r < 0.8:
+            for k in range(3):
+                m.f64(b + 8 * k, pk.f64(a + 8 * k))
+        else:
+            for k in range(3):
+                m.f64(a + 8 * k, pk.f64(a + 8 * k) + rnd.uniform(-5, 5))
+                m.f64(b + 8 * k, pk.f64(b + 8 * k) + rnd.uniform(-5, 5))
+        rr = res + 0x70 * i
+        if rnd.random() < 0.4:
+            m.u32(rr + 0x58, rnd.choice([0, 1]))
+            m.u32(rr + 0x4C, rnd.choice([0, 0, 7]))
+            m.f64(rr + 0x60, rnd.choice([0.0, 1.0, 50.0, 1e9]))
+            t = rnd.uniform(0.0, 1.0)
+            for k in range(3):
+                m.f64(rr + 8 + 8 * k, pk.f64(a + 8 * k) * (1 - t) + pk.f64(b + 8 * k) * t)
+    sc = rnd.choice(['keep', 'one', 'rand', 'uni'])
+    u = rnd.uniform(0.5, 2.0)
+    for k in range(3):
+        v = {'keep': pk.f32(obj + 0x98 + 4 * k), 'one': 1.0, 'rand': rnd.uniform(0.5, 2.0), 'uni': u}[sc]
+        m.f32(obj + 0x98 + 4 * k, v)
+    small = rnd.choice([0.0, 0.0, 0.01, 0.2])
+    for i in range(9):
+        m.f32(obj + 0x70 + 4 * i, jitter(rnd, pk.f32(obj + 0x70 + 4 * i), small))
+    if rnd.random() < 0.3:
+        m.u32(q + 0x18, rnd.choice([0, 1]))
+    if rnd.random() < 0.2:
+        m.raw(q + 0xC, bytes([0xFF]))
+    if rnd.random() < 0.5:
+        S = (((st.esp - 4) & ~7) - 0x2F4) - 12
+        for off in range(0x10, 0x2F4, 4):
+            m.u32(S + off, rnd.getrandbits(32))
+    return st
+
+
 SYNTH = {0x0049B700: synth_skin, 0x004A1570: synth_mesh, 0x004D14E0: synth_tree, 0x00496280: synth_adpcm,
          0x0049CC80: synth_deform, 0x0049FEB0: synth_sphere, 0x0049BE10: synth_bend,
-         0x00510010: synth_patch}
+         0x00510010: synth_patch, 0x004C1840: synth_raycast}
 
 
 # ---- running -----------------------------------------------------------------

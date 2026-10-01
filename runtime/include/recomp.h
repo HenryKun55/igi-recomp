@@ -428,6 +428,7 @@ int rt_native_deform_mesh(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint
 int rt_native_sphere_cull(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
 int rt_native_adpcm_decode(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
 int rt_native_bend_draw(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
+int rt_native_mesh_raycast(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
 int rt_native_patch_build(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
 
 /* ---- profiler ------------------------------------------------------------

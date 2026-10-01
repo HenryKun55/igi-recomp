@@ -104,6 +104,10 @@ NATIVE = {
     0x0049BE10: ('rt_native_bend_draw', [
         (0x0049BE10, 2492, '0423357c06956b0f6f3d14bb4af63136bb8d7ce5'),
     ]),
+    # Segment query against an object's collision mesh (runtime/src/native_raycast.c).
+    0x004C1840: ('rt_native_mesh_raycast', [
+        (0x004C1840, 5961, '544f2cfdeef79baff07bf2b6b8427f5b43a9a52d'),
+    ]),
     # Terrain patch builder (runtime/src/native_patch.c).
     0x00510010: ('rt_native_patch_build', [
         (0x00510010, 5348, '21407b549cbf4e119f4ef272a534c0d9ed127285'),
