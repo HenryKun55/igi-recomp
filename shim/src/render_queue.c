@@ -437,6 +437,14 @@ void rq_shutdown(void)
 {
     if (!rq_on)
         return;
+    /* A fatal error on the render thread itself: it cannot wait for itself. */
+#if defined(__vita__)
+    if (sceKernelGetThreadId() == render_tid)
+        return;
+#else
+    if (pthread_equal(pthread_self(), render_tid))
+        return;
+#endif
     rq_cmd(cmd_exit, 0);
     publish();
     wait_for(&done_cmds, rec_cmds);
