@@ -429,6 +429,8 @@ SHIM(kernel32, CreateFileA)
         stdcall_ret(c, INVALID_HANDLE_VALUE, 7);
         return;
     }
+    if (rw)
+        rt_log("CreateFileA(%s, write, disp %u) -> %s", win, disp, path);
     uint32_t h = handle_new(H_FILE);
     handle_get(h, H_FILE)->fd = fd;
     win32_set_last_error(0);
