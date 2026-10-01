@@ -242,8 +242,6 @@ static RVertex *decode(uint32_t fvf, uint32_t base, uint32_t stride, const uint3
     return r;
 }
 
-/* Hands untransformed vertices to the renderer in the game's layout when it can
- * take them directly; otherwise decodes them to RVertex. */
 /* The game's vertex layout for the renderer (vertex i at base + (src ? src[i] : i) * stride). */
 static void guest_verts(uint32_t fvf, uint32_t base, uint32_t stride, const uint32_t *src, GuestVerts *g)
 {
@@ -278,6 +276,8 @@ static void guest_verts(uint32_t fvf, uint32_t base, uint32_t stride, const uint
     }
 }
 
+/* Hands untransformed vertices to the renderer in the game's layout when it can
+ * take them directly; otherwise decodes them to RVertex. */
 static void emit(uint32_t prim, uint32_t fvf, uint32_t base, uint32_t stride, const uint32_t *src, uint32_t count,
                  const uint16_t *idx, uint32_t ni)
 {
@@ -758,7 +758,7 @@ typedef struct RangeBounds {
     uint32_t first, count, gen;
     float lo[3], hi[3];
 } RangeBounds;
-#define RANGE_SLOTS 1024u
+#define RANGE_BITS 10
 
 static VertexBuffer *draw_vb;    /* buffer of the DrawPrimitiveVB call in progress (decoded copy in use) */
 static uint32_t draw_vb_start;
@@ -774,11 +774,11 @@ static void set_range_bounds(uint32_t first, uint32_t count)
     if (!count || first + count > vb->count)
         return;
     if (!vb->ranges) {
-        vb->ranges = calloc(RANGE_SLOTS, sizeof(RangeBounds));
+        vb->ranges = calloc(1u << RANGE_BITS, sizeof(RangeBounds));
         if (!vb->ranges)
             return;
     }
-    RangeBounds *e = &vb->ranges[((first * 2654435761u) ^ (count * 40503u)) >> 22];
+    RangeBounds *e = &vb->ranges[((first * 2654435761u) ^ (count * 40503u)) >> (32 - RANGE_BITS)];
     if (e->gen != vb->cache_gen || e->first != first || e->count != count) {
         for (int k = 0; k < 3; k++) {
             e->lo[k] = 1e30f;
