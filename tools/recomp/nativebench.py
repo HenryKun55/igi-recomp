@@ -437,8 +437,52 @@ def synth_deform(seed, bases):
     return st
 
 
+def synth_sphere(seed, bases):
+    """0x49FEB0: a captured call with the sphere moved anywhere around the view
+    volume (often onto a plane, the near or the far distance exactly), the
+    radius (zero, negative, special values), the planes, near and far, with or
+    without the inside flag, and the stale frame randomised."""
+    rnd = random.Random(seed)
+    st = base_state(rnd, bases, 0x0049FEB0)
+    m, pk = st.mem, Peek(st.mem)
+    t = pk.u32(st.esp + 4)
+    s = pk.u32(t)
+    near, far = pk.f32(0xBCADDC), pk.f32(0xBCADCC)
+    if rnd.random() < 0.3:
+        near, far = rnd.choice([(near, far), (1.0, 1000.0), (0.0, 0.0), (far, near)])
+        m.f32(0xBCADDC, near)
+        m.f32(0xBCADCC, far)
+    r = rnd.choice([pk.f32(t + 4), 0.0, -5.0, rnd.uniform(0.0, 5000.0), rnd.uniform(0.0, 50.0)])
+    if rnd.random() < 0.03:
+        r = rnd.choice([float('nan'), float('inf'), -0.0])
+    m.f32(t + 4, r)
+    z = rnd.choice([pk.f32(s + 8), rnd.uniform(-2 * far, 2 * far), near - r, far + r, -r, r + 409.6,
+                    rnd.uniform(-100.0, 100.0)])
+    for a in (0xB46CE4, 0xB817A4, 0xB46D1C, 0xB46D20, 0xB816FC, 0xB46D18, 0xB8179C, 0xB46CE8):
+        if rnd.random() < 0.2:
+            m.f32(a, jitter(rnd, pk.f32(a), 0.1))
+    # x and y on a side plane sometimes: x = k * z + r / scale.
+    k, sc = pk.f32(0xB46CE4), pk.f32(0xB817A4)
+    x = rnd.choice([pk.f32(s), rnd.uniform(-abs(z) - 100, abs(z) + 100),
+                    k * z + (r / sc if sc else 0.0), k * z - (r / sc if sc else 0.0)])
+    y = rnd.choice([pk.f32(s + 4), rnd.uniform(-abs(z) - 100, abs(z) + 100)])
+    if rnd.random() < 0.03:
+        x = float('nan')
+    m.f32(s, x)
+    m.f32(s + 4, y)
+    m.f32(s + 8, z)
+    if rnd.random() < 0.3:
+        m.u32(t + 8, 0)
+    elif not pk.u32(t + 8):
+        m.u32(t + 8, st.esp + 0x40)
+    if rnd.random() < 0.5:
+        for off in range(-0x30, 0, 4):
+            m.u32(st.esp + off, rnd.getrandbits(32))
+    return st
+
+
 SYNTH = {0x0049B700: synth_skin, 0x004A1570: synth_mesh, 0x004D14E0: synth_tree, 0x00496280: synth_adpcm,
-         0x0049CC80: synth_deform}
+         0x0049CC80: synth_deform, 0x0049FEB0: synth_sphere}
 
 
 # ---- running -----------------------------------------------------------------
