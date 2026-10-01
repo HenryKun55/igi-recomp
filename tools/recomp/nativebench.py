@@ -75,6 +75,12 @@ int *__errno(void) { static int e; return &e; }
 THUNKS = {
     'IDirect3DVertexBuffer7::Lock': (16, 1),
     'IDirect3DVertexBuffer7::Unlock': (4, 0),
+    'IDirect3DDevice7::SetTexture': (12, 0),
+    'IDirect3DDevice7::SetRenderState': (12, 0),
+    'IDirect3DDevice7::DrawPrimitive': (24, 0),
+    'IDirect3DDevice7::DrawIndexedPrimitive': (32, 0),
+    'IDirect3DDevice7::DrawPrimitiveVB': (24, 0),
+    'IDirect3DDevice7::DrawIndexedPrimitiveVB': (32, 0),
 }
 KIND = {'lock': 1, 'lockfail': 2, 'locknull': 3}
 # Stack arguments of the guest functions called (recorded and compared with the
@@ -685,7 +691,55 @@ def synth_raycast(seed, bases):
     return st
 
 
-SYNTH = {0x0049B700: synth_skin, 0x004A1570: synth_mesh, 0x004D14E0: synth_tree, 0x00496280: synth_adpcm,
+def synth_poly2d(seed, bases):
+    """0x50D4C0: a captured polygon with its vertices (positions, depth in front,
+    on and behind the eye, colours, texture coordinates), the vertex count, the
+    colour flags, the depth range and depth switch, the texture's scale, the
+    rounding mode and the stale frame randomised."""
+    rnd = random.Random(seed)
+    st = base_state(rnd, bases, 0x0050D4C0)
+    m, pk = st.mem, Peek(st.mem)
+    p = pk.u32(st.esp + 4)
+    fl = pk.u32(p + 4)
+    if rnd.random() < 0.6:
+        fl = (fl & ~0x10880024) | rnd.choice([0, 4, 0x20, 0x24, 0x10000000, 0x800000, 0x80000 | 0x20, 0x4])
+        m.u32(p + 4, fl)
+    n = pk.u32(p + 12)
+    src = pk.u32(p + 16)
+    if rnd.random() < 0.3:
+        n = rnd.choice([0, 1, n, max(1, n - 1)])
+        m.u32(p + 12, n)
+    for i in range(min(n, 64)):
+        v = src + 0x24 * i
+        for k in range(9):
+            a = v + 4 * k
+            if k == 2:
+                m.f32(a, rnd.choice([pk.f32(a), 0.0, -0.0, -1.0, rnd.uniform(0.0, 2.0), rnd.uniform(0.0, 5000.0),
+                                     special(rnd, -10.0, 10.0)]))
+            elif k >= 5:
+                m.f32(a, rnd.choice([pk.f32(a), 0.0, 1.0, 0.5, rnd.uniform(0.0, 1.0), rnd.uniform(-0.5, 1.5),
+                                     1.0 / 255 * rnd.randrange(256) + rnd.choice([0, 0.5 / 255]), special(rnd, -1, 2)]))
+            else:
+                m.f32(a, jitter(rnd, pk.f32(a), rnd.choice([0.0, 0.01, 1.0])))
+    if rnd.random() < 0.5:
+        m.u32(0x6E5BB0, rnd.choice([0, 1]))
+    for a in (0xBCADA0, 0xBCADC8, 0xBCABEC, 0xBCAB6C, 0xBCADB4, 0xBCAD8C):
+        if rnd.random() < 0.3:
+            m.f32(a, rnd.choice([jitter(rnd, pk.f32(a), 0.5), rnd.uniform(0.0, 10.0), rnd.uniform(1.0, 3000.0),
+                                 0.0, 1.0]))
+    tex = pk.u32(0xA84A50)
+    if tex and rnd.random() < 0.3:
+        for k in (0x10, 0x14):
+            m.f32(tex + k, rnd.choice([pk.f32(tex + k), 256.0, 64.0, rnd.uniform(1.0, 512.0)]))
+    if rnd.random() < 0.3:
+        st.fcw = (st.fcw & ~0xC00) | (rnd.randrange(4) << 10)
+    if rnd.random() < 0.5:
+        for off in range(-0x40, 0, 4):
+            m.u32(st.esp + off, rnd.getrandbits(32))
+    return st
+
+
+SYNTH = {0x0050D4C0: synth_poly2d, 0x0049B700: synth_skin, 0x004A1570: synth_mesh, 0x004D14E0: synth_tree, 0x00496280: synth_adpcm,
          0x0049CC80: synth_deform, 0x0049FEB0: synth_sphere, 0x0049BE10: synth_bend,
          0x00510010: synth_patch, 0x004C1840: synth_raycast}
 

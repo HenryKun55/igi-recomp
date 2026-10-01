@@ -195,40 +195,6 @@ void rt_x87_mismatch(Ctx *c, uint32_t addr, uint32_t expect);
 #define X87_CHECK(expect, addr) ((void)0)
 #endif
 
-/* Round according to the rounding-control field of the control word. Round to
- * nearest is inline: below 2^52, adding and subtracting 2^52 to the magnitude
- * rounds to nearest-even in the host's default rounding mode (no libm call).
- * Truncation (the game draws its frames with control word 0xE3F) is inline too:
- * below 2^31 a conversion to int32 and back truncates, the sign keeps -0.0. */
-static inline double rt_fround(const Ctx *c, double v)
-{
-    if (__builtin_expect((c->fcw & 0x0C00u) == 0, 1)) {
-        double a = fabs(v);
-        if (a < 4503599627370496.0)
-            return copysign((a + 4503599627370496.0) - 4503599627370496.0, v);
-        return v + 0.0;                         /* integral, infinite or NaN (quieted) */
-    }
-    uint32_t rc = (c->fcw >> 10) & 3u;
-    if (rc == 3u && fabs(v) < 2147483648.0)
-        return copysign((double)(int32_t)v, v);
-    if (rc == 1)
-        return floor(v);
-    return rc == 2 ? ceil(v) : trunc(v);
-}
-
-/* fscale: ST(0) * 2^trunc(ST(1)). Multiplying by the power of two when it is a
- * normal double gives the same correctly rounded result as ldexp. */
-static inline double rt_fscale(double v, double s)
-{
-    if (s > -1022.0 && s < 1024.0) {
-        uint64_t b = (uint64_t)((int32_t)s + 1023) << 52;
-        double p;
-        memcpy(&p, &b, 8);
-        return v * p;
-    }
-    return ldexp(v, (int)trunc(s));
-}
-
 /* Bits of a double. GCC for 32-bit ARM moves a memcpy'd double to core registers
  * through the stack (a store and a load); one vmov does it. */
 static inline uint64_t rt_dbits(double v)
@@ -256,6 +222,55 @@ static inline uint32_t rt_dhi(double v)
 #endif
 }
 
+/* Low word of a double. */
+static inline uint32_t rt_dlo(double v)
+{
+#if defined(__arm__) && defined(__GNUC__) && !defined(__clang__)
+    uint32_t l;
+    __asm__("vmov.32 %0, %P1[0]" : "=r"(l) : "w"(v));
+    return l;
+#else
+    return (uint32_t)rt_dbits(v);
+#endif
+}
+
+/* Round according to the rounding-control field of the control word. Round to
+ * nearest is inline: below 2^52, adding and subtracting 2^52 to the magnitude
+ * rounds to nearest-even in the host's default rounding mode (no libm call).
+ * Truncation (the game draws its frames with control word 0xE3F) is inline too:
+ * below 2^31 a conversion to int32 and back truncates, the sign keeps -0.0. */
+static inline double rt_fround(const Ctx *c, double v)
+{
+    if (__builtin_expect((c->fcw & 0x0C00u) == 0, 1)) {
+        double a = fabs(v);
+        if (a < 4503599627370496.0)
+            return copysign((a + 4503599627370496.0) - 4503599627370496.0, v);
+        return v + 0.0;                         /* integral, infinite or NaN (quieted) */
+    }
+    uint32_t rc = (c->fcw >> 10) & 3u;
+    if (rc == 3u && fabs(v) < 2147483648.0)
+        return copysign((double)(int32_t)v, v);
+    if (rc == 1)
+        return floor(v);
+    return rc == 2 ? ceil(v) : trunc(v);
+}
+
+/* fscale: ST(0) * 2^trunc(ST(1)). Multiplying by the power of two when it is a
+ * normal double gives the same correctly rounded result as ldexp. The range
+ * -1022 < s < 1024 is tested on the high word: |s| < 1022, or 1022 <= s < 1024
+ * (NaN excluded). */
+static inline double rt_fscale(double v, double s)
+{
+    uint32_t hi = rt_dhi(s);
+    if ((hi << 1) < (0x408FF000u << 1) || hi - 0x408FF000u < 0x1000u) {
+        uint64_t b = (uint64_t)((int32_t)s + 1023) << 52;
+        double p;
+        memcpy(&p, &b, 8);
+        return v * p;
+    }
+    return ldexp(v, (int)trunc(s));
+}
+
 /* f2xm1: 2^v - 1 with the C library's exp2.
  *
  * On the Vita, newlib's exp2 is ARM's optimized-routines one (math/exp2.c, its
@@ -280,11 +295,13 @@ static inline double rt_exp2(double x)
         return exp2(x);
     const struct rt_exp_data *d = &__exp_data;
     double kd = x + d->exp2_shift;
-    uint64_t ki = rt_dbits(kd);
+    /* Only the low word of the sum's bits matters: ki % 128 and ki << 45 (whose
+     * low word is zero and high word the low word shifted by 13). */
+    uint32_t ki = rt_dlo(kd);
     kd -= d->exp2_shift;
     double r = x - kd;
-    uint32_t idx = 2u * ((uint32_t)ki % 128u);
-    uint64_t top = ki << (52 - 7);
+    uint32_t idx = 2u * (ki % 128u);
+    uint64_t top = (uint64_t)(ki << 13) << 32;
     double tail;
     memcpy(&tail, &d->tab[idx], 8);
     uint64_t sbits = d->tab[idx + 1] + top;
@@ -499,6 +516,7 @@ int rt_native_adpcm_decode(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uin
 int rt_native_bend_draw(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
 int rt_native_mesh_raycast(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
 int rt_native_patch_build(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
+int rt_native_poly2d(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
 
 /* ---- profiler ------------------------------------------------------------
  * With IGI_PROFILE, generated functions keep a shadow call stack and the id of

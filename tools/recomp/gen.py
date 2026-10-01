@@ -112,6 +112,10 @@ NATIVE = {
     0x00510010: ('rt_native_patch_build', [
         (0x00510010, 5348, '21407b549cbf4e119f4ef272a534c0d9ed127285'),
     ]),
+    # Screen-space polygon recorder (runtime/src/native_poly2d.c).
+    0x0050D4C0: ('rt_native_poly2d', [
+        (0x0050D4C0, 787, '92870339d7b93b68d220502f08abd9195e2f7c1c'),
+    ]),
     # IMA ADPCM decoder (runtime/src/native_adpcm.c).
     0x00496280: ('rt_native_adpcm_decode', [
         (0x00496280, 409, 'a4e5b69d2e3cf1c83797f92ee34bd5b9512949ae'),

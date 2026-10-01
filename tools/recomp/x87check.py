@@ -1,6 +1,6 @@
 """Equivalence check of the x87 helpers in runtime/include/recomp.h.
 
-The inline fast paths of the x87 helpers (fist, f2xm1) must give bit-identical
+The inline fast paths of the x87 helpers (fist, fscale, f2xm1) must give bit-identical
 results to the reference: the previous versions of the fast paths (kept below,
 REF) with the same out-of-line code (copied from runtime/src/cpu.c), and the C
 library's exp2. Both are compiled from one C file for
@@ -79,6 +79,16 @@ static int16_t ref_fist16(Ctx *c, double v)
         return (int16_t)(int32_t)v;
     }
     return rt_fist16_slow(c, v);
+}
+static double ref_fscale(double v, double s)
+{
+    if (s > -1022.0 && s < 1024.0) {
+        uint64_t b = (uint64_t)((int32_t)s + 1023) << 52;
+        double p;
+        memcpy(&p, &b, 8);
+        return v * p;
+    }
+    return ldexp(v, (int)trunc(s));
 }
 
 /* ---- operands ---- */
@@ -163,6 +173,14 @@ static __attribute__((noinline)) void check(Ctx *c, double v)
     }
     uint64_t e = b_of(rt_exp2(v)), w = b_of(exp2(v));
     if (e != w) fail(2, 0, v, e, w);
+    /* fscale by an operand, by an exponent near the range ends and by the fog idiom's. */
+    uint64_t r = rnd();
+    double s = (r & 3u) == 0 ? operand() : (r & 3u) == 1 ? (double)((int)((r >> 8) % 2400u) - 1200) + uni(-1.0, 1.0)
+             : (r & 3u) == 2 ? (double)((int)((r >> 8) % 12u) - 6) + ((r >> 4) & 1 ? 1022.0 : -1022.0) : uni(-64.0, 64.0);
+    double fs = (r >> 20) & 1 ? (rt_exp2(uni(-1.0, 1.0)) - 1.0) + 1.0 : v;
+    e = b_of(rt_fscale(fs, s));
+    w = b_of(ref_fscale(fs, s));
+    if (e != w) fail(3, 0, s, e, w);
 }
 
 uint32_t x87check(uint32_t seed, uint32_t n)
@@ -246,7 +264,7 @@ def report(tag, out):
     if n == '0':
         return True
     print('%s: %s DIFFERENT, first: %s mode %s operand %s got %s want %s' % (tag, n, {
-        '64': 'fist m64', '32': 'fist m32', '16': 'fist m16', '2': 'exp2'}[kind], mode, bits, got, want))
+        '64': 'fist m64', '32': 'fist m32', '16': 'fist m16', '2': 'exp2', '3': 'fscale'}[kind], mode, bits, got, want))
     return False
 
 
