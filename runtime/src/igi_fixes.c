@@ -48,10 +48,10 @@ uint32_t igi_ui_state(void)
  * The game writes its settings (pc/config.qvm, via 0x405BD0 "LOCAL:config.qsc")
  * only at a normal exit; the options screens just change them in memory. On the
  * Vita the app is closed with the PS button, so settings were never kept. The
- * port also saves whenever a menu screen closes (the window goes from state 6,
- * closing, to 0 before the next screen opens), at most once every two seconds. */
-#define WINDOW_STATE_CLOSING 6u
-#define WINDOW_STATE_SWITCH 0u
+ * port also saves whenever a menu screen is left: the window leaves state 2
+ * (screen active) for 6 (main menu screen closing) or 14 (in-game menu switching
+ * screens). At most once every two seconds. */
+#define WINDOW_STATE_ACTIVE 2u
 uint32_t win32_tick_count(void);   /* shim/src/kernel32.c */
 
 #define GAME_SAVE_CONFIG 0x00405BD0u
@@ -111,8 +111,8 @@ void rt_probe(Ctx *c, uint32_t func)
             log_states = getenv("IGI_STATE_LOG") != NULL;
         if (log_states && (obj != ui_window || state != ui_state))
             rt_log("ui window %08X state %u", obj, state);
-        if (obj == ui_window && ui_state == WINDOW_STATE_CLOSING && state == WINDOW_STATE_SWITCH)
-            save_config(c);   /* a menu screen closed (e.g. leaving the options) */
+        if (obj == ui_window && ui_state == WINDOW_STATE_ACTIVE && state != WINDOW_STATE_ACTIVE)
+            save_config(c);   /* a menu screen is being left (OK/back on the options, main or in-game menu) */
         ui_window = obj;
         ui_state = state;
         ui_frames = 0;
