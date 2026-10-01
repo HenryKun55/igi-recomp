@@ -54,6 +54,21 @@ for k, (lr, w) in b.items():
 print('total weight', total)
 for s, w in by_fn.most_common(top):
     print('%6.2f%% %s' % (100.0 * w / total, s))
+# Per guest thread (the game, the render thread, audio...): share and top functions.
+by_thread = collections.Counter()
+thread_fn = collections.defaultdict(collections.Counter)
+for k, (lr, w) in b.items():
+    dw = w - a.get(k, (0, 0))[1]
+    if dw > 0:
+        by_thread[k[0]] += dw
+        thread_fn[k[0]][sym(k[1])] += dw
+print('\nby thread (guest instructions, %):')
+for t, w in by_thread.most_common():
+    if w * 200 < total:
+        continue
+    print('  thread %d: %.2f%%  (%.2f s at 444 MHz)' % (t, 100.0 * w / total, w / 444e6))
+    for s, fw in thread_fn[t].most_common(8):
+        print('      %6.2f%% %s' % (100.0 * fw / total, s))
 print('\nHLE calls by caller:')
 for s, w in hle.most_common(top):
     print('%6.2f%% %s' % (100.0 * w / total, s))
