@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: HenryKun55 <henriqueflavio55@gmail.com>
+Date: Thu, 1 Oct 2026 11:00:00 -0300
+Subject: [PATCH] Compare ffp binding keys word by word instead of memcmp
+
+---
+ source/ffp.c | 16 ++++++++++++++--
+ 1 file changed, 14 insertions(+), 2 deletions(-)
+
+diff --git a/source/ffp.c b/source/ffp.c
+--- a/source/ffp.c
++++ b/source/ffp.c
+@@ -638,6 +638,18 @@
+ } ffp_binding_entry;
+ static ffp_binding_entry ffp_binding_cache[FFP_BINDING_CACHE_SIZE];
+ static int ffp_binding_num = 0, ffp_binding_next = 0, ffp_binding_last = -1;
++
++// Word-wise key comparison: inlined, unlike the library memcmp, which this did
++// for up to FFP_BINDING_CACHE_SIZE entries per draw.
++static inline int ffp_binding_key_equal(const ffp_binding_key *a, const ffp_binding_key *b) {
++	const uint32_t *x = (const uint32_t *)a, *y = (const uint32_t *)b;
++	if (x[0] != y[0] || x[1] != y[1] || x[2] != y[2])
++		return 0;
++	uint32_t d = 0;
++	for (int i = 3; i < (int)(sizeof(ffp_binding_key) / 4); i++)
++		d |= x[i] ^ y[i];
++	return d == 0;
++}
+ 
+ static void ffp_binding_reset(void) {
+ 	ffp_binding_num = 0;
+@@ -956,11 +968,11 @@
+ 	ffp_binding_key binding_key;
+ 	ffp_binding_make_key(&binding_key, attrs, streams, mask.raw, index_type);
+ 	ffp_binding_entry *hit = NULL;
+-	if (ffp_binding_last >= 0 && !memcmp(&binding_key, &ffp_binding_cache[ffp_binding_last].key, sizeof(binding_key))) {
++	if (ffp_binding_last >= 0 && ffp_binding_key_equal(&binding_key, &ffp_binding_cache[ffp_binding_last].key)) {
+ 		hit = &ffp_binding_cache[ffp_binding_last];
+ 	} else {
+ 		for (int i = 0; i < ffp_binding_num; i++) {
+-			if (!memcmp(&binding_key, &ffp_binding_cache[i].key, sizeof(binding_key))) {
++			if (ffp_binding_key_equal(&binding_key, &ffp_binding_cache[i].key)) {
+ 				hit = &ffp_binding_cache[i];
+ 				ffp_binding_last = i;
+ 				// The arrays may hold another setup: restore this one
+

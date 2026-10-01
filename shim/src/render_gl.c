@@ -6,6 +6,9 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
+#endif
 
 #if defined(__APPLE__)
 #define GL_SILENCE_DEPRECATION
@@ -2265,6 +2268,31 @@ void render_flush(void)
  * entirely in front of it pass through untouched.
  */
 #if defined(__vita__)
+/* Clip-space z of object-space vertices: z = x*c[0] + y*c[1] + z*c[2] + c[3], the
+ * third column of world * view * proj. Every near-plane test of a draw needs it
+ * and the transforms change between most draws: one shared copy per state
+ * serial, and only the 80 products that column needs (the same arithmetic as
+ * mat_mul's, so the same values). */
+static const float *clip_z_column(void)
+{
+    static float c[4];
+    static uint32_t serial;
+    static int valid;
+    if (!valid || serial != g_rs_serial) {
+        const float *w = g_rs.world, *v = g_rs.view, *p = g_rs.proj;
+        for (int i = 0; i < 4; i++) {
+            float wv[4];
+            for (int j = 0; j < 4; j++)
+                wv[j] = w[i * 4 + 0] * v[0 * 4 + j] + w[i * 4 + 1] * v[1 * 4 + j] + w[i * 4 + 2] * v[2 * 4 + j] +
+                        w[i * 4 + 3] * v[3 * 4 + j];
+            c[i] = wv[0] * p[0 * 4 + 2] + wv[1] * p[1 * 4 + 2] + wv[2] * p[2 * 4 + 2] + wv[3] * p[3 * 4 + 2];
+        }
+        serial = g_rs_serial;
+        valid = 1;
+    }
+    return c;
+}
+
 static RVertex nc_lerp(const RVertex *a, const RVertex *b, float t)
 {
     RVertex r;
@@ -2287,53 +2315,56 @@ static RVertex nc_lerp(const RVertex *a, const RVertex *b, float t)
     return r;
 }
 
-/* Returns 1 and a clipped triangle list in out/nout when some triangle crosses the near plane. */
-static int near_clip_impl(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, uint32_t ni, RVertex **out,
-                          uint32_t *nout);
+/* Returns 1 when some vertex is behind the near plane, with the clipped triangles
+ * as an indexed list: out_idx[0 .. *nidx) index the draw's vertices (below nv) and
+ * the new vertices out_v[0 .. *nnew) (from nv on). Triangles in front keep their
+ * vertices, so only the edges crossing the plane make new ones. */
+static int near_clip_impl(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, uint32_t ni, RVertex **out_v,
+                          uint32_t *nnew, const uint32_t **out_idx, uint32_t *nidx);
 
-static int near_clip(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, uint32_t ni, RVertex **out,
-                     uint32_t *nout)
+static int near_clip(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, uint32_t ni, RVertex **out_v,
+                     uint32_t *nnew, const uint32_t **out_idx, uint32_t *nidx)
 {
     PROF_SECTION(PROF_H_NEARCLIP);
-    int r = near_clip_impl(prim, v, nv, idx, ni, out, nout);
+    int r = near_clip_impl(prim, v, nv, idx, ni, out_v, nnew, out_idx, nidx);
     PROF_SECTION_END;
     return r;
 }
 
-static int near_clip_impl(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, uint32_t ni, RVertex **out,
-                          uint32_t *nout)
+static int near_clip_impl(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, uint32_t ni, RVertex **out_v,
+                          uint32_t *nnew, const uint32_t **out_idx, uint32_t *nidx)
 {
     static float *d;
+    static uint8_t *fr;   /* 1: vertex in front of the plane (d >= 0) */
     static uint32_t d_cap;
     static RVertex *ob;
-    static uint32_t ob_cap;
+    static uint32_t *oi;
+    static uint32_t ob_cap, oi_cap;
     if (nv > d_cap) {
         d_cap = nv + 1024u;
         d = realloc(d, d_cap * sizeof(float));
+        fr = realloc(fr, d_cap);
     }
-    static float m[16];
-    static uint32_t m_serial;
-    static int m_valid;
-    if (!m_valid || m_serial != g_rs_serial) {
-        mat_mul(g_rs.world, g_rs.view, m);
-        mat_mul(m, g_rs.proj, m);
-        m_serial = g_rs_serial;
-        m_valid = 1;
-    }
+    const float *m = clip_z_column();
     int any = 0;
     for (uint32_t i = 0; i < nv; i++) {
-        d[i] = v[i].x * m[2] + v[i].y * m[6] + v[i].z * m[10] + m[14];
+        d[i] = v[i].x * m[0] + v[i].y * m[1] + v[i].z * m[2] + m[3];
+        fr[i] = d[i] >= 0.0f;
         any |= d[i] < 0.0f;
     }
     if (!any)
         return 0;
     uint32_t n = idx ? ni : nv;
     uint32_t tris = prim == PRIM_TRIANGLES ? n / 3u : (n >= 3u ? n - 2u : 0u);
-    if (tris * 6u > ob_cap) {   /* a clipped triangle yields at most 2 */
-        ob_cap = tris * 6u + 1024u;
+    if (tris * 2u > ob_cap) {   /* a clipped triangle makes at most 2 new vertices */
+        ob_cap = tris * 2u + 1024u;
         ob = realloc(ob, ob_cap * sizeof(RVertex));
     }
-    uint32_t no = 0;
+    if (tris * 6u > oi_cap) {   /* and at most 2 triangles */
+        oi_cap = tris * 6u + 1024u;
+        oi = realloc(oi, oi_cap * sizeof(uint32_t));
+    }
+    uint32_t no = 0, nn = 0;
     for (uint32_t t = 0; t < tris; t++) {
         uint32_t k[3];
         if (prim == PRIM_TRIANGLES) {
@@ -2349,24 +2380,37 @@ static int near_clip_impl(int prim, const RVertex *v, uint32_t nv, const uint16_
             if (vi[j] >= nv)
                 vi[j] = nv - 1u;
         }
-        RVertex poly[4];
+        uint32_t f = fr[vi[0]] | (uint32_t)fr[vi[1]] << 1 | (uint32_t)fr[vi[2]] << 2;
+        if (f == 7u) {          /* in front: as is */
+            oi[no++] = vi[0];
+            oi[no++] = vi[1];
+            oi[no++] = vi[2];
+            continue;
+        }
+        if (f == 0u)            /* behind */
+            continue;
+        uint32_t poly[4];
         int np = 0;
         for (int j = 0; j < 3; j++) {
             uint32_t a = vi[j], b = vi[(j + 1) % 3];
-            float da = d[a], db = d[b];
-            if (da >= 0.0f)
-                poly[np++] = v[a];
-            if ((da >= 0.0f) != (db >= 0.0f))
-                poly[np++] = nc_lerp(&v[a], &v[b], da / (da - db));
+            if (fr[a])
+                poly[np++] = a;
+            if (fr[a] != fr[b]) {
+                float da = d[a], db = d[b];
+                ob[nn] = nc_lerp(&v[a], &v[b], da / (da - db));
+                poly[np++] = nv + nn++;
+            }
         }
         for (int j = 1; j + 1 < np; j++) {
-            ob[no++] = poly[0];
-            ob[no++] = poly[j];
-            ob[no++] = poly[j + 1];
+            oi[no++] = poly[0];
+            oi[no++] = poly[j];
+            oi[no++] = poly[j + 1];
         }
     }
-    *out = ob;
-    *nout = no;
+    *out_v = ob;
+    *nnew = nn;
+    *out_idx = oi;
+    *nidx = no;
     return 1;
 }
 #endif
@@ -2392,19 +2436,11 @@ static int bounds_in_front(void)
 {
     if (!bounds_valid)
         return 0;
-    static float m[16];
-    static uint32_t m_serial;
-    static int m_valid;
-    if (!m_valid || m_serial != g_rs_serial) {
-        mat_mul(g_rs.world, g_rs.view, m);
-        mat_mul(m, g_rs.proj, m);
-        m_serial = g_rs_serial;
-        m_valid = 1;
-    }
+    const float *m = clip_z_column();
     for (int c = 0; c < 8; c++) {
         float x = (c & 1) ? bounds_hi[0] : bounds_lo[0], y = (c & 2) ? bounds_hi[1] : bounds_lo[1];
         float z = (c & 4) ? bounds_hi[2] : bounds_lo[2];
-        if (x * m[2] + y * m[6] + z * m[10] + m[14] < 0.0f)
+        if (x * m[0] + y * m[1] + z * m[2] + m[3] < 0.0f)
             return 0;
     }
     return 1;
@@ -2461,31 +2497,61 @@ static void batch_draw_impl(int prim, const RVertex *v, uint32_t nv, const uint1
         return;
     if ((diag_mode == DIAG_NO_SCREEN && pretransformed) || (diag_mode == DIAG_NO_3D && !pretransformed))
         return;
-#if defined(__vita__)
-    if (!pretransformed && diag_mode != DIAG_NO_NEARCLIP && !bounds_in_front() &&
-        (prim == PRIM_TRIANGLES || prim == PRIM_TRIANGLE_STRIP || prim == PRIM_TRIANGLE_FAN)) {
-        RVertex *cv;
-        uint32_t cn;
-        if (near_clip(prim, v, nv, idx, ni, &cv, &cn)) {
-            if (!cn)
-                return;
-            prim = PRIM_TRIANGLES;
-            v = cv;
-            nv = cn;
-            idx = NULL;
-            ni = 0;
-        }
-    }
-#endif
     if (batch_enabled < 0) {
         const char *e = getenv("IGI_BATCH");
         batch_enabled = !(e && e[0] == '0');
     }
+    /* Vertices made by near-plane clipping, drawn after the draw's own (nex of them). */
+    const RVertex *ex = NULL;
+    uint32_t nex = 0;
+#if defined(__vita__)
+    if (!pretransformed && diag_mode != DIAG_NO_NEARCLIP && !bounds_in_front() &&
+        (prim == PRIM_TRIANGLES || prim == PRIM_TRIANGLE_STRIP || prim == PRIM_TRIANGLE_FAN)) {
+        RVertex *cv;
+        const uint32_t *ci;
+        uint32_t cn, cni;
+        if (near_clip(prim, v, nv, idx, ni, &cv, &cn, &ci, &cni)) {
+            if (!cni)
+                return;
+            if (batch_enabled && diag_mode != DIAG_NO_BATCH && nv + cn <= BATCH_MAX_V && cni <= BATCH_MAX_I &&
+                g_trace_next_frame != 2) {
+                /* Indexed: the draw's vertices plus the new ones. */
+                static uint16_t *ci16;
+                static uint32_t ci16_cap;
+                if (cni > ci16_cap) {
+                    ci16_cap = cni + 1024u;
+                    ci16 = realloc(ci16, ci16_cap * sizeof(uint16_t));
+                }
+                for (uint32_t i = 0; i < cni; i++)
+                    ci16[i] = (uint16_t)ci[i];
+                ex = cv;
+                nex = cn;
+                idx = ci16;
+                ni = cni;
+            } else {
+                /* A plain triangle list, as the clipper's output used to be. */
+                static RVertex *flat;
+                static uint32_t flat_cap;
+                if (cni > flat_cap) {
+                    flat_cap = cni + 1024u;
+                    flat = realloc(flat, flat_cap * sizeof(RVertex));
+                }
+                for (uint32_t i = 0; i < cni; i++)
+                    flat[i] = ci[i] < nv ? v[ci[i]] : cv[ci[i] - nv];
+                v = flat;
+                nv = cni;
+                idx = NULL;
+                ni = 0;
+            }
+            prim = PRIM_TRIANGLES;
+        }
+    }
+#endif
     uint32_t n = idx ? ni : nv;
     int batchable = batch_enabled && diag_mode != DIAG_NO_BATCH &&
                     (prim == PRIM_TRIANGLES || prim == PRIM_TRIANGLE_STRIP || prim == PRIM_TRIANGLE_FAN);
     uint32_t tris = prim == PRIM_TRIANGLES ? n / 3u : (n >= 3u ? n - 2u : 0u);
-    if (!batchable || nv > BATCH_MAX_V || tris * 3u > BATCH_MAX_I || g_trace_next_frame == 2) {
+    if (!nex && (!batchable || nv > BATCH_MAX_V || tris * 3u > BATCH_MAX_I || g_trace_next_frame == 2)) {
         render_flush();
         draw_now(prim, v, nv, idx, ni, pretransformed, has_normal, has_color, has_spec, ntex);
         return;
@@ -2494,7 +2560,7 @@ static void batch_draw_impl(int prim, const RVertex *v, uint32_t nv, const uint1
         return;
     const Layout *bl = &batch_layout;
     if (batch_active &&
-        (batch_nv + nv > vtx_cap || batch_ni + tris * 3u > idx_cap || bl->pretransformed != pretransformed ||
+        (batch_nv + nv + nex > vtx_cap || batch_ni + tris * 3u > idx_cap || bl->pretransformed != pretransformed ||
          bl->has_normal != has_normal || bl->has_color != has_color || bl->has_spec != has_spec || bl->ntex != ntex ||
          g_rs_serial != batch_serial))
         render_flush();
@@ -2502,13 +2568,15 @@ static void batch_draw_impl(int prim, const RVertex *v, uint32_t nv, const uint1
         batch_active = 1;
         batch_serial = g_rs_serial;
         layout_init(&batch_layout, pretransformed, has_normal, has_color, has_spec, ntex);
-        stream_begin(&batch_layout, nv, tris * 3u);
+        stream_begin(&batch_layout, nv + nex, tris * 3u);
         batch_nv = batch_ni = 0;
     }
     /* Same state as the batch start, so the layout (active stages, uv sets) holds. */
     uint32_t base = batch_nv;
     pack_vertices(&batch_layout, v, nv, base);
-    batch_nv += nv;
+    if (nex)
+        pack_vertices(&batch_layout, ex, nex, base + nv);
+    batch_nv += nv + nex;
     append_indices(prim, idx, tris, base);
 }
 
@@ -2605,12 +2673,10 @@ static VBGL *vb_upload(void **slot, uint32_t gen, const RVertex *v, uint32_t cou
 /* True when every corner of the bounds is in front of the near plane (clip z >= 0). */
 static int vb_in_front(const VBGL *g)
 {
-    float m[16];
-    mat_mul(g_rs.world, g_rs.view, m);
-    mat_mul(m, g_rs.proj, m);
+    const float *m = clip_z_column();
     for (int c = 0; c < 8; c++) {
         float x = (c & 1) ? g->hi[0] : g->lo[0], y = (c & 2) ? g->hi[1] : g->lo[1], z = (c & 4) ? g->hi[2] : g->lo[2];
-        if (x * m[2] + y * m[6] + z * m[10] + m[14] < 0.0f)
+        if (x * m[0] + y * m[1] + z * m[2] + m[3] < 0.0f)
             return 0;
     }
     return 1;
@@ -2672,16 +2738,49 @@ static uint32_t d3dcolor_rgba(uint32_t argb)
     return (argb & 0xFF00FF00u) | ((argb & 0xFFu) << 16) | ((argb >> 16) & 0xFFu);
 }
 
-/* Same as pack_vertices, reading the game's vertex layout directly. */
-static void pack_guest(const Layout *L, const GuestVerts *g, uint32_t nv, uint32_t base)
+/* Same as pack_vertices, reading the game's vertex layout directly, into d0. */
+static void pack_guest_to(uint8_t *d0, const Layout *L, const GuestVerts *g, uint32_t nv)
 {
     PROF_SECTION(PROF_H_PACK);
     const uint8_t *vb = g->base;
     const uint32_t stride = g->stride;
     const uint32_t *src = g->src;
     const uint32_t st = L->stride;
-    uint8_t *d0 = vtx + (size_t)base * st;
     uint8_t *d = d0;
+    /* The terrain's layout (pre-transformed, colour, desktop fog factor, one
+     * texture coordinate set): one pass over the vertices. */
+    const uint32_t fog = L->use_fog ? 1u : 0u;
+    int one_uv = L->uv_src[0] == 0 && g->uv_bytes[0] == 8u && L->off_uv[0] == 20u + 4u * fog;
+    for (int s = 1; s < MAX_STAGES; s++)
+        one_uv &= L->uv_src[s] < 0;
+    if (L->pretransformed && !src && L->use_color && g->has_color && !L->has_normal && L->off_col == 16u &&
+        (!fog || (g->has_spec && L->off_fog == 20u)) && st == 28u + 4u * fog && one_uv &&
+        (((uintptr_t)vb | stride | g->uv_off[0]) & 3u) == 0) {
+        const uint32_t col = g->col_off, spec = g->spec_off, uv = g->uv_off[0];
+        float *p = (float *)d;
+        for (uint32_t i = 0; i < nv; i++, p += 7u + fog, vb += stride) {
+            uint32_t c;
+            memcpy(&c, vb + col, 4);
+            /* Word-aligned here: direct float loads (memcpy into an array went
+             * through the stack, which cost more than the division). */
+            const float *v = (const float *)(const void *)vb, *t = (const float *)(const void *)(vb + uv);
+            float w = v[3] != 0.0f ? 1.0f / v[3] : 1.0f;
+            p[0] = v[0] * w;
+            p[1] = v[1] * w;
+            p[2] = v[2] * w;
+            p[3] = w;
+            ((uint32_t *)p)[4] = d3dcolor_rgba(c);
+            if (fog) {
+                uint32_t s;
+                memcpy(&s, vb + spec, 4);
+                p[5] = (float)(s >> 24) * (1.0f / 255.0f);
+            }
+            p[5 + fog] = t[0];
+            p[6 + fog] = t[1];
+        }
+        PROF_SECTION_END;
+        return;
+    }
     if (L->pretransformed) {
         for (uint32_t i = 0; i < nv; i++, d += st) {
             float v[4];
@@ -2745,6 +2844,11 @@ static void pack_guest(const Layout *L, const GuestVerts *g, uint32_t nv, uint32
     PROF_SECTION_END;
 }
 
+static void pack_guest(const Layout *L, const GuestVerts *g, uint32_t nv, uint32_t base)
+{
+    pack_guest_to(vtx + (size_t)base * L->stride, L, g, nv);
+}
+
 int render_draw_guest(int prim, const GuestVerts *g, uint32_t nv, const uint16_t *idx, uint32_t ni)
 {
     if (!nv || g_trace_next_frame == 2 || diag_mode == DIAG_NO_3D || diag_mode == DIAG_NO_BATCH ||
@@ -2779,20 +2883,12 @@ int render_draw_guest(int prim, const GuestVerts *g, uint32_t nv, const uint16_t
     if (!g->pretransformed && diag_mode != DIAG_NO_NEARCLIP) {
         /* Any vertex behind the near plane: the general path clips on the CPU. */
         PROF_SECTION(PROF_H_NEARCLIP);
-        static float m[16];
-        static uint32_t m_serial;
-        static int m_valid;
-        if (!m_valid || m_serial != g_rs_serial) {
-            mat_mul(g_rs.world, g_rs.view, m);
-            mat_mul(m, g_rs.proj, m);
-            m_serial = g_rs_serial;
-            m_valid = 1;
-        }
+        const float *m = clip_z_column();
         int behind = 0;
         for (uint32_t i = 0; i < nv; i++) {
             float x[3];
             memcpy(x, g->base + (size_t)(g->src ? g->src[i] : i) * g->stride, 12);
-            behind |= x[0] * m[2] + x[1] * m[6] + x[2] * m[10] + m[14] < 0.0f;
+            behind |= x[0] * m[0] + x[1] * m[1] + x[2] * m[2] + m[3] < 0.0f;
         }
         PROF_SECTION_END;
         if (behind)
@@ -2821,6 +2917,181 @@ int render_draw_guest(int prim, const GuestVerts *g, uint32_t nv, const uint16_t
         batch_nv += nv;
         append_indices(prim, idx, tris, base);
     }
+    PROF_SECTION_END;
+    perf.draw_us += fine_now() - t0;
+    perf.draws++;
+    return 1;
+}
+
+/* ---- pre-transformed vertex buffers drawn several times per lock -----------
+ * The terrain fills one pre-transformed vertex buffer per frame and draws it
+ * with one indexed draw per texture batch, each referencing vertices spread
+ * over the whole buffer. Rather than scanning, compacting and packing the
+ * referenced vertices for every draw, the range is packed once per lock (and
+ * layout) and every draw only copies its indices. */
+static struct {
+    uint32_t lock_id, start, nv, frame;
+    Layout L;
+    uint8_t *data;
+    int valid;
+} dyn;
+#if !defined(__vita__)
+static uint8_t *dyn_heap;
+static size_t dyn_heap_bytes;
+static uint16_t *dyn_idx_heap;
+static uint32_t dyn_idx_cap;
+#endif
+
+static int layout_equal(const Layout *a, const Layout *b)
+{
+    const uint32_t *x = (const uint32_t *)(const void *)a, *y = (const uint32_t *)(const void *)b;
+    uint32_t d = 0;
+    for (size_t i = 0; i < sizeof(Layout) / 4u; i++)
+        d |= x[i] ^ y[i];
+    return d == 0;
+}
+
+/* Copies n indices and returns the largest. */
+static uint32_t copy_indices_max(uint16_t *d, const uint16_t *s, uint32_t n)
+{
+    uint32_t i = 0, mx = 0;
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+    uint16x8_t m = vdupq_n_u16(0);
+    for (; i + 8u <= n; i += 8u) {
+        uint16x8_t v = vld1q_u16(s + i);
+        vst1q_u16(d + i, v);
+        m = vmaxq_u16(m, v);
+    }
+    uint16x4_t m4 = vmax_u16(vget_low_u16(m), vget_high_u16(m));
+    m4 = vpmax_u16(m4, m4);
+    m4 = vpmax_u16(m4, m4);
+    mx = vget_lane_u16(m4, 0);
+#endif
+    for (; i < n; i++) {
+        d[i] = s[i];
+        mx = s[i] > mx ? s[i] : mx;
+    }
+    return mx;
+}
+
+/* Packs the range for this lock and layout unless that is already done; returns 0
+ * when there is no room. Vertices no draw references may hold anything. */
+static int dyn_prepare(uint32_t lock_id, uint32_t start, const GuestVerts *g, uint32_t nv, const Layout *L)
+{
+    uint32_t frame = g_frame_serial;
+#if defined(__vita__)
+    if (!arena_ready())
+        return 0;
+    frame = arena_frame;
+#endif
+    if (dyn.valid && dyn.lock_id == lock_id && dyn.nv == nv && dyn.frame == frame && dyn.start == start &&
+        layout_equal(&dyn.L, L))
+        return 1;
+    dyn.valid = 0;
+#if defined(__vita__)
+    uint32_t vpos = (arena_vpos + 15u) & ~15u;
+    if (vpos > ARENA_VTX_BYTES || (ARENA_VTX_BYTES - vpos) / L->stride < nv)
+        return 0;
+    dyn.data = arena_vtx[arena_seg] + vpos;
+    arena_vpos = vpos + nv * L->stride;
+#else
+    if ((size_t)nv * L->stride > dyn_heap_bytes) {
+        dyn_heap_bytes = (size_t)nv * L->stride;
+        free(dyn_heap);
+        dyn_heap = malloc(dyn_heap_bytes);
+    }
+    dyn.data = dyn_heap;
+#endif
+    pack_guest_to(dyn.data, L, g, nv);
+    pc_frame[PC_VERTS] += nv;
+    dyn.lock_id = lock_id;
+    dyn.start = start;
+    dyn.nv = nv;
+    dyn.frame = frame;
+    dyn.L = *L;
+    dyn.valid = 1;
+    return 1;
+}
+
+int render_draw_dynvb(uint32_t lock_id, uint32_t start, const GuestVerts *g, uint32_t nv, int prim,
+                      const uint16_t *idx, uint32_t ni)
+{
+    if (!nv || !ni || nv > 65536u || prim != PRIM_TRIANGLES || !g->pretransformed || g->src ||
+        ((uintptr_t)idx & 1u) || g_trace_next_frame == 2 || diag_mode != DIAG_NONE)
+        return 0;
+    if (batch_enabled < 0) {
+        const char *e = getenv("IGI_BATCH");
+        batch_enabled = !(e && e[0] == '0');
+    }
+    if (!batch_enabled || ni < 3u)
+        return 0;
+    /* rhw_invisible drops a draw whose vertices all have rhw below 1e-6: one
+     * vertex of the first triangle above it shows the draw is kept, otherwise
+     * the general path decides. */
+    int visible = 0;
+    for (int k = 0; k < 3; k++) {
+        float w;
+        if (idx[k] >= nv)
+            return 0;
+        memcpy(&w, g->base + (size_t)idx[k] * g->stride + 12u, 4);
+        visible |= w >= 1e-6f;
+    }
+    if (!visible)
+        return 0;
+    /* Whatever is batched comes first, and its storage must be closed before
+     * the arena is used here. */
+    render_flush();
+    uint64_t t0 = fine_now();
+    PROF_SECTION(PROF_H_BATCH);
+    Layout L;
+    layout_init(&L, 1, g->has_normal, g->has_color, g->has_spec, g->ntex);
+    if (!dyn_prepare(lock_id, start, g, nv, &L)) {
+        PROF_SECTION_END;
+        return 0;
+    }
+    uint16_t *ip;
+#if defined(__vita__)
+    uint32_t ibytes = (ni * 2u + 3u) & ~3u;
+    if (ibytes > ARENA_IDX_BYTES - arena_ipos) {
+        PROF_SECTION_END;
+        return 0;
+    }
+    ip = arena_idx[arena_seg] + arena_ipos / 2u;
+#else
+    if (ni > dyn_idx_cap) {
+        dyn_idx_cap = ni + 4096u;
+        free(dyn_idx_heap);
+        dyn_idx_heap = malloc(dyn_idx_cap * sizeof(uint16_t));
+    }
+    ip = dyn_idx_heap;
+#endif
+    uint32_t tris = ni / 3u;
+    if (!tris || copy_indices_max(ip, idx, tris * 3u) >= nv) {
+        PROF_SECTION_END;
+        return 0;   /* the general path clamps out-of-range indices */
+    }
+    DrawArrays A;
+    memset(&A, 0, sizeof(A));
+    A.stride = (int)L.stride;
+    uintptr_t b = (uintptr_t)dyn.data;
+#if defined(__vita__)
+    arena_ipos += ibytes;
+    glBindBuffer(GL_ARRAY_BUFFER, arena_vbo);
+    vglBufferData(GL_ARRAY_BUFFER, dyn.data);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, arena_ibo);
+    vglBufferData(GL_ELEMENT_ARRAY_BUFFER, ip);
+    A.vbo = arena_vbo;
+    A.ibo = arena_ibo;
+    b = 0;
+#endif
+    A.pos = (const void *)b;
+    A.col = (const void *)(b + L.off_col);
+    A.nrm = (const void *)(b + L.off_nrm);
+    A.fog = (const void *)(b + L.off_fog);
+    for (int s = 0; s < MAX_STAGES; s++)
+        A.uv[s] = (const void *)(b + L.off_uv[s]);
+    submit_arrays(PRIM_TRIANGLES, &L, nv, ip, tris * 3u, &A);
+    pc_frame[PC_VERTS] -= nv;   /* counted once, when packed */
     PROF_SECTION_END;
     perf.draw_us += fine_now() - t0;
     perf.draws++;

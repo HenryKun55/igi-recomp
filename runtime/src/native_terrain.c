@@ -192,6 +192,12 @@ static inline float rdf(const uint8_t *p) { float v; memcpy(&v, p, 4); return v;
 static inline uint32_t rd32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
 static inline float gf(uint32_t a) { return rdf(g_mem + a); }
 static inline uint32_t fist(Ctx *c, double v) { return (uint32_t)rt_fist64(c, v); }
+/* fist of a value known to be in [0, 2^31) (no NaN): the range check is left out
+ * when truncating, the game's mode while it draws. */
+static inline uint32_t fist_u31(Ctx *c, double v)
+{
+    return (c->fcw & 0x0C00u) == 0x0C00u ? (uint32_t)(int32_t)v : fist(c, v);
+}
 
 static void note_stale(void)
 {
@@ -592,6 +598,49 @@ static void make_clip_vert(const Frame *f, const PatchWork *w, uint32_t i, ClipV
     cv->attr[5] = (float)((double)(p->specular >> 24) * sf);
 }
 
+/* Fog byte of a vertex: fist(255 / 2^e) with the guest's x87 exp idiom,
+ * fog = 1 / fscale(f2xm1(e - round(e)) + 1, round(e)), clamped at zero.
+ *
+ * Only the integer reaches the game, so the common case avoids the library
+ * exp2 and the division: 2^-e from a polynomial (relative error below 1e-11 for
+ * e in [0, 1000)) gives 255 * fog within 1e-8 of the guest's value, whose own
+ * error against the exact result is a few ulp. The estimate goes to 20-bit
+ * fixed point with one truncating conversion (plus one half for round to
+ * nearest); when it is more than 4 / 2^20 away from the next rounding boundary,
+ * its integer part is the guest's result (the guest's value is positive, so
+ * zero has no lower boundary when truncating). Otherwise, in other rounding
+ * modes, or outside that range (-0, NaN included: checked on the bits, without
+ * floating-point compares), the guest's computation runs as is. */
+static uint32_t fog_byte(Ctx *c, double e)
+{
+    uint64_t eb;
+    memcpy(&eb, &e, 8);
+    uint32_t mode = c->fcw & 0x0C00u;
+    if ((uint32_t)(eb >> 32) < 0x408F4000u && (mode == 0x0C00u || mode == 0u)) {   /* +0 <= e < 1000 */
+        int32_t n = (int32_t)(e + 0.5);
+        double r = (double)n - e;               /* 2^-e = 2^r * 2^-n, |r| <= 0.5 */
+        /* 2^r = sum (r ln 2)^k / k!, k <= 9 */
+        double p = 1.0 + r * (6.9314718055994531e-01 + r * (2.4022650695910071e-01 +
+                   r * (5.5504108664821580e-02 + r * (9.6181291076284772e-03 + r * (1.3333558146428443e-03 +
+                   r * (1.5403530393381609e-04 + r * (1.5252733804059841e-05 + r * (1.3215486790144307e-06 +
+                   r * 1.0178086009239699e-07))))))));
+        uint64_t b = (uint64_t)(1023 - n) << 52;
+        double s;
+        memcpy(&s, &b, 8);
+        int32_t q = (int32_t)(p * s * (255.0 * 1048576.0));   /* 255 * fog * 2^20, below 2^28 */
+        if (mode == 0u)
+            q += 0x80000;
+        uint32_t frac = (uint32_t)q & 0xFFFFFu;
+        if ((frac >= 4u || q < 0x100000) && frac < 0xFFFFBu)
+            return (uint32_t)(q >> 20);
+    }
+    double n = rt_fround(c, e);
+    double fog = 1.0 / rt_fscale((exp2(e - n) - 1.0) + 1.0, n);
+    if (BELOW(fog, 0.0))
+        fog = 0.0;
+    return fist(c, fog * 255.0);
+}
+
 /* Screen position, depth values, fog and outcode of a view-space vertex. */
 static uint8_t project_vertex(const Frame *f, TLVertex *o, float vx, float vy, double depth, int *behind)
 {
@@ -615,12 +664,7 @@ static uint8_t project_vertex(const Frame *f, TLVertex *o, float vx, float vy, d
     o->rhw = (float)((double)invf * f->rhw_scale);
     o->sz = (float)((double)invf * f->z_scale + f->z_offset);
     /* fog = 1 / 2^(depth * k * log2(e)), the x87 exp idiom */
-    double e = (double)vz * f->fog_depth * f->fog_density * LOG2E;
-    double n = rt_fround(c, e);
-    double fog = 1.0 / rt_fscale((exp2(e - n) - 1.0) + 1.0, n);
-    if (BELOW(fog, 0.0))
-        fog = 0.0;
-    o->specular = fist(c, fog * 255.0) << 24;
+    o->specular = fog_byte(c, (double)vz * f->fog_depth * f->fog_density * LOG2E) << 24;
     return (uint8_t)((uint32_t)BELOW(sx, f->left) | (uint32_t)BELOW(sy, f->top) << 1 |
                      (uint32_t)ABOVE(sx, f->right) << 2 | (uint32_t)ABOVE((double)o->sy, f->bottom) << 3);
 }
@@ -760,8 +804,8 @@ static void draw_patch(const Frame *f, PatchWork *w, uint32_t patch)
         double omt = 1.0 - t;
         z = (float)(omt * dzm + z);
         double a = omt * 255.0;
-        uint32_t g1 = grey3(fist(c, a));
-        uint32_t g2 = grey3(fist(c, a * omt));
+        uint32_t g1 = grey3(fist_u31(c, a));           /* t, omt in [0, 1] */
+        uint32_t g2 = grey3(fist_u31(c, a * omt));
         uint32_t inv1 = 0xFFFFFFu - g1;
 
         double zc = (double)z + f->ncam[2];

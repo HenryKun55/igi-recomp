@@ -759,8 +759,22 @@ static uint64_t now_us(void) { return sceKernelGetProcessTimeWide(); }
 #else
 static uint64_t t0_us;
 
+/* IGI_FAKE_CLOCK=N (debug): the clock advances N microseconds per query instead
+ * of following real time, so a run (e.g. the benchmark with IGI_BENCH_SHOT) plays
+ * the same frames every time and screenshots of two builds can be compared. */
+static int fake_clock = -1;
+static uint64_t fake_us, fake_step;
+
 static uint64_t now_us(void)
 {
+    if (fake_clock < 0) {
+        const char *e = getenv("IGI_FAKE_CLOCK");
+        fake_step = e ? strtoull(e, NULL, 10) : 0u;
+        fake_clock = fake_step != 0;
+        fake_us = 1000000u;
+    }
+    if (fake_clock)
+        return fake_us += fake_step;
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
     return (uint64_t)t.tv_sec * 1000000ull + (uint64_t)t.tv_nsec / 1000ull;
