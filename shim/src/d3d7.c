@@ -156,6 +156,9 @@ typedef struct VertexBuffer {
     float lo[3], hi[3];        /* bounds of the decoded copy */
     uint32_t lock_id;          /* unique id of the last writable Lock (all buffers) */
     uint32_t drawn_lock, drawn_start, drawn_nv;   /* lock_id and range of the last indexed draw */
+    uint32_t drawn_count;      /* indexed draws in a row of that lock and range */
+    int multi_drawn;           /* the previous lock's contents were drawn so at least twice */
+    struct RangeBounds *ranges;   /* bounds of drawn ranges (set_range_bounds) */
 } VertexBuffer;
 
 static uint32_t vb_lock_serial;
@@ -747,6 +750,54 @@ static RVertex *gather(const RVertex *cache, const uint32_t *src, uint32_t count
 static void draw_indexed(uint32_t prim, uint32_t fvf, uint32_t verts, uint32_t stride, uint32_t nv,
                          uint32_t indices, uint32_t ni, RVertex *cache, const Decoded *cd);
 
+/* Bounds of vertex ranges of a decoded buffer, remembered per range: static
+ * geometry draws the same ranges every frame, and bounds that fit the draw
+ * (rather than the whole buffer) usually show it in front of the near plane,
+ * which spares the renderer its per-vertex depth test. */
+typedef struct RangeBounds {
+    uint32_t first, count, gen;
+    float lo[3], hi[3];
+} RangeBounds;
+#define RANGE_SLOTS 1024u
+
+static VertexBuffer *draw_vb;    /* buffer of the DrawPrimitiveVB call in progress (decoded copy in use) */
+static uint32_t draw_vb_start;
+
+/* Sets the renderer's bounds to those of vertices first .. first + count - 1 of
+ * the draw's decoded vertices (relative to its start vertex). */
+static void set_range_bounds(uint32_t first, uint32_t count)
+{
+    VertexBuffer *vb = draw_vb;
+    if (!vb)
+        return;
+    first += draw_vb_start;
+    if (!count || first + count > vb->count)
+        return;
+    if (!vb->ranges) {
+        vb->ranges = calloc(RANGE_SLOTS, sizeof(RangeBounds));
+        if (!vb->ranges)
+            return;
+    }
+    RangeBounds *e = &vb->ranges[((first * 2654435761u) ^ (count * 40503u)) >> 22];
+    if (e->gen != vb->cache_gen || e->first != first || e->count != count) {
+        for (int k = 0; k < 3; k++) {
+            e->lo[k] = 1e30f;
+            e->hi[k] = -1e30f;
+        }
+        for (uint32_t i = first; i < first + count; i++) {
+            const float *p = &vb->cache[i].x;
+            for (int k = 0; k < 3; k++) {
+                e->lo[k] = p[k] < e->lo[k] ? p[k] : e->lo[k];
+                e->hi[k] = p[k] > e->hi[k] ? p[k] : e->hi[k];
+            }
+        }
+        e->first = first;
+        e->count = count;
+        e->gen = vb->cache_gen;
+    }
+    render_set_bounds(e->lo, e->hi);
+}
+
 /* `cache`, when set, is the decoded copy of the vertices at `verts` (with `cd` its format). */
 static void draw(uint32_t prim, uint32_t fvf, uint32_t verts, uint32_t stride, uint32_t nv,
                  uint32_t indices, uint32_t ni, RVertex *cache, const Decoded *cd)
@@ -791,6 +842,7 @@ static void draw_indexed(uint32_t prim, uint32_t fvf, uint32_t verts, uint32_t s
                 return;
             }
             d = *cd;
+            set_range_bounds(lo, range);
             render_draw((int)prim, cache + lo, range, rebased, ni, d.pretransformed, d.has_normal, d.has_color,
                         d.has_spec, d.ntex);
             return;
@@ -831,6 +883,7 @@ static void draw_indexed(uint32_t prim, uint32_t fvf, uint32_t verts, uint32_t s
             return;
         }
         d = *cd;
+        set_range_bounds(lo, range);
         render_draw((int)prim, gather(cache + lo, used, nu), nu, rebased, ni, d.pretransformed, d.has_normal,
                     d.has_color, d.has_spec, d.ntex);
         return;
@@ -840,6 +893,7 @@ static void draw_indexed(uint32_t prim, uint32_t fvf, uint32_t verts, uint32_t s
         return;
     }
     d = *cd;
+    set_range_bounds(0, nv);
     render_draw((int)prim, cache, nv, NULL, 0, d.pretransformed, d.has_normal, d.has_color, d.has_spec, d.ntex);
 }
 
@@ -904,7 +958,10 @@ static void dev_DrawPrimitiveVB(Ctx *c)
     }
     if (cache)
         render_set_bounds(vb->lo, vb->hi);
+    draw_vb = cache ? vb : NULL;
+    draw_vb_start = start;
     draw(prim, vb->fvf, vb->mem + start * vb->stride, vb->stride, n, 0, 0, cache ? cache + start : NULL, &d);
+    draw_vb = NULL;
     render_set_bounds(NULL, NULL);
     stdcall_ret(c, D3D_OK, 6);
 }
@@ -924,10 +981,20 @@ static void dev_DrawIndexedPrimitiveVB(Ctx *c)
         return;
     }
     /* A pre-transformed buffer filled for this frame and drawn again over the
-     * same range (the terrain: one draw per texture batch): packed once. */
+     * same range (the terrain: one draw per texture batch): packed once. A
+     * buffer whose previous contents were drawn that way takes this path from
+     * its first draw. */
     if (!cache && idx && ni && vb->lock_id && (vb->fvf & 0x0Eu) == 0x4u && start + nv <= vb->count &&
         !(!g_rs.stage[0].texture && igi_skip_untextured_2d())) {
-        if (vb->drawn_lock == vb->lock_id && vb->drawn_start == start && vb->drawn_nv == nv) {
+        int first = vb->drawn_lock != vb->lock_id;
+        int same = !first && vb->drawn_start == start && vb->drawn_nv == nv;
+        if (first)
+            vb->multi_drawn = vb->drawn_count >= 2u;
+        vb->drawn_count = same ? vb->drawn_count + 1u : 1u;
+        vb->drawn_lock = vb->lock_id;
+        vb->drawn_start = start;
+        vb->drawn_nv = nv;
+        if (same || (first && vb->multi_drawn)) {
             GuestVerts g;
             guest_verts(vb->fvf, vb->mem + start * vb->stride, vb->stride, NULL, &g);
             if (render_draw_dynvb(vb->lock_id, start, &g, nv, (int)prim, (const uint16_t *)gptr(idx), ni)) {
@@ -935,13 +1002,13 @@ static void dev_DrawIndexedPrimitiveVB(Ctx *c)
                 return;
             }
         }
-        vb->drawn_lock = vb->lock_id;
-        vb->drawn_start = start;
-        vb->drawn_nv = nv;
     }
     if (cache)
         render_set_bounds(vb->lo, vb->hi);
+    draw_vb = cache ? vb : NULL;
+    draw_vb_start = start;
     draw(prim, vb->fvf, vb->mem + start * vb->stride, vb->stride, nv, idx, ni, cache ? cache + start : NULL, &d);
+    draw_vb = NULL;
     render_set_bounds(NULL, NULL);
     stdcall_ret(c, D3D_OK, 8);
 }
@@ -1056,6 +1123,7 @@ static void vb_Release(Ctx *c)
     if (n <= 1u) {
         heap_free(vb->mem);
         free(vb->cache);
+        free(vb->ranges);
         render_vb_release(&vb->gl);
         free(vb);
     }
