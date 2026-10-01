@@ -92,6 +92,10 @@ NATIVE = {
     0x004D14E0: ('rt_native_terrain_collect', [
         (0x004D14E0, 4181, '539333ef86b2329a05cbc5d9c8c72010b388de9a'),
     ]),
+    # IMA ADPCM decoder (runtime/src/native_adpcm.c).
+    0x00496280: ('rt_native_adpcm_decode', [
+        (0x00496280, 409, 'a4e5b69d2e3cf1c83797f92ee34bd5b9512949ae'),
+    ]),
 }
 
 # Instruction emitters produce C with a few tokens that are expanded per code copy

@@ -330,7 +330,46 @@ def synth_tree(seed, bases):
     return st
 
 
-SYNTH = {0x0049B700: synth_skin, 0x004A1570: synth_mesh, 0x004D14E0: synth_tree}
+def synth_adpcm(seed, bases):
+    """0x496280: random input bytes, frame counts (none, one, odd, long), channel
+    counts (the guest's 1 and 2, sometimes 0 or negative), predictors, step
+    indices (sometimes out of range), nibble flag, stale frame; sometimes the
+    output overlapping the input, the state or the stack."""
+    rnd = random.Random(seed)
+    m = terrainbench.Mem()
+    al = terrainbench.Alloc(0x02100000)
+    ch = rnd.choice([1, 2, 2, 1, 2, rnd.choice([0, -1])])
+    count = rnd.choice([0, 1, 2, 3, rnd.randrange(1, 64), rnd.randrange(64, 3000), -rnd.randrange(1, 5)])
+    nin = max(0, count) * max(1, abs(ch)) // 2 + 4
+    src = al(nin + 16)
+    m.raw(src, bytes(rnd.getrandbits(8) for _ in range(nin)))
+    nout = 2 * max(0, count) * max(1, abs(ch)) + 16
+    out = al(nout + 16)
+    st = al(16)
+    m.raw(st, struct.pack('<H', ch & 0xFFFF))
+    for k in range(2):
+        m.raw(st + 2 + 2 * k, struct.pack('<H', rnd.choice([0, 0x7FFF, 0x8000, rnd.getrandbits(16)])))
+        idx = rnd.choice([0, 88, rnd.randrange(0, 89), rnd.randrange(0, 89)] +
+                         ([rnd.choice([89, 0xFFFF, 200])] if rnd.random() < 0.1 else []))
+        m.raw(st + 6 + 2 * k, struct.pack('<H', idx))
+    m.raw(st + 10, bytes([rnd.choice([0, 1, 0x80])]))
+    r = rnd.random()
+    if r < 0.03:
+        out = src + rnd.randrange(0, 8)
+    elif r < 0.05:
+        out = st + rnd.choice([8, 10])
+    elif r < 0.06:
+        out = GSTACK - 0x2A - 2 * max(0, count) * max(1, abs(ch))   # the last sample on the saved edi
+    for off in range(-0x40, 0, 4):
+        m.u32(GSTACK + off, rnd.getrandbits(32))
+    for k, a in enumerate((0xFDFDFD00, src, out, count & 0xFFFFFFFF, st)):
+        m.u32(GSTACK + 4 * k, a)
+    regs = [rnd.getrandbits(32) for _ in range(8)]
+    regs[4] = GSTACK
+    return State(m, GSTACK, regs, {})
+
+
+SYNTH = {0x0049B700: synth_skin, 0x004A1570: synth_mesh, 0x004D14E0: synth_tree, 0x00496280: synth_adpcm}
 
 
 # ---- running -----------------------------------------------------------------
