@@ -315,9 +315,23 @@ void rt_x87_mismatch(Ctx *c, uint32_t addr, uint32_t expect)
     rt_fatal(c, "x87 stack top %u after the call at %08X, expected %u", c->ftop, addr, expect);
 }
 
+/* Indirect call of a host thunk (rt_dispatch with the registers in the context). */
+static inline uint64_t call_thunk(Ctx *c, uint32_t target, uint32_t esp, uint32_t ecx, uint32_t eax)
+{
+    c->r[0] = eax;
+    c->r[1] = ecx;
+    c->r[4] = esp;
+    rt_dispatch(c, target);
+    return ((uint64_t)c->r[4] << 32) | c->r[0];
+}
+
 uint64_t rt_call_indirect_ic(Ctx *c, uint32_t target, uint32_t esp, uint32_t ecx, uint32_t eax,
                              const GuestFunc **ic)
 {
+    /* Host thunks (COM methods called through vtables) are not in the table:
+     * dispatch them without probing it (a miss walks a whole probe sequence). */
+    if (target - THUNK_BASE < THUNK_MAX * THUNK_STRIDE)
+        return call_thunk(c, target, esp, ecx, eax);
     uint32_t mask = g_guest_func_hash_mask;
     uint32_t i = GUEST_FUNC_HASH(target) & mask;
     for (;;) {
@@ -335,6 +349,8 @@ uint64_t rt_call_indirect_ic(Ctx *c, uint32_t target, uint32_t esp, uint32_t ecx
 
 uint64_t rt_call_indirect(Ctx *c, uint32_t target, uint32_t esp, uint32_t ecx, uint32_t eax)
 {
+    if (target - THUNK_BASE < THUNK_MAX * THUNK_STRIDE)
+        return call_thunk(c, target, esp, ecx, eax);
     uint32_t mask = g_guest_func_hash_mask;
     uint32_t i = GUEST_FUNC_HASH(target) & mask;
     for (;;) {
