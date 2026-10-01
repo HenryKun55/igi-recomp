@@ -51,6 +51,7 @@ GAME_HOOKS = [
     0x00418970,   # UI window render (cutscene window state)
     0x00497700,   # 2D render queue flush (start)
     0x00497860,   # 2D render queue: per-node state setup
+    0x00402820,   # game clock: set the update/render rate (Hz)
 ]
 
 # MSVC CRT setjmp/longjmp: setjmp call sites become host setjmp, and the
