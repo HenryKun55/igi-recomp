@@ -4,6 +4,7 @@
 #include "runtime.h"
 
 #include <stdlib.h>
+#include <string.h>
 
 /* ---- cutscene window ------------------------------------------------------
  * During in-engine cutscenes a UI window (render function 0x418970) sits in
@@ -42,6 +43,32 @@ uint32_t igi_ui_state(void)
     return ui_state;
 }
 
+/* ---- saving the options ---------------------------------------------------
+ * The game writes its settings (pc/config.qvm, via 0x405BD0 "LOCAL:config.qsc")
+ * only at a normal exit; the options screens just change them in memory. On the
+ * Vita the app is closed with the PS button, so settings were never kept. The
+ * port also saves whenever a menu screen closes (the window goes from state 6,
+ * closing, to 0 before the next screen opens), at most once every two seconds. */
+#define WINDOW_STATE_CLOSING 6u
+#define WINDOW_STATE_SWITCH 0u
+uint32_t win32_tick_count(void);   /* shim/src/kernel32.c */
+
+#define GAME_SAVE_CONFIG 0x00405BD0u
+#define GAME_CONFIG_PATH 0x005362F4u   /* "LOCAL:config.qsc" */
+
+static void save_config(Ctx *c)
+{
+    static uint32_t last_ms;
+    uint32_t now = win32_tick_count();
+    if (last_ms && now - last_ms < 2000u)
+        return;
+    last_ms = now;
+    if (memcmp(g_mem + GAME_CONFIG_PATH, "LOCAL:config.qsc", 17) != 0)
+        return;   /* not the expected executable */
+    const uint32_t arg = GAME_CONFIG_PATH;
+    guest_call(c, GAME_SAVE_CONFIG, 1, &arg);
+}
+
 void rt_probe(Ctx *c, uint32_t func)
 {
     uint32_t sp = c->r[4];
@@ -56,6 +83,8 @@ void rt_probe(Ctx *c, uint32_t func)
             log_states = getenv("IGI_STATE_LOG") != NULL;
         if (log_states && (obj != ui_window || state != ui_state))
             rt_log("ui window %08X state %u", obj, state);
+        if (obj == ui_window && ui_state == WINDOW_STATE_CLOSING && state == WINDOW_STATE_SWITCH)
+            save_config(c);   /* a menu screen closed (e.g. leaving the options) */
         ui_window = obj;
         ui_state = state;
         ui_frames = 0;
