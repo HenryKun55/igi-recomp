@@ -81,6 +81,11 @@ void platform_scripted_input(void)
     static uint8_t release_dik;
     static int release_lmb;
     static Uint32 release_at;
+    /* Nothing scripted (left): no clock query. Called on every message poll, at a
+     * rate that follows real time, so a query here would make IGI_FAKE_CLOCK runs
+     * depend on real time (and costs a system call on the Vita). */
+    if ((!script || !*script) && !release_dik && !release_lmb)
+        return;
     Uint32 now = win32_tick_count() - t0;
     static Uint32 dbg;
     static int input_debug = -1;

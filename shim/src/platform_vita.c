@@ -42,6 +42,7 @@ void platform_set_title(const char *title) { (void)title; }
 /* Stop the audio thread (it reads guest memory) before the process goes away. */
 void platform_shutdown(void)
 {
+    render_shutdown();
     SDL_Quit();
     sceKernelExitProcess(0);
 }
@@ -53,12 +54,20 @@ void platform_set_video_mode(int w, int h)
 {
     mode_w = w;
     mode_h = h;
+}
+
+/* On the thread that makes every GL call (see render_queue.c). */
+void platform_gl_init(void)
+{
     if (!gl_ready) {
         /* 8 MiB for immediate-mode/legacy state; textures go to vitaGL's own pools. */
         vglInitExtended(0x800000, SCREEN_W, SCREEN_H, 0x1000000, SCE_GXM_MULTISAMPLE_NONE);
         gl_ready = 1;
     }
 }
+
+void platform_gl_release(void) {}
+void platform_service_main(void) {}
 
 void platform_get_video_mode(int *w, int *h)
 {
