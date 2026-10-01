@@ -195,6 +195,33 @@ void rt_x87_mismatch(Ctx *c, uint32_t addr, uint32_t expect);
 #define X87_CHECK(expect, addr) ((void)0)
 #endif
 
+/* Bits of a double. GCC for 32-bit ARM moves a memcpy'd double to core registers
+ * through the stack (a store and a load); one vmov does it. */
+static inline uint64_t rt_dbits(double v)
+{
+#if defined(__arm__) && defined(__GNUC__) && !defined(__clang__)
+    uint64_t b;
+    __asm__("vmov %Q0, %R0, %P1" : "=r"(b) : "w"(v));
+    return b;
+#else
+    uint64_t b;
+    memcpy(&b, &v, 8);
+    return b;
+#endif
+}
+
+/* High word of a double (sign, exponent, top of the mantissa). */
+static inline uint32_t rt_dhi(double v)
+{
+#if defined(__arm__) && defined(__GNUC__) && !defined(__clang__)
+    uint32_t h;
+    __asm__("vmov.32 %0, %P1[1]" : "=r"(h) : "w"(v));
+    return h;
+#else
+    return (uint32_t)(rt_dbits(v) >> 32);
+#endif
+}
+
 /* Round according to the rounding-control field of the control word. Round to
  * nearest is inline: below 2^52, adding and subtracting 2^52 to the magnitude
  * rounds to nearest-even in the host's default rounding mode (no libm call).
@@ -217,10 +244,13 @@ static inline double rt_fround(const Ctx *c, double v)
 }
 
 /* fscale: ST(0) * 2^trunc(ST(1)). Multiplying by the power of two when it is a
- * normal double gives the same correctly rounded result as ldexp. */
+ * normal double gives the same correctly rounded result as ldexp. The range
+ * -1022 < s < 1024 is tested on the high word: |s| < 1022, or 1022 <= s < 1024
+ * (NaN excluded). */
 static inline double rt_fscale(double v, double s)
 {
-    if (s > -1022.0 && s < 1024.0) {
+    uint32_t hi = rt_dhi(s);
+    if ((hi << 1) < (0x408FF000u << 1) || hi - 0x408FF000u < 0x1000u) {
         uint64_t b = (uint64_t)((int32_t)s + 1023) << 52;
         double p;
         memcpy(&p, &b, 8);
@@ -243,20 +273,19 @@ static inline double rt_fild64(uint64_t v)
  * inline. Adding 1.5 * 2^52 rounds to nearest-even in the host's default rounding
  * mode, and while the sum stays in [2^52, 2^53) its low mantissa bits are the
  * rounded integer in two's complement: no conversion instruction is needed. In
- * truncating mode a C conversion truncates. Everything else (other rounding modes,
- * out of range, NaN) goes out of line (the same results: see fround_small). */
+ * truncating mode a C conversion truncates when |v| < 2^31 (exponent field below
+ * 0x41E: one integer compare on the high word, NaN and infinities excluded).
+ * Everything else (other rounding modes, out of range, NaN) goes out of line
+ * (the same results: see fround_small). */
 #define RT_FIST_NEAREST(c) (((c)->fcw & 0x0C00u) == 0)
 #define RT_FIST_CHOP(c) (((c)->fcw & 0x0C00u) == 0x0C00u)
-#define RT_FIST_SMALL(v) ((v) > -2147483647.0 && (v) < 2147483647.0)
+#define RT_FIST_SMALL(v) ((rt_dhi(v) << 1) < (0x41E00000u << 1))
 #define RT_ROUND_MAGIC 6755399441055744.0
 #define RT_ROUND_MAGIC_BITS 0x4338000000000000ull
 
 static inline uint64_t rt_round_bits(double v)
 {
-    double t = v + RT_ROUND_MAGIC;
-    uint64_t b;
-    memcpy(&b, &t, 8);
-    return b;
+    return rt_dbits(v + RT_ROUND_MAGIC);
 }
 
 int64_t rt_fist64_slow(const Ctx *c, double v);
@@ -297,7 +326,7 @@ static inline int16_t rt_fist16(Ctx *c, double v)
         uint32_t lo = (uint32_t)b, hi = (uint32_t)(b >> 32) - 0x43380000u;
         if (hi == (uint32_t)((int32_t)lo >> 31) && lo + 0x8000u < 0x10000u)
             return (int16_t)lo;
-    } else if (RT_FIST_CHOP(c) && v > -32769.0 && v < 32768.0) {
+    } else if (RT_FIST_CHOP(c) && (rt_dhi(v) << 1) < (0x40E00000u << 1)) {   /* |v| < 2^15 */
         return (int16_t)(int32_t)v;
     }
     return rt_fist16_slow(c, v);
@@ -430,6 +459,8 @@ int rt_native_adpcm_decode(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uin
 int rt_native_bend_draw(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
 int rt_native_mesh_raycast(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
 int rt_native_patch_build(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
+int rt_native_poly2d(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
+int rt_native_group_bounds(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
 
 /* ---- profiler ------------------------------------------------------------
  * With IGI_PROFILE, generated functions keep a shadow call stack and the id of
