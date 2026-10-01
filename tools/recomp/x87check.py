@@ -1,9 +1,9 @@
 """Equivalence check of the x87 helpers in runtime/include/recomp.h.
 
-The inline fast paths of the x87 helpers (fist, fscale, f2xm1) must give bit-identical
+The inline fast paths of the x87 helpers (fist, fscale) must give bit-identical
 results to the reference: the previous versions of the fast paths (kept below,
-REF) with the same out-of-line code (copied from runtime/src/cpu.c), and the C
-library's exp2. Both are compiled from one C file for
+REF) with the same out-of-line code (copied from runtime/src/cpu.c). Both are
+compiled from one C file for
 
   host  this machine's compiler (the macOS build), and
   arm   the vitasdk compiler with the Vita build's flags, linked with newlib's
@@ -12,9 +12,10 @@ library's exp2. Both are compiled from one C file for
 and compared on random and special operands in every rounding mode: random bit
 patterns, doubles of every magnitude, integers and halves plus or minus a few
 ulps, the conversion bounds (2^15, 2^31, 2^52, 2^63) and their neighbours,
-zeros, denormals, infinities, NaNs, float values, and exp2 operands in [-1, 1],
-[-600, 600] and around 2^-54. The host also checks every float value (2^32
-operands, the game's fist operands are mostly floats) with --floats.
+zeros, denormals, infinities, NaNs, float values, operands in [-1, 1],
+[-600, 600] and around 2^-54, and fscale exponents around the range ends and
+of the exp idiom. The host also checks every float value (2^32 operands, the
+game's fist operands are mostly floats) with --floats.
 
   x87check.py [--samples N] [--seed S] [--floats]
 
@@ -171,13 +172,12 @@ static __attribute__((noinline)) void check(Ctx *c, double v)
         int16_t a16 = rt_fist16(c, v), b16 = ref_fist16(c, v);
         if (a16 != b16) fail(16, m, v, (uint16_t)a16, (uint16_t)b16);
     }
-    uint64_t e = b_of(rt_exp2(v)), w = b_of(exp2(v));
-    if (e != w) fail(2, 0, v, e, w);
+    uint64_t e, w;
     /* fscale by an operand, by an exponent near the range ends and by the fog idiom's. */
     uint64_t r = rnd();
     double s = (r & 3u) == 0 ? operand() : (r & 3u) == 1 ? (double)((int)((r >> 8) % 2400u) - 1200) + uni(-1.0, 1.0)
              : (r & 3u) == 2 ? (double)((int)((r >> 8) % 12u) - 6) + ((r >> 4) & 1 ? 1022.0 : -1022.0) : uni(-64.0, 64.0);
-    double fs = (r >> 20) & 1 ? (rt_exp2(uni(-1.0, 1.0)) - 1.0) + 1.0 : v;
+    double fs = (r >> 20) & 1 ? (exp2(uni(-1.0, 1.0)) - 1.0) + 1.0 : v;
     e = b_of(rt_fscale(fs, s));
     w = b_of(ref_fscale(fs, s));
     if (e != w) fail(3, 0, s, e, w);
@@ -207,8 +207,6 @@ uint32_t x87check_floats(uint32_t lo, uint32_t hi)
             if (rt_fist32(&c, v) != ref_fist32(&c, v)) fail(32, m, v, 0, 0);
             if (rt_fist16(&c, v) != ref_fist16(&c, v)) fail(16, m, v, 0, 0);
         }
-        if (x >= -1.0f && x <= 1.0f && b_of(rt_exp2(v)) != b_of(exp2(v)))
-            fail(2, 0, v, 0, 0);
     }
     return g_fail;
 }
@@ -264,7 +262,7 @@ def report(tag, out):
     if n == '0':
         return True
     print('%s: %s DIFFERENT, first: %s mode %s operand %s got %s want %s' % (tag, n, {
-        '64': 'fist m64', '32': 'fist m32', '16': 'fist m16', '2': 'exp2', '3': 'fscale'}[kind], mode, bits, got, want))
+        '64': 'fist m64', '32': 'fist m32', '16': 'fist m16', '3': 'fscale'}[kind], mode, bits, got, want))
     return False
 
 
@@ -282,7 +280,7 @@ def host(work, args):
         for lo in range(0, 1 << 32, step):
             procs.append(subprocess.Popen([exe, 'f', str(lo), str(lo + step)], stdout=subprocess.PIPE, text=True))
         fl = all(report('host floats', p.communicate()[0]) for p in procs)
-        print('host: all 2^32 float operands (nearest, truncate; exp2 in [-1, 1]) %s' % ('identical' if fl else ''))
+        print('host: all 2^32 float operands (nearest, truncate) %s' % ('identical' if fl else ''))
         ok = ok and fl
     return ok
 

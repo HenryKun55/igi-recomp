@@ -222,18 +222,6 @@ static inline uint32_t rt_dhi(double v)
 #endif
 }
 
-/* Low word of a double. */
-static inline uint32_t rt_dlo(double v)
-{
-#if defined(__arm__) && defined(__GNUC__) && !defined(__clang__)
-    uint32_t l;
-    __asm__("vmov.32 %0, %P1[0]" : "=r"(l) : "w"(v));
-    return l;
-#else
-    return (uint32_t)rt_dbits(v);
-#endif
-}
-
 /* Round according to the rounding-control field of the control word. Round to
  * nearest is inline: below 2^52, adding and subtracting 2^52 to the magnitude
  * rounds to nearest-even in the host's default rounding mode (no libm call).
@@ -270,51 +258,6 @@ static inline double rt_fscale(double v, double s)
     }
     return ldexp(v, (int)trunc(s));
 }
-
-/* f2xm1: 2^v - 1 with the C library's exp2.
- *
- * On the Vita, newlib's exp2 is ARM's optimized-routines one (math/exp2.c, its
- * table __exp_data). For 2^-54 <= |v| < 512 (every f2xm1 operand of the game's
- * exp idiom, |v| <= 1) it computes 2^(k/128) from the table times a polynomial
- * in the remainder; this is that path inline, the same operations in the same
- * order (no fused multiply-add on the Cortex-A9: vmla rounds the product), so
- * the result is bit-identical; other operands call the library. Elsewhere the
- * library is called. */
-#if defined(__vita__)
-struct rt_exp_data {
-    double invln2N, shift, negln2hiN, negln2loN, poly[4];
-    double exp2_shift, exp2_poly[5];
-    uint64_t tab[2 * 128];
-};
-extern const struct rt_exp_data __exp_data;
-
-static inline double rt_exp2(double x)
-{
-    uint32_t abstop = (rt_dhi(x) >> 20) & 0x7FFu;
-    if (__builtin_expect(abstop - 0x3C9u >= 0x408u - 0x3C9u, 0))
-        return exp2(x);
-    const struct rt_exp_data *d = &__exp_data;
-    double kd = x + d->exp2_shift;
-    /* Only the low word of the sum's bits matters: ki % 128 and ki << 45 (whose
-     * low word is zero and high word the low word shifted by 13). */
-    uint32_t ki = rt_dlo(kd);
-    kd -= d->exp2_shift;
-    double r = x - kd;
-    uint32_t idx = 2u * (ki % 128u);
-    uint64_t top = (uint64_t)(ki << 13) << 32;
-    double tail;
-    memcpy(&tail, &d->tab[idx], 8);
-    uint64_t sbits = d->tab[idx + 1] + top;
-    double r2 = r * r;
-    const double *C = d->exp2_poly;
-    double tmp = tail + r * C[0] + r2 * (C[1] + r * C[2]) + r2 * r2 * (C[3] + r * C[4]);
-    double scale;
-    memcpy(&scale, &sbits, 8);
-    return scale + scale * tmp;
-}
-#else
-static inline double rt_exp2(double x) { return exp2(x); }
-#endif
 
 /* fild m64: int64 -> double without the library conversion when the value fits
  * in 32 bits (both conversions are exact then). */
