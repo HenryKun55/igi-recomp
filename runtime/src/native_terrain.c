@@ -592,6 +592,41 @@ static void make_clip_vert(const Frame *f, const PatchWork *w, uint32_t i, ClipV
     cv->attr[5] = (float)((double)(p->specular >> 24) * sf);
 }
 
+/* Fog byte of a vertex: fist(255 / 2^e) with the guest's x87 exp idiom,
+ * fog = 1 / fscale(f2xm1(e - round(e)) + 1, round(e)), clamped at zero.
+ *
+ * Only the integer reaches the game, so the common case avoids the library
+ * exp2 and the division: 2^-e from a polynomial (relative error below 1e-11 for
+ * e in [0, 1000)) gives 255 * fog within 1e-8 of the guest's value, whose own
+ * error against the exact result is a few ulp. When both ends of a +-1e-6
+ * interval around the estimate convert to the same integer (fist is monotonic
+ * in every rounding mode), that is the guest's result; otherwise, or outside
+ * that range (NaN included), the guest's computation runs as is. */
+static uint32_t fog_byte(Ctx *c, double e)
+{
+    if (e >= 0.0 && e < 1000.0) {
+        int32_t n = (int32_t)(e + 0.5);
+        double r = (double)n - e;               /* 2^-e = 2^r * 2^-n, |r| <= 0.5 */
+        /* 2^r = sum (r ln 2)^k / k!, k <= 9 */
+        double p = 1.0 + r * (6.9314718055994531e-01 + r * (2.4022650695910071e-01 +
+                   r * (5.5504108664821580e-02 + r * (9.6181291076284772e-03 + r * (1.3333558146428443e-03 +
+                   r * (1.5403530393381609e-04 + r * (1.5252733804059841e-05 + r * (1.3215486790144307e-06 +
+                   r * 1.0178086009239699e-07))))))));
+        uint64_t b = (uint64_t)(1023 - n) << 52;
+        double s;
+        memcpy(&s, &b, 8);
+        double y = p * s * 255.0;
+        uint32_t lo = fist(c, y - 1e-6), hi = fist(c, y + 1e-6);
+        if (lo == hi)
+            return lo;
+    }
+    double n = rt_fround(c, e);
+    double fog = 1.0 / rt_fscale((exp2(e - n) - 1.0) + 1.0, n);
+    if (BELOW(fog, 0.0))
+        fog = 0.0;
+    return fist(c, fog * 255.0);
+}
+
 /* Screen position, depth values, fog and outcode of a view-space vertex. */
 static uint8_t project_vertex(const Frame *f, TLVertex *o, float vx, float vy, double depth, int *behind)
 {
@@ -615,12 +650,7 @@ static uint8_t project_vertex(const Frame *f, TLVertex *o, float vx, float vy, d
     o->rhw = (float)((double)invf * f->rhw_scale);
     o->sz = (float)((double)invf * f->z_scale + f->z_offset);
     /* fog = 1 / 2^(depth * k * log2(e)), the x87 exp idiom */
-    double e = (double)vz * f->fog_depth * f->fog_density * LOG2E;
-    double n = rt_fround(c, e);
-    double fog = 1.0 / rt_fscale((exp2(e - n) - 1.0) + 1.0, n);
-    if (BELOW(fog, 0.0))
-        fog = 0.0;
-    o->specular = fist(c, fog * 255.0) << 24;
+    o->specular = fog_byte(c, (double)vz * f->fog_depth * f->fog_density * LOG2E) << 24;
     return (uint8_t)((uint32_t)BELOW(sx, f->left) | (uint32_t)BELOW(sy, f->top) << 1 |
                      (uint32_t)ABOVE(sx, f->right) << 2 | (uint32_t)ABOVE((double)o->sy, f->bottom) << 3);
 }
