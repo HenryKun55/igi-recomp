@@ -2738,15 +2738,6 @@ static uint32_t d3dcolor_rgba(uint32_t argb)
     return (argb & 0xFF00FF00u) | ((argb & 0xFFu) << 16) | ((argb >> 16) & 0xFFu);
 }
 
-/* Reciprocals of recent rhw values (bit pattern -> 1 / rhw as pack_guest_to
- * computes it). Slot 0 starts as rhw +0.0, whose w is 1. */
-#define RECIP_BITS 11
-typedef struct RecipSlot {
-    uint32_t rhw;
-    float w;
-} RecipSlot;
-static RecipSlot recip_cache[1u << RECIP_BITS] = { [0] = { 0u, 1.0f } };
-
 /* Same as pack_vertices, reading the game's vertex layout directly, into d0. */
 static void pack_guest_to(uint8_t *d0, const Layout *L, const GuestVerts *g, uint32_t nv)
 {
@@ -2773,20 +2764,7 @@ static void pack_guest_to(uint8_t *d0, const Layout *L, const GuestVerts *g, uin
             /* Word-aligned here: direct float loads (memcpy into an array went
              * through the stack, which cost more than the division). */
             const float *v = (const float *)(const void *)vb, *t = (const float *)(const void *)(vb + uv);
-            /* The terrain writes each vertex once per texture pass: the same rhw
-             * comes back several times, and a remembered reciprocal saves the
-             * division (the slowest step here). */
-            uint32_t rb;
-            memcpy(&rb, vb + 12, 4);   /* rhw's bits, read as an integer (no VFP-to-core move) */
-            RecipSlot *rs = &recip_cache[(rb * 2654435761u) >> (32 - RECIP_BITS)];
-            float w;
-            if (rs->rhw == rb) {
-                w = rs->w;
-            } else {
-                w = (rb & 0x7FFFFFFFu) != 0 ? 1.0f / v[3] : 1.0f;   /* rhw != 0.0f */
-                rs->rhw = rb;
-                rs->w = w;
-            }
+            float w = v[3] != 0.0f ? 1.0f / v[3] : 1.0f;
             p[0] = v[0] * w;
             p[1] = v[1] * w;
             p[2] = v[2] * w;
