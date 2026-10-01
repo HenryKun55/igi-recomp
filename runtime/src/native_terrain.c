@@ -635,7 +635,7 @@ static uint32_t fog_byte(Ctx *c, double e)
             return (uint32_t)(q >> 20);
     }
     double n = rt_fround(c, e);
-    double fog = 1.0 / rt_fscale((exp2(e - n) - 1.0) + 1.0, n);
+    double fog = 1.0 / rt_fscale((rt_exp2(e - n) - 1.0) + 1.0, n);
     if (BELOW(fog, 0.0))
         fog = 0.0;
     return fist(c, fog * 255.0);

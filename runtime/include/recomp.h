@@ -229,6 +229,76 @@ static inline double rt_fscale(double v, double s)
     return ldexp(v, (int)trunc(s));
 }
 
+/* Bits of a double. GCC for 32-bit ARM moves a memcpy'd double to core registers
+ * through the stack (a store and a load); one vmov does it. */
+static inline uint64_t rt_dbits(double v)
+{
+#if defined(__arm__) && defined(__GNUC__) && !defined(__clang__)
+    uint64_t b;
+    __asm__("vmov %Q0, %R0, %P1" : "=r"(b) : "w"(v));
+    return b;
+#else
+    uint64_t b;
+    memcpy(&b, &v, 8);
+    return b;
+#endif
+}
+
+/* High word of a double (sign, exponent, top of the mantissa). */
+static inline uint32_t rt_dhi(double v)
+{
+#if defined(__arm__) && defined(__GNUC__) && !defined(__clang__)
+    uint32_t h;
+    __asm__("vmov.32 %0, %P1[1]" : "=r"(h) : "w"(v));
+    return h;
+#else
+    return (uint32_t)(rt_dbits(v) >> 32);
+#endif
+}
+
+/* f2xm1: 2^v - 1 with the C library's exp2.
+ *
+ * On the Vita, newlib's exp2 is ARM's optimized-routines one (math/exp2.c, its
+ * table __exp_data). For 2^-54 <= |v| < 512 (every f2xm1 operand of the game's
+ * exp idiom, |v| <= 1) it computes 2^(k/128) from the table times a polynomial
+ * in the remainder; this is that path inline, the same operations in the same
+ * order (no fused multiply-add on the Cortex-A9: vmla rounds the product), so
+ * the result is bit-identical; other operands call the library. Elsewhere the
+ * library is called. */
+#if defined(__vita__)
+struct rt_exp_data {
+    double invln2N, shift, negln2hiN, negln2loN, poly[4];
+    double exp2_shift, exp2_poly[5];
+    uint64_t tab[2 * 128];
+};
+extern const struct rt_exp_data __exp_data;
+
+static inline double rt_exp2(double x)
+{
+    uint32_t abstop = (rt_dhi(x) >> 20) & 0x7FFu;
+    if (__builtin_expect(abstop - 0x3C9u >= 0x408u - 0x3C9u, 0))
+        return exp2(x);
+    const struct rt_exp_data *d = &__exp_data;
+    double kd = x + d->exp2_shift;
+    uint64_t ki = rt_dbits(kd);
+    kd -= d->exp2_shift;
+    double r = x - kd;
+    uint32_t idx = 2u * ((uint32_t)ki % 128u);
+    uint64_t top = ki << (52 - 7);
+    double tail;
+    memcpy(&tail, &d->tab[idx], 8);
+    uint64_t sbits = d->tab[idx + 1] + top;
+    double r2 = r * r;
+    const double *C = d->exp2_poly;
+    double tmp = tail + r * C[0] + r2 * (C[1] + r * C[2]) + r2 * r2 * (C[3] + r * C[4]);
+    double scale;
+    memcpy(&scale, &sbits, 8);
+    return scale + scale * tmp;
+}
+#else
+static inline double rt_exp2(double x) { return exp2(x); }
+#endif
+
 /* fild m64: int64 -> double without the library conversion when the value fits
  * in 32 bits (both conversions are exact then). */
 static inline double rt_fild64(uint64_t v)
@@ -243,20 +313,19 @@ static inline double rt_fild64(uint64_t v)
  * inline. Adding 1.5 * 2^52 rounds to nearest-even in the host's default rounding
  * mode, and while the sum stays in [2^52, 2^53) its low mantissa bits are the
  * rounded integer in two's complement: no conversion instruction is needed. In
- * truncating mode a C conversion truncates. Everything else (other rounding modes,
- * out of range, NaN) goes out of line (the same results: see fround_small). */
+ * truncating mode a C conversion truncates when |v| < 2^31 (exponent field below
+ * 0x41E: one integer compare on the high word, NaN and infinities excluded).
+ * Everything else (other rounding modes, out of range, NaN) goes out of line
+ * (the same results: see fround_small). */
 #define RT_FIST_NEAREST(c) (((c)->fcw & 0x0C00u) == 0)
 #define RT_FIST_CHOP(c) (((c)->fcw & 0x0C00u) == 0x0C00u)
-#define RT_FIST_SMALL(v) ((v) > -2147483647.0 && (v) < 2147483647.0)
+#define RT_FIST_SMALL(v) ((rt_dhi(v) << 1) < (0x41E00000u << 1))
 #define RT_ROUND_MAGIC 6755399441055744.0
 #define RT_ROUND_MAGIC_BITS 0x4338000000000000ull
 
 static inline uint64_t rt_round_bits(double v)
 {
-    double t = v + RT_ROUND_MAGIC;
-    uint64_t b;
-    memcpy(&b, &t, 8);
-    return b;
+    return rt_dbits(v + RT_ROUND_MAGIC);
 }
 
 int64_t rt_fist64_slow(const Ctx *c, double v);
@@ -297,7 +366,7 @@ static inline int16_t rt_fist16(Ctx *c, double v)
         uint32_t lo = (uint32_t)b, hi = (uint32_t)(b >> 32) - 0x43380000u;
         if (hi == (uint32_t)((int32_t)lo >> 31) && lo + 0x8000u < 0x10000u)
             return (int16_t)lo;
-    } else if (RT_FIST_CHOP(c) && v > -32769.0 && v < 32768.0) {
+    } else if (RT_FIST_CHOP(c) && (rt_dhi(v) << 1) < (0x40E00000u << 1)) {   /* |v| < 2^15 */
         return (int16_t)(int32_t)v;
     }
     return rt_fist16_slow(c, v);

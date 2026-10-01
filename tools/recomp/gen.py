@@ -1743,7 +1743,7 @@ class FuncGen:
                 0xEA: 'fpush(c, 1.4426950408889634);', 0xEB: 'fpush(c, 3.141592653589793);',
                 0xEC: 'fpush(c, 0.30102999566398120);', 0xED: 'fpush(c, 0.6931471805599453);',
                 0xEE: 'fpush(c, 0.0);',
-                0xF0: 'ST(0) = exp2(ST(0)) - 1.0;',
+                0xF0: 'ST(0) = rt_exp2(ST(0)) - 1.0;',
                 0xF1: 'ST(1) = ST(1) * log2(ST(0)); fpop(c);',
                 0xF2: 'ST(0) = tan(ST(0)); fpush(c, 1.0); fp_sw &= ~0x400u;',
                 0xF3: 'ST(1) = atan2(ST(1), ST(0)); fpop(c);',
