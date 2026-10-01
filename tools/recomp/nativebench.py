@@ -369,7 +369,76 @@ def synth_adpcm(seed, bases):
     return State(m, GSTACK, regs, {})
 
 
-SYNTH = {0x0049B700: synth_skin, 0x004A1570: synth_mesh, 0x004D14E0: synth_tree, 0x00496280: synth_adpcm}
+def synth_deform(seed, bases):
+    """0x49CC80: a captured call with the rigid and reversed flags, the extent,
+    segment count, rotations and segment data, the vertices (some on segment
+    boundaries or outside the extent), the rounding mode, the vertex buffer fill
+    (append or discard), Lock failures and the stale locals randomised."""
+    rnd = random.Random(seed)
+    st = base_state(rnd, bases, 0x0049CC80)
+    m, pk = st.mem, Peek(st.mem)
+    mesh, obj = pk.u32(st.esp + 4), pk.u32(st.esp + 8)
+    if rnd.random() < 0.3:
+        m.raw(obj + 0x5B4, bytes([rnd.choice([0, 1, 0x80])]))
+    if rnd.random() < 0.3:
+        m.raw(obj + 0x5B5, bytes([rnd.choice([0, 1])]))
+    x0, x1 = pk.f32(obj + 0xFC), pk.f32(obj + 0x100)
+    if rnd.random() < 0.4:
+        # Extents that keep the segments near the object's: wild segments read
+        # unrelated memory, where two different NaNs can meet in one operation,
+        # and the NaN that results depends on the compiler's operand order.
+        x0, x1 = rnd.choice([(x0, x1), (x1, x0), (x0 + (x1 - x0) * 0.25, x1), (x0, x0 + (x1 - x0) * 0.7),
+                             (x0, x0)])
+        m.f32(obj + 0xFC, x0)
+        m.f32(obj + 0x100, x1)
+    nseg = pk.u32(obj + 0x59C)
+    if rnd.random() < 0.3:
+        nseg = rnd.choice([0, 1, 2, nseg, nseg + 1, 63, 64, 65, 100])
+        m.u32(obj + 0x59C, nseg)
+    small = rnd.choice([0.0, 0.001, 0.1])
+    for i in range(9):
+        m.f32(obj + 0x70 + 4 * i, jitter(rnd, pk.f32(obj + 0x70 + 4 * i), small))
+    for k in range(min(nseg + 2, 27)):   # the object's other fields follow at 0x59C
+        for j in range(10):
+            a = obj + 0x200 + 40 * k + 4 * j
+            m.f32(a, jitter(rnd, pk.f32(a), small))
+        for j in range(3):
+            a = obj + 0x104 + 12 * k + 4 * j
+            m.f32(a, jitter(rnd, pk.f32(a), small))
+    n, src = pk.u32(mesh + 0xC), pk.u32(mesh + 0x10)
+    if rnd.random() < 0.15:
+        n = rnd.choice([0, 1, 2, n // 2])
+        m.u32(mesh + 0xC, n)
+    span = (x1 - x0) if x1 != x0 else 1.0
+    for i in range(min(n, 4000)):
+        a = src + 0x20 * i
+        r = rnd.random()
+        if r < 0.1 and nseg:
+            m.f32(a, x0 + span * rnd.randrange(0, nseg + 1) / nseg)
+        elif r < 0.15:
+            m.f32(a, rnd.uniform(x0 - span, x1 + span))
+        else:
+            m.f32(a, jitter(rnd, pk.f32(a), small))
+        for k in range(1, 6):
+            m.f32(a + 4 * k, jitter(rnd, pk.f32(a + 4 * k), small))
+    if rnd.random() < 0.3:
+        st.fcw = (st.fcw & ~0xC00) | (rnd.randrange(4) << 10)
+    cap, used = pk.u32(0xBCAD94), pk.u32(0xBCAD98)
+    if rnd.random() < 0.3:
+        m.u32(0xBCAD98, rnd.choice([0, cap - n, cap - n + 1, cap, used]) & 0xFFFFFFFF)
+    if rnd.random() < 0.1:
+        for t, name in list(st.thunks.items()):
+            if name == 'IDirect3DVertexBuffer7::Lock':
+                st.thunks[t] = name + '#' + rnd.choice(['lockfail', 'locknull'])
+    if rnd.random() < 0.5:
+        for off in range(-0x54, 0x0C, 4):
+            if off not in (0, 4, 8):
+                m.u32(st.esp + off, rnd.getrandbits(32))
+    return st
+
+
+SYNTH = {0x0049B700: synth_skin, 0x004A1570: synth_mesh, 0x004D14E0: synth_tree, 0x00496280: synth_adpcm,
+         0x0049CC80: synth_deform}
 
 
 # ---- running -----------------------------------------------------------------

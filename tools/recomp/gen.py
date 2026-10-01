@@ -92,6 +92,10 @@ NATIVE = {
     0x004D14E0: ('rt_native_terrain_collect', [
         (0x004D14E0, 4181, '539333ef86b2329a05cbc5d9c8c72010b388de9a'),
     ]),
+    # Rigid or bent mesh transform into the dynamic vertex buffer (runtime/src/native_deform.c).
+    0x0049CC80: ('rt_native_deform_mesh', [
+        (0x0049CC80, 1070, 'e15b1430ffbb328d2109daa7afcc7b45c84f1029'),
+    ]),
     # IMA ADPCM decoder (runtime/src/native_adpcm.c).
     0x00496280: ('rt_native_adpcm_decode', [
         (0x00496280, 409, 'a4e5b69d2e3cf1c83797f92ee34bd5b9512949ae'),
