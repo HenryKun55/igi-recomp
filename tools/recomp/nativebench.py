@@ -481,8 +481,213 @@ def synth_sphere(seed, bases):
     return st
 
 
+def synth_bend(seed, bases):
+    """0x49BE10: a captured call with the camera, the object's transform, sphere
+    offset and radius, the rigid and reversed flags, extent, segments and
+    vertices (some on segment boundaries), the projection, clip rectangle, near
+    plane and far limit, the rounding mode and the stale locals randomised (the
+    mesh type and the model too, sometimes)."""
+    rnd = random.Random(seed)
+    st = base_state(rnd, bases, 0x0049BE10)
+    m, pk = st.mem, Peek(st.mem)
+    obj, ctx = pk.u32(st.esp + 4), pk.u32(st.esp + 8)
+    small = rnd.choice([0.0, 0.001, 0.01, 0.05])
+    for i in range(9):
+        m.f32(0xBCAAE0 + 4 * i, jitter(rnd, pk.f32(0xBCAAE0 + 4 * i), small))
+        m.f32(obj + 0x70 + 4 * i, jitter(rnd, pk.f32(obj + 0x70 + 4 * i), small))
+    for i in range(3):
+        m.f64(0xBCAB08 + 8 * i, pk.f64(0xBCAB08 + 8 * i) + rnd.uniform(-2.0, 2.0) * small * 20)
+        m.f64(obj + 0x20 + 8 * i, pk.f64(obj + 0x20 + 8 * i) + rnd.uniform(-2.0, 2.0) * small * 20)
+    sph = pk.u32(obj + 0x5A0)
+    if sph:
+        for k in range(4):
+            m.f32(sph + 4 * k, jitter(rnd, pk.f32(sph + 4 * k), small))
+        if rnd.random() < 0.2:
+            m.u32(obj + 0x5A0, 0)
+    m.f32(obj + 0x44, rnd.choice([pk.f32(obj + 0x44), 0.0, rnd.uniform(0.0, 50.0)]))
+    for a in (0xBCAB28, 0xBCAB2C, 0xBCAB30, 0xBCAB34):
+        m.f32(a, jitter(rnd, pk.f32(a), small))
+    inset = rnd.choice([0.0, 0.0, 40.0, 200.0])
+    for a, sgn in ((0xBCABD0, 1), (0xBCABD4, 1), (0xBCABD8, -1), (0xBCABDC, -1)):
+        m.f32(a, pk.f32(a) + sgn * inset)
+    m.f32(0xBCADC0, rnd.choice([pk.f32(0xBCADC0), 0.1, 1.0, 20.0, 200.0, 2000.0]))
+    m.f32(ctx + 8, rnd.choice([pk.f32(ctx + 8), 1e9, rnd.uniform(1.0, 3000.0)]))
+    if rnd.random() < 0.3:
+        m.raw(obj + 0x5B4, bytes([rnd.choice([0, 1, 0x80])]))
+    if rnd.random() < 0.3:
+        m.raw(obj + 0x5B5, bytes([rnd.choice([0, 1])]))
+    x0, x1 = pk.f32(obj + 0xFC), pk.f32(obj + 0x100)
+    if rnd.random() < 0.4:
+        x0, x1 = rnd.choice([(x0, x1), (x1, x0), (x0 + (x1 - x0) * 0.25, x1), (x0, x0 + (x1 - x0) * 0.7),
+                             (x0, x0)])
+        m.f32(obj + 0xFC, x0)
+        m.f32(obj + 0x100, x1)
+    nseg = pk.u32(obj + 0x59C)
+    if rnd.random() < 0.3:
+        nseg = rnd.choice([0, 1, 2, nseg, nseg + 1, 63, 64, 65, 100])
+        m.u32(obj + 0x59C, nseg)
+    for k in range(min(nseg + 2, 27)):
+        for j in range(10):
+            a = obj + 0x200 + 40 * k + 4 * j
+            if a < obj + 0x59C:   # the segment count and the sphere pointer follow
+                m.f32(a, jitter(rnd, pk.f32(a), small))
+        for j in range(3):
+            a = obj + 0x104 + 12 * k + 4 * j
+            m.f32(a, jitter(rnd, pk.f32(a), small))
+    model = pk.u32(obj + 0x6C)
+    mesh = pk.u32(pk.u32(pk.u32(model) + 0xC) + 0xC) if model and pk.u32(model) else 0
+    if mesh:
+        geom = pk.u32(mesh + 0x24)
+        n, src = pk.u32(geom + 0xC), pk.u32(geom + 0x10)
+        span = (x1 - x0) if x1 != x0 else 1.0
+        amount = rnd.choice([0.0, 0.01, 0.2])
+        for i in range(min(n, 4000)):
+            a = src + 0x20 * i
+            r = rnd.random()
+            if r < 0.1 and nseg:
+                m.f32(a, x0 + span * rnd.randrange(0, nseg + 1) / nseg)
+            elif r < 0.15:
+                m.f32(a, rnd.uniform(x0 - span, x1 + span))
+            else:
+                m.f32(a, jitter(rnd, pk.f32(a), amount))
+            for k in (1, 2):
+                m.f32(a + 4 * k, jitter(rnd, pk.f32(a + 4 * k), amount))
+        if rnd.random() < 0.06:
+            m.u32(mesh + 0x20, 3)
+    if rnd.random() < 0.03:
+        m.u32(obj + 0x6C, 0)
+    if rnd.random() < 0.3:
+        st.fcw = (st.fcw & ~0xC00) | (rnd.randrange(4) << 10)
+    S = st.esp - 0x84
+    if rnd.random() < 0.5:
+        for off in range(0x10, 0x84, 4):
+            m.u32(S + off, rnd.getrandbits(32))
+    return st
+
+
+def synth_patch(seed, bases):
+    """0x510010: a captured frame's requests with their flags (mirroring), level,
+    light, height and material sources randomised, sometimes fewer of them, the
+    pools nearly full (blocks moved to larger pools, requests dropped), the
+    rounding mode and the stale frame randomised."""
+    rnd = random.Random(seed)
+    st = base_state(rnd, bases, 0x00510010)
+    m, pk = st.mem, Peek(st.mem)
+    n = pk.u32(0xB16CA4)
+    if n > 1 and rnd.random() < 0.3:
+        n = rnd.randrange(1, n + 1)
+        m.u32(0xB16CA4, n)
+    for i in range(n):
+        req = 0xB16CE0 + 0x30 * i
+        if rnd.random() < 0.5:
+            m.u32(req + 0x1C, (pk.u32(req + 0x1C) & ~7) | rnd.randrange(8))
+        if rnd.random() < 0.2:
+            m.u32(req + 0x18, rnd.choice([12, 13, 14, 15, 16, pk.u32(req + 0x18)]))
+        r24 = pk.u32(req + 0x24)
+        if rnd.random() < 0.2:
+            r24 = (r24 & 0xFFFF0000) | 0xFFFF
+        if rnd.random() < 0.2:
+            r24 &= 0xFF00FFFF
+        m.u32(req + 0x24, r24)
+        if rnd.random() < 0.15:
+            r28 = pk.u32(req + 0x28)
+            m.u32(req + 0x28, rnd.choice([0, r28 & 0xFF, r28 & 0xFFFF00FF, 0xFFFFFFFF]))
+    for pool in (0xB12B60, 0xB12C40, 0xB16CC0):
+        if rnd.random() < 0.25:
+            cap = pk.u32(pool + 0xC)
+            m.u32(pool + 8, max(0, cap - rnd.choice([2, 3, 4, 5])))
+    if rnd.random() < 0.3:
+        st.fcw = (st.fcw & ~0xC00) | (rnd.randrange(4) << 10)
+    if rnd.random() < 0.5:
+        S = (((st.esp - 4) & ~7) - 0xC20) - 0x10
+        for off in range(0x10, 0x330, 4):
+            if off not in range(0x148, 0x1AC):   # the material sources may be kept
+                m.u32(S + off, rnd.getrandbits(32))
+    return st
+
+
+def synth_raycast(seed, bases):
+    """0x4C1840: a captured query with its segments moved (often through the
+    object's centre, sometimes degenerate), the earlier hits (none, near, far,
+    on either side), the object's scale and rotation, the class filter and
+    the surface flag randomised, and the stale frame randomised."""
+    rnd = random.Random(seed)
+    st = base_state(rnd, bases, 0x004C1840)
+    m, pk = st.mem, Peek(st.mem)
+    obj, q = pk.u32(st.esp + 4), pk.u32(st.esp + 8)
+    n = pk.u32(q + 8)
+    c = [pk.f64(obj + 0x20 + 8 * k) for k in range(3)]
+    p0a, p1a, res = pk.u32(q), pk.u32(q + 4), pk.u32(q + 0x20)
+    # Triangles of the collision mesh, to aim segments at.
+    model = pk.u32(obj + 0x6C)
+    tris = []
+    if model and pk.u32(obj + 0xA4) != 0xFFFFFFFF:
+        mesh = pk.u32(pk.u32(pk.u32(model + 4 * pk.u32(obj + 0xA4)) + 0xC) + 0xC)
+        coll = pk.u32(mesh + 0x2C) + (pk.u32(q + 0x14) << 5) if mesh else 0
+        if coll and pk.u32(coll):
+            ntri, tarr, verts = pk.u32(coll), pk.u32(coll + 0x10), pk.u32(coll + 0x14)
+            for _ in range(min(ntri, 8)):
+                t = tarr + 8 * rnd.randrange(max(1, min(ntri, 4096)))
+                vs = [verts + 16 * pk.u16(t + 2 * k) for k in range(3)]
+                tris.append([sum(pk.f32(v + 4 * k) for v in vs) / 3.0 for k in range(3)])
+    rot = [pk.f32(obj + 0x70 + 4 * k) for k in range(9)]
+    sx = pk.f32(obj + 0x98)
+    for i in range(min(n, 64)):
+        a, b = p0a + 0x18 * i, p1a + 0x18 * i
+        r = rnd.random()
+        if tris and r < 0.6:
+            lc = rnd.choice(tris)
+            w = [c[j] + sx * sum(rot[3 * j + k] * lc[k] for k in range(3)) for j in range(3)]
+            d = [rnd.uniform(-1, 1) for _ in range(3)]
+            ln = rnd.choice([0.5, 5.0, 50.0])
+            far = rnd.choice([1.0, 1.0, 0.5, -0.3])
+            for k in range(3):
+                m.f64(a + 8 * k, w[k] + d[k] * ln)
+                m.f64(b + 8 * k, w[k] - d[k] * ln * far)
+        elif r < 0.75:
+            d = [rnd.uniform(-1, 1) for _ in range(3)]
+            ln = rnd.choice([1.0, 10.0, 100.0, 1000.0])
+            off = [rnd.uniform(-1, 1) * rnd.choice([0.0, 0.1, 1.0, 20.0]) for _ in range(3)]
+            for k in range(3):
+                m.f64(a + 8 * k, c[k] + off[k] + d[k] * ln)
+                m.f64(b + 8 * k, c[k] + off[k] - d[k] * ln * rnd.choice([1.0, 0.3, -0.2]))
+        elif r < 0.8:
+            for k in range(3):
+                m.f64(b + 8 * k, pk.f64(a + 8 * k))
+        else:
+            for k in range(3):
+                m.f64(a + 8 * k, pk.f64(a + 8 * k) + rnd.uniform(-5, 5))
+                m.f64(b + 8 * k, pk.f64(b + 8 * k) + rnd.uniform(-5, 5))
+        rr = res + 0x70 * i
+        if rnd.random() < 0.4:
+            m.u32(rr + 0x58, rnd.choice([0, 1]))
+            m.u32(rr + 0x4C, rnd.choice([0, 0, 7]))
+            m.f64(rr + 0x60, rnd.choice([0.0, 1.0, 50.0, 1e9]))
+            t = rnd.uniform(0.0, 1.0)
+            for k in range(3):
+                m.f64(rr + 8 + 8 * k, pk.f64(a + 8 * k) * (1 - t) + pk.f64(b + 8 * k) * t)
+    sc = rnd.choice(['keep', 'one', 'rand', 'uni'])
+    u = rnd.uniform(0.5, 2.0)
+    for k in range(3):
+        v = {'keep': pk.f32(obj + 0x98 + 4 * k), 'one': 1.0, 'rand': rnd.uniform(0.5, 2.0), 'uni': u}[sc]
+        m.f32(obj + 0x98 + 4 * k, v)
+    small = rnd.choice([0.0, 0.0, 0.01, 0.2])
+    for i in range(9):
+        m.f32(obj + 0x70 + 4 * i, jitter(rnd, pk.f32(obj + 0x70 + 4 * i), small))
+    if rnd.random() < 0.3:
+        m.u32(q + 0x18, rnd.choice([0, 1]))
+    if rnd.random() < 0.2:
+        m.raw(q + 0xC, bytes([0xFF]))
+    if rnd.random() < 0.5:
+        S = (((st.esp - 4) & ~7) - 0x2F4) - 12
+        for off in range(0x10, 0x2F4, 4):
+            m.u32(S + off, rnd.getrandbits(32))
+    return st
+
+
 SYNTH = {0x0049B700: synth_skin, 0x004A1570: synth_mesh, 0x004D14E0: synth_tree, 0x00496280: synth_adpcm,
-         0x0049CC80: synth_deform, 0x0049FEB0: synth_sphere}
+         0x0049CC80: synth_deform, 0x0049FEB0: synth_sphere, 0x0049BE10: synth_bend,
+         0x00510010: synth_patch, 0x004C1840: synth_raycast}
 
 
 # ---- running -----------------------------------------------------------------

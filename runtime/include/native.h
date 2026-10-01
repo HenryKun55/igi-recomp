@@ -141,4 +141,58 @@ static inline double native_ldd(uint32_t a)
 #define X87_BELOW(a, b) (!((a) >= (b)))
 #define X87_ABOVE(a, b) ((a) > (b))
 
+/* ---- view-space vertex transform of the object renderers (native_common.c) ----
+ * Vertices are rotated by m and translated by t to view space, projected to the
+ * screen with outcodes and written to a global array of vertices (view x, y,
+ * z, screen x, y, 1/z, outcode: 0x1C bytes) as the guest's loops do. The two
+ * renderers' loops differ in the order of the rotation's terms and of the
+ * screen y product (flags below). */
+#define NV_OUT_LEFT      0x01u
+#define NV_OUT_TOP       0x02u
+#define NV_OUT_RIGHT     0x04u
+#define NV_OUT_BOTTOM    0x08u
+#define NV_OUT_NEAR      0x10u
+#define NV_VERT_SIZE     0x1Cu
+#define NV_VERT_CODE     0x18u
+
+/* Rotation (m0 * x + m2 * z) + m1 * y, else (m2 * z + m1 * y) + m0 * x. */
+#define NV_ROT_XZY       1u
+/* Screen y (psy * rz) * y + cy, else (rz * y) * psy + cy. */
+#define NV_PROJ_SY_FIRST 2u
+
+typedef struct NativeView {
+    double m[9];                /* rows of the rotation (float values) */
+    double t[3];                /* translation (float values) */
+    double near_z, one;         /* near plane, numerator of 1/z */
+    double psx, psy, pcx, pcy;  /* projection scale and centre */
+    double left, top, right, bottom;
+} NativeView;
+
+/* In: zmin and scr (the guest's stale locals); out: what the guest's loop
+ * leaves in its locals and registers. */
+typedef struct NativeVerts {
+    float p[3];                 /* rotated position of the last vertex */
+    float xyz[3];               /* view position of the last vertex */
+    uint32_t scr[3];            /* screen x, y, 1/z of the last vertex in front (bits) */
+    uint32_t zmin;              /* nearest z of the vertices in front (bits) */
+    uint32_t end;               /* source pointer after the loop */
+} NativeVerts;
+
+/* Loads the projection, clip rectangle and the 1/z numerator (near_z is left to the caller). */
+void native_view_load(NativeView *v);
+/* n vertices from src (stride bytes apart, x, y, z first) to dst. */
+void native_view_transform(const NativeView *v, uint32_t src, uint32_t stride, uint32_t n, uint32_t dst,
+                           unsigned flags, NativeVerts *lp);
+
+/* ---- segments of a bent object (0x49CC80, 0x49BE10) ----
+ * Data of segments k and k + 1 as doubles: m[j] the float at obj + 40 * k +
+ * 0x200 + 4 * j (rotations), t[j] the float at obj + 12 * k + 0x104 + 4 * j
+ * (origins). The renderers convert up to NATIVE_SEG_CONV segments once per call. */
+#define NATIVE_SEG_CONV 64u
+typedef struct NativeSeg {
+    double m[19], t[6];
+} NativeSeg;
+
+void native_seg_load(uint32_t obj, uint32_t k, NativeSeg *s);
+
 #endif
