@@ -38,25 +38,15 @@
 #define FN_CLIP_TRIANGLE 0x004A0340u   /* (Vert v0, Vert v1, Vert v2, float *zmin, float near) */
 #define FN_DRAW_MODE     0x004D14D0u   /* returns the draw mode in al */
 
-/* Camera and projection. */
+/* Camera. */
 #define G_CAM_POS        0x00BCAB08u   /* double[3] */
 #define G_CAM_ROT        0x00BCAAE0u   /* float[9], world to view rows */
 #define G_FRAME          0x00BCAB04u
-#define G_PROJ_SX        0x00BCAB28u
-#define G_PROJ_SY        0x00BCAB2Cu
-#define G_PROJ_CX        0x00BCAB30u
-#define G_PROJ_CY        0x00BCAB34u
-#define G_CLIP_LEFT      0x00BCABD0u
-#define G_CLIP_TOP       0x00BCABD4u
-#define G_CLIP_RIGHT     0x00BCABD8u
-#define G_CLIP_BOTTOM    0x00BCABDCu
 #define G_NEAR           0x00BCADC0u
-#define K_ONE            0x005333E0u   /* float constant, the numerator of 1/z */
-/* Transformed vertices (Vert, 0x1C bytes: view x, y, z, screen x, y, 1/z, outcode). */
+/* Transformed vertices (NV_VERT_SIZE bytes, native.h). */
 #define G_VERTS0         0x007AF1E8u   /* type 0 meshes */
 #define G_VERTS3         0x008AD068u   /* type 3 meshes */
-#define VERT_SIZE        0x1Cu
-#define VERT_CODE        0x18u
+#define VERT_SIZE        NV_VERT_SIZE
 /* Children: callbacks per draw mode and node type, and a global stack of nodes. */
 #define G_CHILD_FN       0x00A96AE0u   /* fn[mode * 0x180 + type](node, ctx) */
 #define G_NODE_STACK     0x00AFA6E0u
@@ -75,12 +65,6 @@
 #define MESH_GEOM        0x24u
 #define MESH_CENTER      0x30u         /* float[3] */
 #define MESH_RADIUS      0x3Cu
-/* Outcodes. */
-#define OUT_LEFT         0x01u
-#define OUT_TOP          0x02u
-#define OUT_RIGHT        0x04u
-#define OUT_BOTTOM       0x08u
-#define OUT_NEAR         0x10u
 
 /* Return addresses of the guest's calls. */
 #define RET_SPHERE       0x004A175Au
@@ -107,87 +91,6 @@
 
 static inline double ldf(const uint8_t *gm, uint32_t a) { return rt_ldf32(gm + a); }
 static inline uint32_t f2u(float v) { uint32_t b; memcpy(&b, &v, 4); return b; }
-
-/* Per-call constants of the vertex loops. */
-typedef struct View {
-    double m[9];                /* rows of the matrix applied to the vertices (float values) */
-    double t[3];                /* translation (float values) */
-    double near_z, one;
-    double psx, psy, pcx, pcy;
-    double left, top, right, bottom;
-} View;
-
-/* Result of a vertex loop: what the guest leaves in its locals and registers. */
-typedef struct Loop {
-    float p[3];                 /* F_P0: rotated position of the last vertex */
-    float xyz[3];               /* F_X */
-    uint32_t scr[3];            /* F_SX: screen x, y, 1/z of the last vertex in front (bits) */
-    uint32_t zmin;              /* F_ZMIN (bits) */
-    uint32_t end;               /* vertex pointer after the loop */
-} Loop;
-
-/* One vertex: outcode and screen position as both loops of the guest compute
- * them (type 0 multiplies y by (psy * rz), type 3 by (rz * y) * psy). */
-static inline uint32_t project(const View *v, double x, double y, double zd, float z, int type3, uint32_t *scr)
-{
-    if (X87_BELOW(zd, v->near_z))
-        return OUT_NEAR;
-    double rz = v->one / (double)z;
-    float rzf = (float)rz;
-    double sx = rz * x * v->psx + v->pcx;
-    double sy = type3 ? (double)rzf * y * v->psy + v->pcy : v->psy * rzf * y + v->pcy;
-    float syf = (float)sy;
-    scr[0] = f2u((float)sx);
-    scr[1] = f2u(syf);
-    scr[2] = f2u(rzf);
-    return (uint32_t)X87_BELOW(sx, v->left) | (uint32_t)X87_BELOW(sy, v->top) << 1 |
-           (uint32_t)X87_ABOVE(sx, v->right) << 2 | (uint32_t)X87_ABOVE((double)syf, v->bottom) << 3;
-}
-
-static void transform(const View *v, uint32_t src, uint32_t stride, uint32_t n, uint32_t dst, int type3, Loop *lp)
-{
-    uint8_t *const gm = g_mem;
-    const double *m = v->m;
-    uint32_t zmin = lp->zmin;
-    float zminf;
-    memcpy(&zminf, &zmin, 4);
-    uint32_t scr[3] = { lp->scr[0], lp->scr[1], lp->scr[2] };
-    float p0 = 0, p1 = 0, p2 = 0, x = 0, y = 0, z = 0;
-    for (; n != 0; n--, src += stride, dst += VERT_SIZE) {
-        double vx = ldf(gm, src), vy = ldf(gm, src + 4u), vz = ldf(gm, src + 8u);
-        if (type3) {
-            p0 = (float)((m[2] * vz + m[1] * vy) + m[0] * vx);
-            p1 = (float)((m[5] * vz + m[4] * vy) + m[3] * vx);
-            p2 = (float)((m[8] * vz + m[7] * vy) + m[6] * vx);
-        } else {
-            p0 = (float)((m[0] * vx + m[2] * vz) + m[1] * vy);
-            p1 = (float)((m[3] * vx + m[5] * vz) + m[4] * vy);
-            p2 = (float)((m[6] * vx + m[8] * vz) + m[7] * vy);
-        }
-        x = (float)((double)p0 + v->t[0]);
-        y = (float)((double)p1 + v->t[1]);
-        double zd = (double)p2 + v->t[2];
-        z = (float)zd;
-        uint32_t code = project(v, x, y, zd, z, type3, scr);
-        uint8_t *d = gm + dst;
-        memcpy(d, &x, 4);
-        memcpy(d + 4, &y, 4);
-        memcpy(d + 8, &z, 4);
-        memcpy(d + 12, scr, 12);
-        rt_st32(d + VERT_CODE, code);
-        if (code == 0 && X87_BELOW(z, zminf))
-            zminf = z;
-    }
-    lp->p[0] = p0;
-    lp->p[1] = p1;
-    lp->p[2] = p2;
-    lp->xyz[0] = x;
-    lp->xyz[1] = y;
-    lp->xyz[2] = z;
-    memcpy(lp->scr, scr, sizeof(scr));
-    lp->zmin = f2u(zminf);
-    lp->end = src;
-}
 
 /* State shared by the parts of one call. */
 typedef struct Call {
@@ -219,7 +122,7 @@ static void triangles(Call *k, uint32_t blk, uint32_t verts, int type3)
             uint32_t v0 = verts + (RD16(idx) + base) * VERT_SIZE;
             uint32_t v1 = verts + (RD16(idx + 2u) + base) * VERT_SIZE;
             uint32_t v2 = verts + (RD16(idx + 4u) + base) * VERT_SIZE;
-            uint32_t c0 = RD32(v0 + VERT_CODE), c1 = RD32(v1 + VERT_CODE), c2 = RD32(v2 + VERT_CODE);
+            uint32_t c0 = RD32(v0 + NV_VERT_CODE), c1 = RD32(v1 + NV_VERT_CODE), c2 = RD32(v2 + NV_VERT_CODE);
             if (type3) {
                 native_frame_put(&k->f, 0x2Cu, v1);
                 native_frame_put(&k->f, 0x30u, v2);
@@ -285,7 +188,7 @@ static void geometry(Call *k, uint32_t mesh, double nearz, int type3)
         R[i] = ldf(gm, G_CAM_ROT + 4u * (uint32_t)i);
         O[i] = ldf(gm, obj + OBJ_ROT + 4u * (uint32_t)i);
     }
-    View v;
+    NativeView v;
     float t[3];
     t[0] = (float)((dz * R[2] + dy * R[1]) + dx * R[0]);
     t[1] = (float)((dz * R[5] + dy * R[4]) + dx * R[3]);
@@ -307,7 +210,7 @@ static void geometry(Call *k, uint32_t mesh, double nearz, int type3)
     }
     uint32_t stamp = RD32(obj + OBJ_STAMP) + RD32(G_FRAME) + 1u;
     uint32_t src, stride, n, dst;
-    Loop lp;
+    NativeVerts lp;
     if (!type3) {
         native_frame_put(f, F_18, geom);
         for (int i = 0; i < 9; i++)
@@ -346,16 +249,8 @@ static void geometry(Call *k, uint32_t mesh, double nearz, int type3)
         lp.scr[i] = RD32(S + F_SX + 4u * (uint32_t)i);
     if ((int32_t)n > 0) {
         v.near_z = native_ldf(S + F_NEAR);   /* F_NEAR holds G_NEAR */
-        v.one = native_ldf(K_ONE);
-        v.psx = native_ldf(G_PROJ_SX);
-        v.psy = native_ldf(G_PROJ_SY);
-        v.pcx = native_ldf(G_PROJ_CX);
-        v.pcy = native_ldf(G_PROJ_CY);
-        v.left = native_ldf(G_CLIP_LEFT);
-        v.top = native_ldf(G_CLIP_TOP);
-        v.right = native_ldf(G_CLIP_RIGHT);
-        v.bottom = native_ldf(G_CLIP_BOTTOM);
-        transform(&v, src, stride, n, dst, type3, &lp);
+        native_view_load(&v);
+        native_view_transform(&v, src, stride, n, dst, type3 ? 0 : NV_ROT_XZY | NV_PROJ_SY_FIRST, &lp);
         k->ebp = lp.end;
         k->ecx = type3 ? n : geom;
         for (int i = 0; i < 3; i++) {

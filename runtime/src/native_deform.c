@@ -63,8 +63,6 @@
 #define OBJ_ROT           0x70u
 #define OBJ_X0            0xFCu
 #define OBJ_X1            0x100u
-#define OBJ_SEG_ORG       0x104u        /* + 12 * k */
-#define OBJ_SEG_ROT       0x200u        /* + 40 * k */
 #define OBJ_NSEG          0x59Cu
 #define OBJ_RIGID         0x5B4u
 #define OBJ_REVERSED      0x5B5u
@@ -115,22 +113,6 @@ static uint32_t deform_rigid(uint8_t *gm, uint32_t mesh, uint32_t src, uint32_t 
     return ebx;
 }
 
-/* Data of segments k and k + 1 as doubles: m[j] the float at obj + 40 * k +
- * 0x200 + 4 * j, t[j] the float at obj + 12 * k + 0x104 + 4 * j. */
-#define MAX_CONV 64
-typedef struct SegConv {
-    double m[19], t[6];
-} SegConv;
-
-static void seg_load(const uint8_t *gm, uint32_t obj, uint32_t k, double *m, double *t)
-{
-    const uint32_t r = obj + k * 40u + OBJ_SEG_ROT, o = obj + k * 12u + OBJ_SEG_ORG;
-    for (int j = 0; j < 19; j++)
-        m[j] = ldf(gm, r + 4u * (uint32_t)j);
-    for (int j = 0; j < 6; j++)
-        t[j] = ldf(gm, o + 4u * (uint32_t)j);
-}
-
 /* Bent path. Returns the guest's final ebx (3 * last segment + 0x45, or ebx). */
 static uint32_t deform_bent(Ctx *c, uint8_t *gm, uint32_t mesh, uint32_t src, uint32_t *pptr, uint32_t E,
                             uint32_t obj, uint32_t ebx, NativeFsw *fsw)
@@ -150,13 +132,13 @@ static uint32_t deform_bent(Ctx *c, uint8_t *gm, uint32_t mesh, uint32_t src, ui
     int32_t i;
     /* The segments' data converted once (the object does not change during the
      * call); segments out of that range are read per vertex. */
-    static SegConv conv[MAX_CONV];
+    static NativeSeg conv[NATIVE_SEG_CONV];
     uint32_t nconv = rt_ld32(gm + obj + OBJ_NSEG);
-    nconv = nconv <= MAX_CONV ? nconv : 0;
+    nconv = nconv <= NATIVE_SEG_CONV ? nconv : 0;
     if ((int32_t)rt_ld32(gm + mesh + MESH_NVERTS) <= 0)
         nconv = 0;
     for (uint32_t k = 0; k < nconv; k++)
-        seg_load(gm, obj, k, conv[k].m, conv[k].t);
+        native_seg_load(obj, k, &conv[k]);
     for (i = 0; i < (int32_t)rt_ld32(gm + mesh + MESH_NVERTS); i++, src += VERT_SIZE, ptr += VERT_SIZE) {
         double f = (nt + ldf(gm, src)) * scale;
         uint32_t nseg = rt_ld32(gm + obj + OBJ_NSEG);
@@ -175,14 +157,13 @@ static uint32_t deform_bent(Ctx *c, uint8_t *gm, uint32_t mesh, uint32_t src, ui
         }
         /* m[j]: the float at obj + 40 * k + 0x200 + 4 * j (segments k and k + 1),
          * t[j]: at obj + 12 * k + 0x104 + 4 * j. */
-        double mb[19], tb[6];
-        const double *m = mb, *t = tb;
-        if (k < nconv) {
-            m = conv[k].m;
-            t = conv[k].t;
-        } else {
-            seg_load(gm, obj, k, mb, tb);
-        }
+        NativeSeg sb;
+        const NativeSeg *sg = &sb;
+        if (k < nconv)
+            sg = &conv[k];
+        else
+            native_seg_load(obj, k, &sb);
+        const double *m = sg->m, *t = sg->t;
         double y = ldf(gm, src + 4u), z = ldf(gm, src + 8u);
         double a0 = m[2] * z + m[1] * y;
         a1 = f32(m[5] * z + m[4] * y);
