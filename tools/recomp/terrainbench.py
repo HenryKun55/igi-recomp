@@ -364,11 +364,18 @@ def load_frame(path):
     The Direct3D objects are replaced by the stub ones and the vertex buffer by a
     fresh area above the captured memory."""
     data = open(path, 'rb').read()
-    magic, ver, esp, eax, ecx, fcw = struct.unpack_from('<6I', data, 0)
-    assert magic == 0x44544749 and ver == 1, path
-    regs = list(struct.unpack_from('<8I', data, 24))
+    magic, ver = struct.unpack_from('<2I', data, 0)
+    assert magic == 0x44544749 and ver in (1, 2), path
+    if ver == 1:
+        esp, eax, ecx, fcw = struct.unpack_from('<4I', data, 8)
+        regs = list(struct.unpack_from('<8I', data, 24))
+        off = 56
+    else:   # version 2 (IGI_NATIVE_DUMP format, see nativebench.load_capture)
+        fn, esp, fcw = struct.unpack_from('<3I', data, 8)
+        assert fn == 0x00512C30, '%s: not a terrain capture' % path
+        regs = list(struct.unpack_from('<8I', data, 28))
+        off = 124
     m = Mem()
-    off = 56
     top = 0
     while True:
         a, n = struct.unpack_from('<II', data, off)
