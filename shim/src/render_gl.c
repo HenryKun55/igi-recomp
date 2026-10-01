@@ -1871,27 +1871,6 @@ static void pack_vertices(const Layout *L, const RVertex *v, uint32_t nv, uint32
     const uint32_t st = L->stride;
     uint8_t *d0 = vtx + (size_t)base * st;
     uint8_t *d = d0;
-    if (!L->pretransformed && !L->use_fog) {
-        /* Object-space vertices (the decoded vertex buffers): one pass. */
-        _Static_assert(MAX_STAGES == 2, "one-pass packing handles two texture stages");
-        const int col = L->use_color, nrm = L->has_normal, k0 = L->uv_src[0], k1 = L->uv_src[1];
-        const uint32_t oc = L->off_col, on = L->off_nrm, ou0 = L->off_uv[0], ou1 = L->off_uv[1];
-        for (uint32_t i = 0; i < nv; i++, d += st) {
-            const RVertex *s = &v[i];
-            memcpy(d, &s->x, 12);
-            if (col)
-                memcpy(d + oc, &s->color, 4);
-            if (nrm)
-                memcpy(d + on, &s->nx, 12);
-            if (k0 >= 0)
-                memcpy(d + ou0, s->uv[k0], 8);
-            if (k1 >= 0)
-                memcpy(d + ou1, s->uv[k1], 8);
-        }
-        pc_frame[PC_PACK_US] += fine_now() - t0;
-        PROF_SECTION_END;
-        return;
-    }
     if (L->pretransformed) {
         for (uint32_t i = 0; i < nv; i++, d += st) {
             float w = v[i].w != 0.0f ? 1.0f / v[i].w : 1.0f;
