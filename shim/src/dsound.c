@@ -149,28 +149,62 @@ static void mix(void *userdata, Uint8 *stream, int len)
         uint32_t total = b->size / (uint32_t)b->block;
         if (!total)
             continue;
-        double step = (double)b->freq / OUT_RATE;
-        double pos = b->pos;
+        /* 32.32 fixed-point position: no double math or float<->int
+         * conversions per sample (slow on the Vita's VFP). */
+        const uint64_t step = ((uint64_t)b->freq << 32) / OUT_RATE;
+        uint64_t pos = (uint64_t)(b->pos * 4294967296.0);
+        const uint8_t *data = g_mem + b->mem;
+        const uint32_t block = (uint32_t)b->block;
+        const int stereo = b->channels > 1, wide = b->bits != 8;
+        const uint32_t rch = stereo ? (uint32_t)(b->bits / 8) : 0u;
+        const float gl = b->gain_l, gr = b->gain_r;
+        /* Frames below `total` lie fully inside the buffer (block = channels * bytes). */
+        const uint32_t limit = total;
         for (int f = 0; f < frames; f++) {
-            uint32_t i0 = (uint32_t)pos;
+            uint32_t i0 = (uint32_t)(pos >> 32);
             if (i0 >= total) {
                 if (!b->looping) {
                     b->playing = 0;
                     pos = 0;
                     break;
                 }
-                pos -= total;
-                i0 = (uint32_t)pos;
+                pos -= (uint64_t)total << 32;
+                i0 = (uint32_t)(pos >> 32);
             }
-            float frac = (float)(pos - i0);
+            float frac = (float)(uint32_t)(pos >> 8 & 0xFFFFFFu) * (1.0f / 16777216.0f);
             uint32_t i1 = i0 + 1u < total ? i0 + 1u : (b->looping ? 0u : i0);
-            float l = sample_at(b, i0, 0) * (1.0f - frac) + sample_at(b, i1, 0) * frac;
-            float r = b->channels > 1 ? sample_at(b, i0, 1) * (1.0f - frac) + sample_at(b, i1, 1) * frac : l;
-            out[f * 2] += l * b->gain_l;
-            out[f * 2 + 1] += r * b->gain_r;
+            float l0, l1, r0, r1;
+            if (i0 < limit && i1 < limit) {
+                const uint8_t *p0 = data + i0 * block, *p1 = data + i1 * block;
+                if (wide) {
+                    int16_t a, c, d, e;
+                    memcpy(&a, p0, 2);
+                    memcpy(&c, p1, 2);
+                    memcpy(&d, p0 + rch, 2);
+                    memcpy(&e, p1 + rch, 2);
+                    l0 = (float)a * (1.0f / 32768.0f);
+                    l1 = (float)c * (1.0f / 32768.0f);
+                    r0 = (float)d * (1.0f / 32768.0f);
+                    r1 = (float)e * (1.0f / 32768.0f);
+                } else {
+                    l0 = ((float)p0[0] - 128.0f) * (1.0f / 128.0f);
+                    l1 = ((float)p1[0] - 128.0f) * (1.0f / 128.0f);
+                    r0 = ((float)p0[rch] - 128.0f) * (1.0f / 128.0f);
+                    r1 = ((float)p1[rch] - 128.0f) * (1.0f / 128.0f);
+                }
+            } else {
+                l0 = sample_at(b, i0, 0);
+                l1 = sample_at(b, i1, 0);
+                r0 = sample_at(b, i0, 1);
+                r1 = sample_at(b, i1, 1);
+            }
+            float l = l0 + (l1 - l0) * frac;
+            float r = stereo ? r0 + (r1 - r0) * frac : l;
+            out[f * 2] += l * gl;
+            out[f * 2 + 1] += r * gr;
             pos += step;
         }
-        b->pos = pos;
+        b->pos = (double)pos * (1.0 / 4294967296.0);
     }
     for (int f = 0; f < frames * 2; f++) {
         if (out[f] > 1.0f)
