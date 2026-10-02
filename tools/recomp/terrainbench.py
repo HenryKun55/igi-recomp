@@ -11,14 +11,19 @@ running game (IGI_TERRAIN_DUMP, runtime/src/capture.c).
 
   terrainbench.py build IGI.exe GEN_DIR OUT.elf
   terrainbench.py run IGI.exe A.elf [B.elf] [--patches N] [--seed S] [--frame F]
-                  [--native 0|1] [--profile GEN_DIR [--func f_XXXXXXXX]]
+                  [--native 0|1] [--exact 0|1 [--exact 0|1]] [--profile GEN_DIR [--func f_XXXXXXXX]]
   terrainbench.py diff IGI.exe A.elf [--seed S --count N | --frame F ...]
+  terrainbench.py fast IGI.exe A.elf [--seed S --count N | --frame F ...]
 
 run: with two ELFs (e.g. before and after a generator change) also checks that
 the final guest memory (outside the dead stack) and context are identical.
 diff: runs one ELF with g_igi_native = 0 (recompiled code) and 1 (the native
-version in runtime/src/native_terrain.c) and compares them the same way,
-including the logged Direct3D calls.
+version in runtime/src/native_terrain.c, bit-exact) and compares them the same
+way, including the logged Direct3D calls.
+fast: runs the native bit-exact version (g_terrain_exact = 1) and the fast
+single-precision one (0) and compares the Direct3D call streams and, per draw
+call, the triangles' vertices within tolerances (triangles at clip boundaries
+can differ in number: those are aligned and counted).
 
 --profile writes A.elf.prof: executed ARM instructions per guest instruction of
 one function (default f_00512C30), from the debug line info. The ELF is built
@@ -26,6 +31,7 @@ from the runtime headers next to this script (armbench.py).
 """
 import argparse
 import bisect
+import difflib
 import os
 import math
 import random
@@ -401,9 +407,11 @@ def load_frame(path):
     return Frame(m, esp, regs, fcw, gsize, log)
 
 
-def run(exe, path, npatch, seed, prof_gen=None, prof_func='f_00512C30', native=None, frame=None, setup=None):
+def run(exe, path, npatch, seed, prof_gen=None, prof_func='f_00512C30', native=None, frame=None, setup=None,
+        exact=None):
     """Runs f_00512C30 on a synthetic scene (or a Frame, e.g. a captured one).
-    native: value for g_igi_native (None leaves the ELF's default)."""
+    native: value for g_igi_native, exact: for g_terrain_exact (None leaves the
+    ELF's default)."""
     if frame is None:
         frame = Frame(scene(npatch, seed), 0x02EFF000)
     ab = armbench
@@ -429,6 +437,8 @@ def run(exe, path, npatch, seed, prof_gen=None, prof_func='f_00512C30', native=N
         uc.mem_write(ab.GMEM + a, b)
     if native is not None:
         uc.mem_write(syms['g_igi_native'], struct.pack('<i', native))
+    if exact is not None:
+        uc.mem_write(syms['g_terrain_exact'], struct.pack('<i', exact))
     uc.mem_write(syms['g_com_log'], struct.pack('<I', frame.com_log))
     uc.mem_write(ab.GMEM + esp, struct.pack('<I', 0xFDFDFD00))
     regs = list(frame.regs)
@@ -564,7 +574,7 @@ def diff_mode(args):
     tot = [0, 0]
     for label, case in cases:
         frame = load_frame(case) if isinstance(case, str) else Frame(scene(args.patches, case), 0x02EFF000)
-        res = [run(args.exe, args.files[0], 0, 0, native=k, frame=frame) for k in (0, 1)]
+        res = [run(args.exe, args.files[0], 0, 0, native=k, frame=frame, exact=1) for k in (0, 1)]
         mem = res[0][3]
         verts = struct.unpack_from('<I', mem, 0xA7E078)[0]
         clips = struct.unpack_from('<I', mem, 0xA7E070)[0]
@@ -586,15 +596,158 @@ def diff_mode(args):
     sys.exit(1 if fails else 0)
 
 
+# ---- fast mode: the single-precision terrain renderer against the exact one ----
+
+VERT = struct.Struct('<4f2I2f')
+SLOT_DRAW = 0x80
+
+
+def com_calls(mem, log):
+    """The logged COM calls: (vtable slot, arguments with this)."""
+    n = struct.unpack_from('<I', mem, log)[0]
+    p, end = log + 4, log + 4 + 4 * n
+    calls = []
+    while p < end:
+        slot, k = struct.unpack_from('<2I', mem, p)
+        calls.append((slot, list(struct.unpack_from('<%dI' % k, mem, p + 8))))
+        p += 8 + 4 * k
+    return calls
+
+
+def draw_tris(mem, args, vb0):
+    """Triangles of a DrawIndexedPrimitiveVB call: per triangle 3 vertices
+    (sx, sy, sz, rhw, colour, specular, tu, tv)."""
+    idx, cnt = args[5], args[6]
+    ids = struct.unpack_from('<%dH' % cnt, mem, idx)
+    v = [VERT.unpack_from(mem, vb0 + 32 * i) for i in ids]
+    return [v[k:k + 3] for k in range(0, cnt - cnt % 3, 3)]
+
+
+class Stats:
+    FIELDS = ('pos px', 'sz rel', 'rhw rel', 'colour', 'fog', 'uv')
+
+    def __init__(self):
+        self.max = [0.0] * len(self.FIELDS)
+        self.over = [0] * len(self.FIELDS)
+        self.verts = 0
+        self.tris = [0, 0]
+        self.draws = 0
+        self.draws_diff = 0
+        self.unmatched = [0, 0]
+        self.calls_diff = 0
+        self.fog_hist = {}
+
+    LIMIT = (0.05, 1e-4, 1e-4, 1, 1, 1e-3)
+
+    def vert(self, a, b):
+        d = [max(abs(a[0] - b[0]), abs(a[1] - b[1])), abs(a[2] - b[2]) / max(abs(a[2]), 1e-30),
+             abs(a[3] - b[3]) / max(abs(a[3]), 1e-30),
+             max(abs(((a[4] >> s) & 255) - ((b[4] >> s) & 255)) for s in (0, 8, 16)),
+             abs((a[5] >> 24) - (b[5] >> 24)),
+             max(abs(a[6] - b[6]), abs(a[7] - b[7])) / max(1.0, abs(a[6]), abs(a[7]))]
+        for k, x in enumerate(d):
+            if not x <= self.max[k]:
+                self.max[k] = x
+            if not x <= self.LIMIT[k]:
+                self.over[k] += 1
+        self.fog_hist[d[4]] = self.fog_hist.get(d[4], 0) + 1
+        self.verts += 1
+
+
+def tri_key(t):
+    return tuple((round(v[0] * 4), round(v[1] * 4)) for v in t)
+
+
+def compare_fast(ra, rb, frame, st):
+    """Exact (ra) against fast (rb): the COM call streams, then the triangles of
+    every draw call."""
+    ma, mb = ra[3], rb[3]
+    vb0 = struct.unpack('<I', frame.mem.w[0xA7F89C])[0]
+    ca, cb = com_calls(ma, frame.com_log), com_calls(mb, frame.com_log)
+    notes = []
+    if [c[0] for c in ca] != [c[0] for c in cb]:
+        st.calls_diff += 1
+        notes.append('COM call sequence differs (%d / %d calls)' % (len(ca), len(cb)))
+        return notes
+    for (sa, aa), (sb, ab) in zip(ca, cb):
+        if sa != SLOT_DRAW:
+            if aa != ab:
+                st.calls_diff += 1
+                notes.append('slot %02X arguments differ: %s / %s' % (sa, aa, ab))
+            continue
+        # this, type, vb, start vertex, vertex count, indices, index count, flags
+        if [aa[k] for k in (0, 1, 2, 3, 5, 7)] != [ab[k] for k in (0, 1, 2, 3, 5, 7)]:
+            st.calls_diff += 1
+            notes.append('draw arguments differ: %s / %s' % (aa, ab))
+            continue
+        ta, tb = draw_tris(ma, aa, vb0), draw_tris(mb, ab, vb0)
+        st.draws += 1
+        st.tris[0] += len(ta)
+        st.tris[1] += len(tb)
+        if len(ta) == len(tb):
+            for x, y in zip(ta, tb):
+                for k in range(3):
+                    st.vert(x[k], y[k])
+            continue
+        st.draws_diff += 1
+        sm = difflib.SequenceMatcher(None, [tri_key(t) for t in ta], [tri_key(t) for t in tb], autojunk=False)
+        matched = 0
+        for blk in sm.get_matching_blocks():
+            for k in range(blk.size):
+                for m in range(3):
+                    st.vert(ta[blk.a + k][m], tb[blk.b + k][m])
+            matched += blk.size
+        st.unmatched[0] += len(ta) - matched
+        st.unmatched[1] += len(tb) - matched
+    return notes
+
+
+def fast_mode(args):
+    """Exact (g_terrain_exact = 1) against fast (0), both native, on several scenes."""
+    cases = [('frame %s' % os.path.basename(p), p) for p in args.frame] or \
+        [('seed %3d' % seed, seed) for seed in range(args.seed, args.seed + args.count)]
+    st = Stats()
+    tot = [0, 0]
+    bad = 0
+    for label, case in cases:
+        frame = load_frame(case) if isinstance(case, str) else Frame(scene(args.patches, case), 0x02EFF000)
+        res = [run(args.exe, args.files[0], 0, 0, native=1, frame=frame, exact=k) for k in (1, 0)]
+        tot[0] += res[0][1]
+        tot[1] += res[1][1]
+        t0 = list(st.tris)
+        u0 = list(st.unmatched)
+        notes = compare_fast(res[0], res[1], frame, st)
+        if res[0][0] != 'ok' or res[1][0] != 'ok':
+            notes.append('status %s / %s' % (res[0][0], res[1][0]))
+        bad += bool(notes)
+        print('%s: triangles %5d / %5d unmatched %3d / %3d  ARM insns %9d -> %9d (%.2fx)%s' % (
+            label, st.tris[0] - t0[0], st.tris[1] - t0[1], st.unmatched[0] - u0[0], st.unmatched[1] - u0[1],
+            res[0][1], res[1][1], res[0][1] / max(1, res[1][1]), '  ' + notes[0] if notes else ''))
+        for n in notes[1:6]:
+            print('    ' + n)
+    print('%d scenes, %d with differing calls or status; %d draw calls, %d with differing triangle counts' % (
+        len(cases), bad, st.draws, st.draws_diff))
+    print('triangles exact %d fast %d; unmatched (at clip boundaries) exact %d fast %d' % (
+        st.tris[0], st.tris[1], st.unmatched[0], st.unmatched[1]))
+    print('%d vertices compared; max difference / vertices over the limit:' % st.verts)
+    for k, name in enumerate(Stats.FIELDS):
+        print('    %-8s max %-12.6g over %-8g: %d' % (name, st.max[k], Stats.LIMIT[k], st.over[k]))
+    print('    fog byte difference histogram: %s' % ', '.join('%d: %d' % (k, v) for k, v in sorted(st.fog_hist.items())))
+    print('ARM instructions exact %d fast %d (%.2fx)' % (tot[0], tot[1], tot[0] / max(1, tot[1])))
+    sys.exit(1 if bad else 0)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('mode', choices=['build', 'run', 'diff'])
+    ap.add_argument('mode', choices=['build', 'run', 'diff', 'fast'])
     ap.add_argument('exe')
     ap.add_argument('files', nargs='+')
     ap.add_argument('--patches', type=int, default=12)
     ap.add_argument('--seed', type=int, default=1)
     ap.add_argument('--count', type=int, default=20, help='diff: number of scenes (seeds from --seed)')
     ap.add_argument('--native', type=int, choices=[0, 1], help='run: g_igi_native value')
+    ap.add_argument('--exact', type=int, choices=[0, 1], action='append', default=[],
+                    help='run: g_terrain_exact value (once per ELF, or once for all)')
     ap.add_argument('--frame', action='append', default=[], help='diff: captured frame (IGI_TERRAIN_DUMP file)')
     ap.add_argument('--profile', metavar='GEN_DIR')
     ap.add_argument('--func', default='f_00512C30')
@@ -605,9 +758,14 @@ def main():
     if args.mode == 'diff':
         diff_mode(args)
         return
+    if args.mode == 'fast':
+        fast_mode(args)
+        return
     frame = load_frame(args.frame[0]) if args.frame else None
+    files = args.files if len(args.exact) < 2 else [args.files[0]] * len(args.exact)
+    exact = args.exact if len(args.exact) == len(files) else args.exact[:1] * len(files) or [None] * len(files)
     res = [run(args.exe, e, args.patches, args.seed, args.profile if k == 0 else None, args.func, args.native,
-               frame) for k, e in enumerate(args.files)]
+               frame, exact=exact[k]) for k, e in enumerate(files)]
     names = set()
     for r in res:
         names |= set(r[2])

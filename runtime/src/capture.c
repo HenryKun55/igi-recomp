@@ -212,8 +212,11 @@ void capture_init(void)
         if (!check_every)
             check_every = 1;
         g_native_hook = hook;
+        /* Only the bit-exact terrain renderer matches the recompiled code. */
+        g_terrain_exact = 1;
         rt_log("check: comparing native and recompiled code for %u calls of %08X, every %u", check_left, check_fn,
                check_every);
+        rt_log("check: terrain renderer set to bit-exact");
     }
     const char *e = getenv("IGI_NATIVE_DUMP");
     if (e && *e) {
