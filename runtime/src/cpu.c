@@ -259,6 +259,68 @@ RtStr rt_rep_stos_slow(uint8_t *gm, uint32_t df, uint32_t n, uint32_t di, uint32
     return r;
 }
 
+/* GCC must not turn these loops back into memmove/memset calls. */
+#if defined(__GNUC__) && !defined(__clang__)
+#define RT_NO_LIBCALL __attribute__((optimize("no-tree-loop-distribute-patterns")))
+#else
+#define RT_NO_LIBCALL
+#endif
+
+RT_NO_LIBCALL void rt_copy_fwd(uint8_t *d, const uint8_t *s, uint32_t b)
+{
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+    for (; b >= 16u; b -= 16u, d += 16, s += 16)
+        vst1q_u8(d, vld1q_u8(s));
+    if (b & 8u) {
+        vst1_u8(d, vld1_u8(s));
+        d += 8;
+        s += 8;
+    }
+    if (b & 4u) {
+        rt_st32(d, rt_ld32(s));
+        d += 4;
+        s += 4;
+    }
+    if (b & 2u) {
+        d[0] = s[0];
+        d[1] = s[1];
+        d += 2;
+        s += 2;
+    }
+    if (b & 1u)
+        d[0] = s[0];
+#else
+    memmove(d, s, b);
+#endif
+}
+
+RT_NO_LIBCALL void rt_fill_fwd(uint8_t *d, uint32_t v, uint32_t b)
+{
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+    const uint8x16_t q = vreinterpretq_u8_u32(vdupq_n_u32(v));
+    for (; b >= 16u; b -= 16u, d += 16)
+        vst1q_u8(d, q);
+    if (b & 8u) {
+        vst1_u8(d, vget_low_u8(q));
+        d += 8;
+    }
+    if (b & 4u) {
+        rt_st32(d, v);
+        d += 4;
+    }
+    if (b & 2u) {
+        d[0] = (uint8_t)v;
+        d[1] = (uint8_t)(v >> 8);
+        d += 2;
+    }
+    if (b & 1u)
+        d[0] = (uint8_t)v;
+#else
+    for (uint32_t i = 0; i < b; i++)
+        d[i] = (uint8_t)(v >> (8u * (i & 3u)));
+#endif
+}
+
 /* ---- dispatch ---------------------------------------------------------- */
 
 /* Open-addressing hash table built by the generator (dispatch_table.c): a
