@@ -2,6 +2,8 @@
  * recompiler inserts into the functions listed in tools/recomp/gen.py GAME_HOOKS. */
 #include "igi_fixes.h"
 #include "runtime.h"
+#include "tick_rate.h"
+#include "tick_test.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -70,33 +72,6 @@ static void save_config(Ctx *c)
     guest_call(c, GAME_SAVE_CONFIG, 1, &arg);
 }
 
-/* Gameplay update/render rate override (0 = the game's own 30 Hz). */
-static uint32_t game_hz(void)
-{
-    static int hz = -1;
-    if (hz < 0) {
-        hz = 0;
-        const char *e = getenv("IGI_GAME_HZ");
-        if (e)
-            hz = atoi(e);
-#if defined(__vita__)
-        FILE *f = fopen("ux0:data/igi/igi.cfg", "r");
-        if (f) {
-            char buf[128];
-            while (fgets(buf, sizeof(buf), f))
-                if (strncmp(buf, "game_hz=", 8) == 0)
-                    hz = atoi(buf + 8);
-            fclose(f);
-        }
-#endif
-        if (hz < 0 || hz > 240)
-            hz = 0;
-        if (hz)
-            rt_log("gameplay rate: %d Hz", hz);
-    }
-    return (uint32_t)hz;
-}
-
 void rt_probe(Ctx *c, uint32_t func)
 {
     uint32_t sp = c->r[4];
@@ -120,13 +95,16 @@ void rt_probe(Ctx *c, uint32_t func)
     }
     case 0x00402820u: {
         /* SetRate(hz): gameplay runs the game's update and render at 30 Hz (menus
-         * at 60). igi.cfg game_hz=N / IGI_GAME_HZ=N replaces the 30. Updates
-         * stay fixed-step, so a rate the CPU can't sustain renders less often. */
-        uint32_t hz = game_hz();
-        if (hz && RD32(sp + 4u) == 30u)
-            WR32(sp + 4u, hz);
+         * at 60). igi.cfg game_hz=N / IGI_GAME_HZ=N replaces the 30 (see
+         * runtime/src/tick_rate.c). Updates stay fixed-step, so a rate the CPU
+         * can't sustain renders less often. */
+        WR32(sp + 4u, tick_set_rate(RD32(sp), RD32(sp + 4u)));
+        tick_test_set_rate(RD32(sp), RD32(sp + 4u));
         break;
     }
+    case 0x00402260u:
+        tick_test_scheduler();
+        break;
     case 0x00497700u:
         flushing_state = 0;
         break;

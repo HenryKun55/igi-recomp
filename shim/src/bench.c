@@ -17,6 +17,7 @@
 #include "igi_fixes.h"
 #include "platform.h"
 #include "runtime.h"
+#include "tick_test.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -303,6 +304,8 @@ void bench_frame(uint64_t now, uint64_t frame_us, uint64_t draw_us, uint64_t swa
         }
         break;
     case PH_LOADING:
+        if (tick_test_enabled())
+            break;   /* the update-rate harness takes over once a level loads */
         if (state == UI_GAMEPLAY)
             set_phase(PH_SETTLE, now);
         else if (state == UI_CUTSCENE && state_frames >= SETTLE_FRAMES &&

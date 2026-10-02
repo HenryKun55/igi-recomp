@@ -17,6 +17,7 @@ import sys
 from capstone import x86 as X
 
 from analyze import Analyzer, Function, JCC
+import tick_rate
 
 REGS32 = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi']
 SUB16 = {'ax': 'eax', 'cx': 'ecx', 'dx': 'edx', 'bx': 'ebx', 'sp': 'esp', 'bp': 'ebp', 'si': 'esi', 'di': 'edi'}
@@ -52,6 +53,7 @@ GAME_HOOKS = [
     0x00497700,   # 2D render queue flush (start)
     0x00497860,   # 2D render queue: per-node state setup
     0x00402820,   # game clock: set the update/render rate (Hz)
+    0x00402260,   # game clock: scheduler (one update or render per call)
 ]
 
 # MSVC CRT setjmp/longjmp: setjmp call sites become host setjmp, and the
@@ -239,6 +241,7 @@ class FuncGen:
         self.fused_pairs = {}
         self.fcom_tests = set()
         self.cur_idx = 0
+        self.cur_addr = 0
         self.fdepth = {}
         self.fcalls = {}
         self.dirty = {}
@@ -279,6 +282,9 @@ class FuncGen:
 
     def addr(self, op):
         m = op.mem
+        slot = self.g.tick_mem.get(self.cur_addr)
+        if slot is not None and not m.base and not m.index:
+            return h(slot)   # update-rate constant (tools/recomp/tick_rate.py)
         parts = []
         if m.segment and self.rname(m.segment) == 'fs':
             parts.append('c->fs_base')
@@ -323,6 +329,9 @@ class FuncGen:
         if op.type == X.X86_OP_REG:
             return self.reg_read(self.rname(op.reg))
         if op.type == X.X86_OP_IMM:
+            slot = self.g.tick_imm.get(self.cur_addr)
+            if slot is not None:
+                return '%s(gm + %s)' % (PRD[size], h(slot))   # update-rate constant
             return h(op.imm & ((1 << (8 * size)) - 1))
         if op.type == X.X86_OP_MEM:
             return '%s(%s)' % (PRD[size], addr_var or self.mptr(op))
@@ -800,6 +809,9 @@ class FuncGen:
                 code = self.emit_insn(ins, idx)
             except Unsupported as e:
                 code = ['SPILL; rt_unimplemented(c, %s, "%s"); return RETC;' % (h(a), str(e).replace('"', "'"))]
+            if a in tick_rate.TICK_ONLY:
+                # Update-rate fix: a per-step counter advances on 30 Hz ticks only.
+                code = ['if (rt_tick_now()) {'] + code + ['}']
             nxt = a + ins.size
             falls = self.falls_through(ins)
             if a in self.fused_pairs:
@@ -962,6 +974,7 @@ class FuncGen:
         ops = ins.ops
         nxt = a + ins.size
         raw = bytes(ins.raw.bytes)
+        self.cur_addr = a
         if raw[0] in (0xD8, 0xD9, 0xDA, 0xDB, 0xDC, 0xDD, 0xDE, 0xDF) or m == 'wait':
             return self.emit_x87(ins, raw)
         self.cur_idx = idx
@@ -1536,7 +1549,7 @@ class FuncGen:
         o = ins.ops[0]
         if o.type == X.X86_OP_REG and self.rname(o.reg) not in REGS32:
             raise Unsupported('push %s' % self.rname(o.reg))
-        if o.type == X.X86_OP_IMM:
+        if o.type == X.X86_OP_IMM and ins.addr not in self.g.tick_imm:
             return ['esp -= 4u; GWR32(esp, %s);' % h(o.imm)]
         return ['{ uint32_t v = %s; esp -= 4u; GWR32(esp, v); }' % self.rd(o, 4)]
 
@@ -1835,6 +1848,7 @@ class Generator:
         self.funcs, self.entries = self.an.run()
         self.funcs = {e: f for e, f in self.funcs.items() if not f.bad}
         self.func_set = set(self.funcs)
+        self.tick_mem, self.tick_imm, self.tick_slots = tick_rate.build(self.an)
         # Entry hooks: game-specific fixes (runtime/src/igi_fixes.c) plus diagnostic probes.
         self.probes = set(GAME_HOOKS) | {int(x, 16) for x in os.environ.get('IGI_PROBES', '').replace(',', ' ').split()}
         self.imports_used = {}
@@ -1943,8 +1957,9 @@ class Generator:
                     f.write(self.wrap(e, body, fg))
         self.write_header(out_dir)
         self.write_table(out_dir, entries)
+        tick_rate.write_table(os.path.join(out_dir, 'tick_tables.c'), self.tick_slots)
         with open(os.path.join(out_dir, 'files.txt'), 'w') as f:
-            f.write('\n'.join(files + ['dispatch_table.c', 'import_stubs.c']) + '\n')
+            f.write('\n'.join(files + ['dispatch_table.c', 'import_stubs.c', 'tick_tables.c']) + '\n')
         print('functions: %d, files: %d' % (len(entries), len(files)))
         print('x87 modes: %s' % ', '.join('%s %d' % kv for kv in sorted(self.stats.items())))
         for k, v in sorted(unsupported.items(), key=lambda x: -x[1]):
@@ -1954,6 +1969,15 @@ class Generator:
         if entry in self.probes:
             # Diagnostic probe requested at configure time (IGI_PROBES).
             body = ['    c->r[0] = eax; c->r[1] = ecx; c->r[4] = esp; rt_probe(c, 0x%08Xu);' % entry] + body
+        gate = tick_rate.GATES.get(entry)
+        if gate is not None:
+            # Update-rate gate (runtime/src/tick_rate.c): may skip or repeat the call.
+            body = ['    { uint64_t hr; if (rt_tick_gate(c, 0x%08Xu, esp, %du, &hr)) { return hr; } }'
+                    % (entry, gate[0])] + body
+        repl = tick_rate.HOOKS.get(entry)
+        if repl:
+            # Update-rate fix (runtime/src/tick_rate.c): may handle the call itself.
+            body = ['    { uint64_t hr; if (%s(c, esp, ecx, eax, &hr)) { return hr; } }' % repl] + body
         hle = self.hle.get(entry)
         if hle:
             body = ['    { uint64_t hr; if (%s(c, esp, ecx, eax, &hr)) { return hr; } }' % hle] + body
