@@ -7,7 +7,8 @@
  * times a second and accumulates:
  *   - exclusive samples per id (where the time is spent),
  *   - inclusive samples per guest function (on the shadow stack),
- *   - caller/callee pairs (which guest function the current code was called from).
+ *   - caller/callee pairs (which guest function the current code was called from),
+ *   - call edges on the shadow stack (inclusive samples per caller -> callee: a call tree).
  * Results go to ux0:data/igi/profile.txt (Vita) or igi_profile.txt (desktop) every
  * 10 seconds and at exit.
  *
@@ -53,7 +54,7 @@ typedef struct Map {
     uint32_t n;
 } Map;
 
-static Map excl, incl, pairs;
+static Map excl, incl, pairs, edges;
 static uint32_t total;
 static volatile int reset_requested, stopped;
 
@@ -104,6 +105,14 @@ static void count(uint32_t cur, const uint32_t *stack, uint32_t depth)
             j++;
         if (j == i)
             map_add(&incl, stack[i]);
+    }
+    for (uint32_t i = 1; i < depth; i++) {
+        uint64_t key = ((uint64_t)stack[i - 1] << 32) | stack[i];
+        uint32_t j = 1;
+        while (j < i && (stack[j - 1] != stack[i - 1] || stack[j] != stack[i]))
+            j++;
+        if (j == i)
+            map_add(&edges, key);
     }
     /* Caller: the innermost guest function below the current code. */
     uint32_t caller = 0;
@@ -191,7 +200,7 @@ static int by_count(const void *a, const void *b)
     return x->key < y->key ? -1 : x->key > y->key;
 }
 
-static void dump_map(FILE *f, const Map *m, const char *title, int is_pair)
+static void dump_map(FILE *f, const Map *m, const char *title, int is_pair, uint32_t top)
 {
     static Entry sorted[MAP_SIZE];
     uint32_t n = 0;
@@ -200,7 +209,7 @@ static void dump_map(FILE *f, const Map *m, const char *title, int is_pair)
             sorted[n++] = m->e[i];
     qsort(sorted, n, sizeof(Entry), by_count);
     fprintf(f, "\n%s\n", title);
-    for (uint32_t i = 0; i < n && i < TOP; i++) {
+    for (uint32_t i = 0; i < n && i < top; i++) {
         char a[160], b[160];
         double pct = total ? 100.0 * sorted[i].count / total : 0.0;
         if (is_pair)
@@ -222,9 +231,10 @@ static void dump(void)
             total * SAMPLE_US / 1000u, SAMPLE_US);
     if (per_frame)
         fprintf(f, "Per-frame mode: samples of %u of %u frames kept\n", frames_kept, frames_seen);
-    dump_map(f, &excl, "Exclusive (code running when sampled; imports as dll!name, COM/callbacks as thunk):", 0);
-    dump_map(f, &incl, "Inclusive (guest functions on the shadow call stack):", 0);
-    dump_map(f, &pairs, "Current code <- calling guest function:", 1);
+    dump_map(f, &excl, "Exclusive (code running when sampled; imports as dll!name, COM/callbacks as thunk):", 0, TOP);
+    dump_map(f, &incl, "Inclusive (guest functions on the shadow call stack):", 0, TOP);
+    dump_map(f, &pairs, "Current code <- calling guest function:", 1, TOP);
+    dump_map(f, &edges, "Call edges, inclusive (callee <- caller):", 1, TOP * 4u);
     fclose(f);
 }
 
@@ -242,6 +252,7 @@ static void sampler_loop(void)
             memset(&excl, 0, sizeof(excl));
             memset(&incl, 0, sizeof(incl));
             memset(&pairs, 0, sizeof(pairs));
+            memset(&edges, 0, sizeof(edges));
             total = 0;
             n_pend = 0;
             frames_kept = frames_seen = 0;

@@ -1026,7 +1026,7 @@ static void send_lights(void)
     light_sent_serial = g_light_serial;
     const uint32_t *rs = g_rs.rs;
     LightSnapshot *cur = rq_begin(bk_lights, sizeof(*cur));
-    memset(cur, 0, sizeof(*cur));   /* also clears padding for memcmp */
+    rt_fill_small((uint8_t *)cur, 0, sizeof(*cur));   /* also clears padding for memcmp; no SceLibc memset */
     cur->ambient = rs[139];
     cur->color_material = rs[141] && rs[145] == 1u;
     cur->normalize = rs[143] != 0;

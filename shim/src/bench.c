@@ -32,7 +32,8 @@
  * present. bench_frames.csv gets one line per frame, and the summary has a line
  * for the frames whose busy time reaches the slow threshold (a sixth number in
  * bench.txt, IGI_BENCH_SLOW=<ms>; default 16 ms). With IGI_PROFILE and a threshold
- * given, the profile keeps only the samples of those slow frames. */
+ * given, the profile keeps only the samples of those slow frames (a negative
+ * threshold: of the frames faster than that, for comparisons). */
 #include "bench.h"
 #include "igi_fixes.h"
 #include "platform.h"
@@ -105,7 +106,8 @@ static int shot_every;          /* screenshot every N measured frames (0: none) 
 static int hold_secs;           /* sleep at the phase boundaries (see the top) */
 static int mission = 1;         /* mission list entry to start (1 = first) */
 static int views;               /* views mode: number of traced views (0: movement pattern) */
-static int slow_ms;             /* slow frame threshold (0: SLOW_DEFAULT_MS, profile keeps every frame) */
+static int slow_ms;             /* slow frame threshold, ms (0: SLOW_DEFAULT_MS, profile keeps every frame;
+                                 * negative: profile keeps the frames faster than -slow_ms) */
 #define SLOW_DEFAULT_MS 16
 static int view, view_frames, view_pending;
 #define VIEW_TURN_FRAMES 10u
@@ -402,8 +404,9 @@ static void finish(uint64_t now)
     free(bt);
     char all[512], slow[512], slow_name[32];
     breakdown(all, sizeof(all), "all frames", 0.0f);
-    snprintf(slow_name, sizeof(slow_name), "busy >= %d ms", slow_ms > 0 ? slow_ms : SLOW_DEFAULT_MS);
-    breakdown(slow, sizeof(slow), slow_name, (float)(slow_ms > 0 ? slow_ms : SLOW_DEFAULT_MS));
+    int thr = slow_ms > 0 ? slow_ms : slow_ms < 0 ? -slow_ms : SLOW_DEFAULT_MS;
+    snprintf(slow_name, sizeof(slow_name), "busy >= %d ms", thr);
+    breakdown(slow, sizeof(slow), slow_name, (float)thr);
     write_frames();
     rt_log("%s", line);
     rt_log("bench %s", all);
@@ -520,7 +523,7 @@ void bench_frame(uint64_t now, uint64_t frame_us, uint64_t draw_us, uint64_t swa
             mouse_acc = 0;
             memset(&g_bench_ctr, 0, sizeof(g_bench_ctr));
 #ifdef IGI_PROFILE
-            rt_prof_reset(slow_ms > 0);
+            rt_prof_reset(slow_ms != 0);
 #endif
             run_start_us = now;
             set_phase(PH_RUN, now);
@@ -547,7 +550,8 @@ void bench_frame(uint64_t now, uint64_t frame_us, uint64_t draw_us, uint64_t swa
             s->read_ms = (float)g_bench_ctr.read_us / 1000.0f;
             s->allocs = g_bench_ctr.heap_allocs;
 #ifdef IGI_PROFILE
-            rt_prof_frame_end(slow_ms <= 0 || s->frame_ms - s->wait_ms >= (float)slow_ms);
+            float b = s->frame_ms - s->wait_ms;
+            rt_prof_frame_end(slow_ms == 0 || (slow_ms > 0 ? b >= (float)slow_ms : b < (float)-slow_ms));
 #endif
         }
         memset(&g_bench_ctr, 0, sizeof(g_bench_ctr));

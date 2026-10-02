@@ -22,7 +22,8 @@
 #                 the traces) is copied there too
 #        SLOW     slow frame threshold in ms for the summary's slow-frame breakdown
 #                 (default 16); with an IGI_PROFILE build, the profile then keeps only
-#                 the samples of frames at least that slow
+#                 the samples of frames at least that slow (negative: of the frames
+#                 faster than -SLOW ms, for comparisons)
 #        FRAMES   where to copy the per-frame breakdown bench_frames.csv (default
 #                 $BUILD/bench_frames.csv)
 #

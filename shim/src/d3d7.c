@@ -4,6 +4,7 @@
 #include "render.h"
 
 #include <stdatomic.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
@@ -622,22 +623,22 @@ static void dev_GetMaterial(Ctx *c)
     stdcall_ret(c, D3D_OK, 2);
 }
 
+#define D3DLIGHT7_SIZE 104u
+_Static_assert(offsetof(Light, diffuse) == 4u && offsetof(Light, specular) == 20u && offsetof(Light, ambient) == 36u &&
+                   offsetof(Light, pos) == 52u && offsetof(Light, dir) == 64u && offsetof(Light, range) == 76u &&
+                   offsetof(Light, enabled) == D3DLIGHT7_SIZE,
+               "Light starts with the D3DLIGHT7 layout");
+
 static void dev_SetLight(Ctx *c)
 {
     uint32_t i = ARG(1), p = ARG(2);
     if (i < MAX_LIGHTS) {
-        Light n = g_rs.lights[i];
-        n.type = RD32(p);
-        memcpy(n.diffuse, gptr(p + 4u), 16);
-        memcpy(n.specular, gptr(p + 20u), 16);
-        memcpy(n.ambient, gptr(p + 36u), 16);
-        memcpy(n.pos, gptr(p + 52u), 12);
-        memcpy(n.dir, gptr(p + 64u), 12);
-        memcpy(&n.range, gptr(p + 76u), 28);
-        if (words_differ(&n, &g_rs.lights[i], sizeof(n))) {
+        /* D3DLIGHT7 is Light up to `enabled` (per object: no SceLibc memcpy). */
+        Light *l = &g_rs.lights[i];
+        if (words_differ(l, gptr(p), D3DLIGHT7_SIZE)) {
             render_state_changing();
             g_light_serial++;
-            g_rs.lights[i] = n;
+            rt_copy_small(l, gptr(p), D3DLIGHT7_SIZE);
         }
     }
     stdcall_ret(c, D3D_OK, 3);
