@@ -72,6 +72,29 @@ static void save_config(Ctx *c)
     guest_call(c, GAME_SAVE_CONFIG, 1, &arg);
 }
 
+/* ---- idle time ------------------------------------------------------------
+ * The main loop calls the scheduler (0x402260) over and over; a loop pass in
+ * which it neither advanced the step counter ([*0x567C8C]+0x34) nor presented a
+ * frame was spent waiting for the next fixed step. Benchmarks and the overlay
+ * report busy time as frame time minus this. */
+extern uint64_t g_idle_us;        /* shim/src/kernel32.c */
+extern uint32_t g_frame_serial;   /* shim/src/render_gl.c: presented frames */
+uint64_t win32_perf_counter(void);
+
+static void scheduler_idle(void)
+{
+    static uint64_t last_us;
+    static uint32_t last_steps, last_frame;
+    uint64_t now = win32_perf_counter();
+    uint32_t g = RD32(0x00567C8Cu);
+    uint32_t steps = g ? RD32(g + 0x34u) : 0u;
+    if (last_us && steps == last_steps && g_frame_serial == last_frame)
+        g_idle_us += now - last_us;
+    last_us = now;
+    last_steps = steps;
+    last_frame = g_frame_serial;
+}
+
 void rt_probe(Ctx *c, uint32_t func)
 {
     uint32_t sp = c->r[4];
@@ -104,6 +127,7 @@ void rt_probe(Ctx *c, uint32_t func)
     }
     case 0x00402260u:
         tick_test_scheduler();
+        scheduler_idle();
         break;
     case 0x00497700u:
         flushing_state = 0;
