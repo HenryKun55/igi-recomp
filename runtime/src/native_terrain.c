@@ -1207,7 +1207,7 @@ static uint32_t clip_overflow;
  * flush_batches. A found batch has no other effect (the guest's lookup only
  * writes its dead stack), so a repeated lookup in the same call is answered
  * here. The cache is cleared at the start of every call. */
-static uint32_t fast_get_batch(const Frame *f, FastWork *w, uint32_t material, uint32_t kind)
+static inline uint32_t fast_get_batch(const Frame *f, FastWork *w, uint32_t material, uint32_t kind)
 {
     uint32_t h = ((material >> 4) ^ (material >> 10) ^ (kind * 23u)) & 63u;
     if (w->bc_batch[h] && w->bc_material[h] == material && w->bc_kind[h] == kind)
@@ -1867,18 +1867,6 @@ static inline const uint8_t *fast_pass_vertices_k(FastWork *w, const uint8_t *re
     return mrec + 20 * (ntotal - nbase);
 }
 
-static __attribute__((noinline)) const uint8_t *fast_pass_vertices(FastWork *w, const uint8_t *rec, int32_t nbase,
-                                                                   int32_t ntotal, uint32_t vb)
-{
-    return fast_pass_vertices_k(w, rec, nbase, ntotal, vb, 0);
-}
-
-static __attribute__((noinline)) void fast_detail_vertices(FastWork *w, const uint8_t *rec, int32_t nbase,
-                                                           int32_t ntotal, uint32_t vb)
-{
-    fast_pass_vertices_k(w, rec, nbase, ntotal, vb, 1);
-}
-
 #if !defined(__ARM_NEON) && !defined(__ARM_NEON__)
 /* A clipper output vertex with the current pass's colour and texture coordinates. */
 static inline void fast_clip_vertex(const Frame *f, const FastWork *w, uint8_t *d, const FClipV *o)
@@ -1940,7 +1928,7 @@ static void fast_clip_group(const Frame *f, const FastWork *w, uint8_t *d, const
 }
 
 /* Bookkeeping at the end of a pass (as emit_strips). */
-static void fast_pass_end(uint32_t batch, uint32_t ntris, uint32_t nclip, uint32_t nverts)
+static inline void fast_pass_end(uint32_t batch, uint32_t ntris, uint32_t nclip, uint32_t nverts)
 {
     WR32(batch + BATCH_TRIS, RD32(batch + BATCH_TRIS) + ntris);
     WR32(G_CLIP_DEPTH, RD32(G_CLIP_DEPTH) + nclip);   /* one per clipper output triangle */
@@ -1950,7 +1938,7 @@ static void fast_pass_end(uint32_t batch, uint32_t ntris, uint32_t nclip, uint32
 
 /* Draws a pass from the prepared stream: clipper output vertices after the
  * patch's own, then the indices. */
-static void fast_emit(const Frame *f, FastWork *w, int32_t ntotal, uint32_t batch, uint32_t vbase)
+static inline void fast_emit(const Frame *f, FastWork *w, int32_t ntotal, uint32_t batch, uint32_t vbase)
 {
     uint8_t *d = g_mem + RD32(G_VBUF_PTR) + 32u * (uint32_t)ntotal;
     for (uint32_t e = 0; e < w->nclist; e++) {
@@ -1971,6 +1959,46 @@ static void fast_emit(const Frame *f, FastWork *w, int32_t ntotal, uint32_t batc
         memcpy(ip + 2u * i, &x, 2);
     }
     fast_pass_end(batch, n / 3u, w->ntri_main, (uint32_t)ntotal + w->ncv_main);
+}
+
+static void fast_emit_detail(const Frame *f, FastWork *w, const uint8_t *strip, int32_t nwords, int32_t ntotal,
+                             uint32_t batch, uint32_t vbase);
+
+/* The passes of a patch: its groups' texture passes (two each, those the patch
+ * needs), then the detail pass when it has one: vertices, batch and indices. */
+static __attribute__((noinline)) void fast_passes(const Frame *f, FastWork *w, const uint8_t *rec, int32_t nbase,
+                                                  int32_t ntotal, int32_t ngroups, uint32_t passes,
+                                                  const uint8_t *strip, int32_t nwords, int32_t first_clip)
+{
+    int first_batch = 1;
+    int32_t g = 0;
+    do {
+        for (uint32_t pass = 1; pass < 3; pass++) {
+            if (!(passes & pass)) {
+                rec += 4 + 20 * ntotal - 8 * nbase;
+                continue;
+            }
+            uint32_t material = rd32(rec);
+            uint32_t vbase = RD32(G_VBUF_COUNT);
+            rec = fast_pass_vertices_k(w, rec + 4, nbase, ntotal, RD32(G_VBUF_PTR), 0);
+            uint32_t batch = fast_get_batch(f, w, material, first_batch ? 0u : 1u);
+            first_batch = 0;
+            fast_emit(f, w, ntotal, batch, vbase);
+        }
+    } while (++g < ngroups);
+
+    uint32_t detail = rd32(rec);
+    if (!detail)
+        return;
+    uint32_t vbase = RD32(G_VBUF_COUNT);
+    fast_pass_vertices_k(w, rec + 4, nbase, ntotal, RD32(G_VBUF_PTR), 1);
+    uint32_t batch = fast_get_batch(f, w, detail, 2);
+    /* Clipped triangles overwrite the flags of entries 64 and up (the guest's
+     * overlay): entry by entry when a later one is affected. */
+    if (first_clip >= 0 && (first_clip + 1 > 64 ? first_clip + 1 : 64) < nwords)
+        fast_emit_detail(f, w, strip, nwords, ntotal, batch, vbase);
+    else
+        fast_emit(f, w, ntotal, batch, vbase);
 }
 
 /* The guest's flag overlay of a detail pass triangle (see overlay_detail_flags):
@@ -2006,8 +2034,8 @@ static void fast_overlay(FastWork *w, const uint8_t *s)
 
 /* Detail pass of a patch whose flag overlay changes later strip entries: entry
  * by entry as emit_strips, clipping entries not clipped before on demand. */
-static void fast_emit_detail(const Frame *f, FastWork *w, const uint8_t *strip, int32_t nwords, int32_t ntotal,
-                             uint32_t batch, uint32_t vbase)
+static __attribute__((noinline)) void fast_emit_detail(const Frame *f, FastWork *w, const uint8_t *strip,
+                                                       int32_t nwords, int32_t ntotal, uint32_t batch, uint32_t vbase)
 {
     uint32_t vb = RD32(G_VBUF_PTR);
     uint8_t *ip = g_mem + batch + BATCH_INDICES + RD32(batch + BATCH_TRIS) * 6u;
@@ -2195,35 +2223,7 @@ static void fast_patch(const Frame *f, FastWork *w, uint32_t patch)
     }
     w->nused = nused;
 
-    int first_batch = 1;
-    int32_t g = 0;
-    do {
-        for (uint32_t pass = 1; pass < 3; pass++) {
-            if (!(passes & pass)) {
-                rec += 4 + 20 * ntotal - 8 * nbase;
-                continue;
-            }
-            uint32_t material = rd32(rec);
-            uint32_t vbase = RD32(G_VBUF_COUNT);
-            rec = fast_pass_vertices(w, rec + 4, nbase, ntotal, RD32(G_VBUF_PTR));
-            uint32_t batch = fast_get_batch(f, w, material, first_batch ? 0u : 1u);
-            first_batch = 0;
-            fast_emit(f, w, ntotal, batch, vbase);
-        }
-    } while (++g < ngroups);
-
-    uint32_t detail = rd32(rec);
-    if (!detail)
-        return;
-    uint32_t vbase = RD32(G_VBUF_COUNT);
-    fast_detail_vertices(w, rec + 4, nbase, ntotal, RD32(G_VBUF_PTR));
-    uint32_t batch = fast_get_batch(f, w, detail, 2);
-    /* Clipped triangles overwrite the flags of entries 64 and up (the guest's
-     * overlay): entry by entry when a later one is affected. */
-    if (first_clip >= 0 && (first_clip + 1 > 64 ? first_clip + 1 : 64) < nwords)
-        fast_emit_detail(f, w, strip, nwords, ntotal, batch, vbase);
-    else
-        fast_emit(f, w, ntotal, batch, vbase);
+    fast_passes(f, w, rec, nbase, ntotal, ngroups, passes, strip, nwords, first_clip);
 }
 
 int rt_native_terrain_render(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret)
