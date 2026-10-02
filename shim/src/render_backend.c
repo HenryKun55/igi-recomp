@@ -788,12 +788,8 @@ static void apply_lights(void)
     glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, cur->mat + 8);
     glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, cur->mat + 12);
     glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, cur->mat[16] > 128.0f ? 128.0f : cur->mat[16]);
-    if (cur->color_material) {
-        glEnable(GL_COLOR_MATERIAL);
+    if (cur->color_material)
         glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE);
-    } else {
-        glDisable(GL_COLOR_MATERIAL);
-    }
     if (cur->normalize)
         glEnable(GL_NORMALIZE);
     else
@@ -963,6 +959,18 @@ static void apply_states(const DrawCmd *d)
     if (!pretransformed && d->lighting && d->L.has_normal) {
         glEnable(GL_LIGHTING);
         apply_lights();
+        /* D3D takes the material color from the vertex only when the vertex has
+         * one; otherwise the material's own colors apply. (vitaGL's color
+         * material without a color array came out black.) */
+        static int color_material = -1;
+        int want = light_snap.color_material && d->L.has_color;
+        if (want != color_material) {
+            color_material = want;
+            if (want)
+                glEnable(GL_COLOR_MATERIAL);
+            else
+                glDisable(GL_COLOR_MATERIAL);
+        }
     } else {
         glDisable(GL_LIGHTING);
     }
