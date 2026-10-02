@@ -809,6 +809,9 @@ class FuncGen:
                 code = self.emit_insn(ins, idx)
             except Unsupported as e:
                 code = ['SPILL; rt_unimplemented(c, %s, "%s"); return RETC;' % (h(a), str(e).replace('"', "'"))]
+            if a in tick_rate.TICK_ONLY:
+                # Update-rate fix: a per-step counter advances on 30 Hz ticks only.
+                code = ['if (rt_tick_now()) {'] + code + ['}']
             nxt = a + ins.size
             falls = self.falls_through(ins)
             if a in self.fused_pairs:
@@ -1971,6 +1974,10 @@ class Generator:
             # Update-rate gate (runtime/src/tick_rate.c): may skip or repeat the call.
             body = ['    { uint64_t hr; if (rt_tick_gate(c, 0x%08Xu, esp, %du, &hr)) { return hr; } }'
                     % (entry, gate[0])] + body
+        repl = tick_rate.HOOKS.get(entry)
+        if repl:
+            # Update-rate fix (runtime/src/tick_rate.c): may handle the call itself.
+            body = ['    { uint64_t hr; if (%s(c, esp, ecx, eax, &hr)) { return hr; } }' % repl] + body
         hle = self.hle.get(entry)
         if hle:
             body = ['    { uint64_t hr; if (%s(c, esp, ecx, eax, &hr)) { return hr; } }' % hle] + body

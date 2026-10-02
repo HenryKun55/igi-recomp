@@ -467,10 +467,16 @@ int rt_native_group_bounds(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uin
  * (skipped or repeated) and *ret holds the function's return. Constant slots
  * hold value * (30 / rate) ** exp while gameplay runs at another rate. */
 int rt_tick_gate(Ctx *c, uint32_t fn, uint32_t esp, uint32_t flags, uint64_t *ret);
+int rt_tick_now(void);   /* the step being run contains a 30 Hz tick (always at 30 Hz) */
+int rt_tick_step_count(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
+int rt_tick_camera_shake(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
+int rt_tick_cutscene_time(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
 typedef struct TickSlot {
     uint32_t addr, orig;   /* slot, original constant (0: immediate in bits) */
     uint64_t bits;         /* original value */
-    int32_t size, kind, exp;
+    int32_t size, kind;    /* bytes; 0 integer, 1 float */
+    int32_t mode, exp;     /* 0: value * (30/rate)^exp, 1: value^(30/rate) */
+    int32_t scope;         /* 0 gameplay, 1 player scope only */
 } TickSlot;
 extern const TickSlot g_tick_slots[];
 extern const uint32_t g_tick_slot_count;
