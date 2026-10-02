@@ -1,0 +1,56 @@
+# Project IGI - Brazilian Portuguese: language/portuguese/movies.res
+# Subtitles of the intro and outro videos.
+
+[INTRO_0a]
+Em algum lugar da Rússia.
+
+[INTRO_1a]
+PRIBOI: Ele já falou?
+
+[INTRO_1b]
+PRIBOI: Ele já começou a falar?
+
+[INTRO_1c]
+PRIBOI: Ele ainda não falou?
+
+[INTRO_2a]
+GUARDA RUSSO: Não!
+
+[INTRO_2b]
+GUARDA RUSSO: Não, chefe
+
+[INTRO_2c]
+GUARDA RUSSO: Não, ele é durão
+
+[INTRO_3a]
+PRIBOI: Eu vou fazê-lo falar...
+
+[INTRO_3b]
+PRIBOI: Bom, isso é o que vamos ver
+
+[INTRO_3c]
+PRIBOI: Acho que vou ter que fazer uma visitinha a ele
+
+[INTRO_3d]
+PRIBOI: Hmmm... Agora vamos fazer do meu jeito
+
+[INTRO_3e]
+PRIBOI: Tapem os ouvidos - as coisas vão mudar
+
+[OUTRO_1]
+JONES:\tVocê está... você está... bem??
+
+[OUTRO_2]
+ANYA: ...estou
+
+[OUTRO_3]
+JONES:\tNão temos autorização nenhuma para o que fizemos, não é?? Foi uma operação secreta...
+
+[OUTRO_4]
+ALTO-FALANTE:\tAqui é a Força de Reação Rápida Draka Tyegrus. Rendam-se imediatamente! Todas as pessoas armadas serão tratadas como hostis e abatidas sem aviso!
+
+[OUTRO_5]
+ANYA: Droga... Deve haver centenas de soldados entre nós e o ponto de encontro.
+
+[OUTRO_6]
+JONES:\tEu vou entrar!

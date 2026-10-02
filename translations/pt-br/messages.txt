@@ -1,0 +1,1573 @@
+# Project IGI - Brazilian Portuguese: language/portuguese/messages.res
+# HUD messages, map computer building info, briefings (cutscene subtitles)
+# and radio messages of every mission. Same order as the English file.
+
+[weapons/strings/Medipack]
+Kit médico
+
+[weapons/strings/Hand Grenade]
+Granada de mão
+
+[weapons/strings/Proximitymine]
+Mina de proximidade
+
+[weapons/strings/FlashBang]
+Granada de luz
+
+[weapons/strings/Binoculars/range]
+DISTÂNCIA
+
+[SECURITYBUILDING_TITLE]
+Prédio de segurança.
+
+[SECURITYBUILDING_INFO]
+Este prédio costuma abrigar equipamento de segurança e reforços
+
+[POWERBUILDING_TITLE]
+Casa de força.
+
+[POWERBUILDING_INFO]
+Os geradores fornecem energia às instalações principais
+
+[CONTROLTOWER_TITLE]
+Torre de controle da base aérea.
+
+[CONTROLTOWER_INFO]
+Este prédio guarda os registros de voo da base aérea.
+
+[HANGER_TITLE]
+Hangar.
+
+[HANGER_INFO]
+Este prédio abriga aviões militares.
+
+[OFFICE_TITLE]
+Prédio de escritórios.
+
+[OFFICE_INFO]
+Prédio de escritórios: administração
+
+[SMALLBARRACKS_TITLE]
+Alojamento.
+
+[SMALLBARRACKS_INFO]
+Abriga guardas de reforço.
+
+[AMMOBUILDING_TITLE]
+Depósito de munição.
+
+[AMMOBUILDING_INFO]
+Abriga munição e outras armas.
+
+[LARGEBARRACKS_TITLE]
+Quartel da guarda.
+
+[LARGEBARRACKS_INFO]
+Abriga guardas de reforço e armas leves.
+
+[GARAGE_TITLE]
+Garagem pequena.
+
+[GARAGE_INFO]
+Contém veículos leves.
+
+[SHELTER_TITLE]
+Abrigo.
+
+[SHELTER_INFO]
+Depósito aberto.
+
+[SMALLWAREHOUSE_TITLE]
+Armazém pequeno.
+
+[SMALLWAREHOUSE_INFO]
+Guarda suprimentos da base e mercadorias diversas.
+
+[LARGEWAREHOUSE_TITLE]
+Armazém grande.
+
+[LARGEWAREHOUSE_INFO]
+Guarda suprimentos da base e mercadorias diversas.
+
+[WATCHTOWER_TITLE]
+Torre de vigia.
+
+[WATCHTOWER_INFO]
+Torre de vigia elevada: acesso por escada.
+
+[WATERTOWER_TITLE]
+Caixa d'água.
+
+[WATERTOWER_INFO]
+A caixa d'água tem uma escada.
+
+[BUNKER_TITLE]
+Bunker.
+
+[BUNKER_INFO]
+Bunker fortemente blindado.
+
+[RADARTOWER_TITLE]
+Torre de radar.
+
+[RADARTOWER_INFO]
+Equipamento de radar.
+
+[RADARDOME_TITLE]
+Cúpula do radar.
+
+[RADARDOME_INFO]
+Equipamento de radar e comunicações.
+
+[CHECKPOINT_TITLE]
+Posto de controle.
+
+[CHECKPOINT_INFO]
+Posto de controle da base.
+
+[PRIBOIWAREHOUSE_TITLE]
+Armazém protegido de Priboi
+
+[FUELDEPOT_TITLE]
+Depósito e bombas de combustível
+
+[HELIPAD_TITLE]
+Heliponto
+
+[HELIPAD_INFO]
+Helicópteros podem pousar aqui
+
+[APCGARAGE_TITLE]
+Depósito de blindados
+
+[APCGARAGE_INFO]
+O depósito abriga veículos blindados de combate
+
+[WATERTOWER_TITLE]
+Caixa d'água
+
+[WATERTOWER_INFO]
+Armazena água
+
+[GUNPOST_TITLE]
+Ninho de metralhadora pesada
+
+[RADIOBUILDING_TITLE]
+Centro de comunicações
+
+[RADIOBUILDING_INFO]
+Abriga equipamento de rádio e comunicações
+
+[SAM_TITLE]
+Lançador SAM
+
+[BRIDGE_TITLE]
+Ponte
+
+[TWOSTOREYBUILDING_TITLE]
+Prédio de dois andares
+
+[PYLON_TITLE]
+Torre de alta tensão
+
+[GARAGE_INFO_L1]
+Roube o caminhão que está nesta garagem.
+
+[SECURITYBUILDING_INFO_L3]
+Josef deve estar no porão deste prédio.
+
+[POWERBUILDING_INFO_L3]
+Este prédio fornece energia para toda a base.
+
+[OFFICE_INFO_L3_1]
+Prédio de monitoramento do radar.
+
+[OFFICE_INFO_L3_2]
+Prédio administrativo da torre de controle.
+
+[PRIBOIWAREHOUSE_INFO]
+Priboi e seu guarda-costas estão aqui
+
+[BIGWAREHOUSE_INFO_L6]
+É provavelmente aqui que o C4 está guardado
+
+[POWERBUILDING_INFO_L6]
+Os geradores que alimentam a cerca elétrica ficam neste prédio
+
+[FUELDEPOT_INFO_L6]
+As cargas de C4 devem ser colocadas neste tanque de combustível
+
+[AMMOBUILDING_INFO_L6]
+O computador de mapa e o designador estão aqui
+
+[SAM_INFO_L6]
+Coloque o designador na traseira do SAM para o ataque aéreo
+
+[OFFICE_INFO_L9]
+O controle das câmeras de segurança fica neste prédio
+
+[TWOSTOREY_INFO_10]
+Leve Priboi ao telhado do prédio e aguarde a equipe de evacuação
+
+[WATERTOWER_INFO_L4]
+Fique na caixa d'água para dar fogo de cobertura a Harrison e seus homens
+
+[PICKEDUPWEAPONAK47]
+Pegou uma AK47
+
+[PICKEDUPWEAPONColt Anaconda]
+Pegou um Colt Anaconda
+
+[PICKEDUPWEAPONDesert Eagle]
+Pegou uma Desert Eagle
+
+[PICKEDUPWEAPONDragunov]
+Pegou um Dragunov
+
+[PICKEDUPWEAPONFlashBang]
+Pegou uma granada de luz
+
+[PICKEDUPWEAPONGlock 17]
+Pegou uma Glock 17
+
+[PICKEDUPWEAPONHand Grenade]
+Pegou uma granada de mão
+
+[PICKEDUPWEAPONJackhammer]
+Pegou uma Jackhammer
+
+[PICKEDUPWEAPONKnife]
+Pegou uma faca
+
+[PICKEDUPWEAPONM16 A2]
+Pegou um M16 A2
+
+[PICKEDUPWEAPONMedipack]
+Pegou uma seringa de kit médico
+
+[PICKEDUPWEAPONMinimi]
+Pegou uma Minimi
+
+[PICKEDUPWEAPONMp5 SD3]
+Pegou uma MP5 SD3
+
+[PICKEDUPWEAPONProximitymine]
+Pegou uma mina de proximidade
+
+[PICKEDUPWEAPONLAW 80]
+Pegou um LAW 80
+
+[PICKEDUPWEAPONSpas 12]
+Pegou uma Spas 12
+
+[PICKEDUPWEAPONUzi]
+Pegou uma Uzi
+
+[PICKEDUPWEAPONUzi x 2]
+Pegou duas Uzis
+
+[PICKEDUPAMMO]
+Pegou munição
+
+[PICKEDUPC4]
+Pegou o C4
+
+[C4CHARGESET]
+Cargas de C4 armadas
+
+[C4CHARGESET2]
+Cargas armadas...... procure abrigo!
+
+[CAMERASOFFLINE]
+Câmeras de segurança desligadas
+
+[CAMERASOFFLINE_6MIN]
+Câmeras de segurança desligadas por 6 minutos
+
+[CAMERASOFFLINE_5MIN]
+Câmeras de segurança desligadas por 5 minutos
+
+[CAMERASOFFLINE_4MIN]
+Câmeras de segurança desligadas por 4 minutos
+
+[CAMERASOFFLINE_3MIN]
+Câmeras de segurança desligadas por 3 minutos
+
+[CAMERASOFFLINE_2MIN]
+Câmeras de segurança desligadas por 2 minutos
+
+[CAMERASOFFLINE_1MIN]
+Câmeras de segurança desligadas por 1 minuto
+
+[ALARMON]
+O alarme foi disparado
+
+[ALARMON_60SEC]
+O alarme está disparado há 60 segundos
+
+[ALARMON_50SEC]
+O alarme está disparado há 50 segundos
+
+[ALARMON_40SEC]
+O alarme está disparado há 40 segundos
+
+[ALARMON_30SEC]
+O alarme está disparado há 30 segundos
+
+[ALARMON_25SEC]
+O alarme está disparado há 25 segundos
+
+[ALARMON_20SEC]
+O alarme está disparado há 20 segundos
+
+[ALARMON_15SEC]
+O alarme está disparado há 15 segundos
+
+[ALARMON_10SEC]
+O alarme está disparado há 10 segundos
+
+[ALARMON_5SEC]
+O alarme está disparado há 5 segundos
+
+[MISSION_COMPLETE]
+Missão cumprida!
+
+[MISSION_FAILED]
+Missão fracassada!
+
+[OBJECTIVE_COMPLETE]
+Objetivo concluído!
+
+[OBJECTIVE_FAILED]
+Objetivo fracassado!
+
+# ---- Mission 1: Trainyard ----
+
+[M1_CUT_01]
+ANYA: Bom trabalho, chegou rápido. Esta missão tem prioridade máxima. Alvo: Josef Priboi. Você deve localizá-lo e trazê-lo para interrogatório. Josef é nossa única pista do roubo da ogiva.
+
+[M1_CUT_02]
+JONES: Tá, tá. Só preciso saber uma coisa: onde ele está.
+
+[M1_CUT_03]
+ANYA: Josef está preso num aeródromo militar. A região toda tem uma defesa antiaérea excelente. Teremos que deixar você longe do alvo até que essas defesas sejam desativadas.
+
+[M1_CUT_04]
+JONES: O quê? Tem transporte me esperando?
+
+[M1_CUT_05]
+ANYA: Você vai percorrer o terreno usando meios de transporte obtidos no local.
+
+[M1_CUT_06]
+JONES: Quer dizer que eu vou ter que roubar alguma coisa?
+
+[M1_CUT_07]
+ANYA: Exatamente. Você vai até o próximo pátio de cargas - lá você arranja o transporte. A operação toda é simples - são três etapas:
+
+[M1_CUT_08]
+ANYA: Um - obter o transporte. Dois - desativar as defesas antiaéreas. Três - encontrar Josef Priboi e retirá-lo em segurança para interrogatório. Até...
+
+[M1_CUT_09]
+JONES: ...até um soldado raso como eu consegue entender - sei
+
+[M1_CUT_10]
+ANYA: É o melhor que temos.
+
+[M1_CUT_11]
+JONES: Anya, como foi que você encontrou o Josef?
+
+[M1_CUT_12]
+ANYA: Rastreamos a ligação do Josef até o apartamento dele, certo? Agentes locais invadiram o lugar e encontraram fotos do Josef e o número do celular dele.
+
+[M1_CUT_13]
+ANYA: Então ligamos para ele e triangulamos as coordenadas. O celular está num aeródromo militar - é lá que o Josef está - esse é o nosso alvo principal.
+
+[M1_CUT_14]
+JONES: Esperto - supondo que ele esteja lá.
+
+[M1_CUT_15]
+ANYA: Atravesse o pátio de cargas até o caminhão. Evite as câmeras a qualquer custo - se você alertar a segurança, a base inteira vai cair em cima de você.
+
+[M1_CUT_16]
+ANYA: Chegue até o caminhão. Esse é o seu objetivo nesta missão. Alcance-o e roube-o. Quero esta missão rápida e, acima de tudo, silenciosa. Ao trabalho, Jones!
+
+[M1_MSG_1]
+ANYA: Roube o caminhão perto da entrada principal.
+
+[M1_MSG_2]
+ANYA: Cuidado com as câmeras de segurança.
+
+[M1_MSG_3]
+ANYA: Não deixe o alarme disparar, Jones.
+
+[M1_MSG_4]
+ANYA: O caminhão está na garagem do outro lado da base.
+
+[M1_MSG_5]
+ANYA: O alarme disparou. Cuidado com as equipes de segurança.
+
+[M1_MSG_6]
+ANYA: Estes portões estão trancados. Você precisa achar outro caminho.
+
+[M1_MSG_7]
+ANYA: Parece que dá para pular a cerca para a próxima área.
+
+# ---- Mission 2: SAM Base ----
+
+[M2_CUT_01]
+ANYA: O próximo objetivo é desativar as defesas antiaéreas locais.
+
+[M2_CUT_02]
+JONES: Por que não usar o caminhão para tirar o Josef do aeródromo?
+
+[M2_CUT_03]
+ANYA: Lento demais, lento demais mesmo. É arriscado demais. Josef é nossa única pista do roubo.
+
+[M2_CUT_04]
+ANYA: Ele não sabia só como a ogiva foi levada, sabia onde, como - caramba, ele até citou o maldito número de série da ogiva. Precisamos dele inteiro e vivo.
+
+[M2_CUT_05]
+JONES: E quanto a mim?
+
+[M2_CUT_06]
+ANYA: Eis o que você tem que fazer. Infiltre-se imediatamente na bateria de mísseis SAM. Você vai encontrar explosivos lá; coloque-os em cada um dos lançadores SAM.
+
+[M2_CUT_07]
+ANYA: Fuja até o ponto de encontro final e então detone os explosivos.
+
+[M2_CUT_08]
+ANYA: Quando você estiver no ponto de encontro, podemos buscá-lo de helicóptero e voar direto para a base aérea militar.
+
+[M2_MSG_1]
+ANYA: Você já tem o C4; agora coloque 1 carga na traseira de cada lançador SAM.
+
+[M2_MSG_2]
+ANYA: Vá até o heliponto para a extração.
+
+# ---- Mission 3: Military Airbase ----
+
+[M3_CUT_01]
+JONES: Mais uma operação bem-sucedida no currículo. Certo, Anya, me diga onde está o Josef que eu o trago. Alguma notícia do reforço?
+
+[M3_CUT_02]
+ANYA: Você com certeza não precisa da ajuda de ninguém. Seu reforço acabou de pousar na capital. Eles estão a caminho neste exato momento. Devem chegar até você em umas três horas.
+
+[M3_CUT_03]
+JONES: Bem a tempo de arrumar a bagunça!
+
+[M3_CUT_04]
+ANYA: Abrimos o corredor aéreo para a extração do Josef. A tarefa agora é encontrar Josef Priboi e trazê-lo para interrogatório.
+
+[M3_CUT_05]
+ANYA: Seus objetivos são três:
+
+[M3_CUT_06]
+ANYA: 1) Infiltre-se na instalação sem levantar muitas suspeitas;
+
+[M3_CUT_07]
+ANYA: 2) Encontre e liberte Josef Priboi - Nossos agentes estão vigiando há 20 horas e fizeram estas imagens. Acredito que Josef esteja neste prédio - ele deve estar preso no porão;
+
+[M3_CUT_08]
+ANYA: 3) Quando estiver com Josef, escolte-o de volta ao ponto de encontro para o resgate de helicóptero.
+
+[M3_OUT_01]
+JONES: Calma, fera, uau! Isso é demais, muito melhor que o simulador.
+
+[M3_OUT_02]
+ANYA: Você derrubou o simulador seis vezes!
+
+[M3_OUT_03]
+JONES: Mas no fim acertei.
+
+[M3_OUT_04]
+ANYA: Ah, claro. Encontrei uma pequena pista de pouso para você, sua equipe de reforço vai encontrá-lo lá.
+
+[M3_OUT_05]
+ANYA: Estou realinhando os satélites agora. Entro em contato em vinte minutos; aqui estão suas novas coordenadas de voo - mantenha esse avião baixo.
+
+[M3_MSG_1]
+ANYA: A base aérea fica no pé do morro, atrás da cúpula do radar.
+
+[M3_MSG_2]
+ANYA: Josef deve estar no prédio de segurança da área da prisão.
+
+[M3_MSG_3]
+ANYA: Jones, o Josef está no porão?
+
+[M3_MSG_4]
+ANYA: Josef não está aqui. Ele foi transferido! A torre de controle deve ter os registros de voo. Vá até lá e procure esses registros, Jones.
+
+[M3_MSG_5]
+ANYA: Novo paradeiro de Josef encontrado, agora saia daí. Esses caças são a saída mais rápida. Hora de roubar um, Jones
+
+[M3_MSG_6]
+ANYA: Helicópteros inimigos chegando! Precisamos evacuar a zona de pouso; por enquanto você está por conta própria.
+
+[M3_MSG_7]
+ANYA: Jones - o AWACS detectou muita atividade de helicópteros ao sul - a menos de 10 km da sua posição. A extração de helicóptero é arriscada demais. Anya para helicóptero, Anya para helicóptero, decolar
+
+[M3_MSG_8]
+HELICÓPTERO: Entendido.
+
+[M3_MSG_9]
+ANYA: Há um caça abastecido e pronto para decolar - só não invente nenhuma acrobacia, você não tem treinamento
+
+[M3_MSG_10]
+JONES: Anya - as celas estão vazias! Repito, as celas estão vazias! O Josef não está aqui!
+
+[M3_MSG_11]
+ANYA: Droga! Ele não pode ter saído pela estrada; nossos agentes teriam visto.
+
+[M3_MSG_12]
+ANYA: Eles devem tê-lo levado de avião antes de chegarmos à posição.
+
+[M3_MSG_13]
+JONES: A torre de controle deve ter os registros de voo de todas as aeronaves.
+
+[M3_MSG_14]
+ANYA: Excelente! Jones, escute. Atualização da missão, novos objetivos.
+
+[M3_MSG_15]
+ANYA: 1) Vá até a torre de controle
+
+[M3_MSG_16]
+ANYA: 2) Encontre os registros de voo de hoje - deve haver um registro do destino do Josef - você precisa encontrá-lo antes que a pista da ogiva esfrie. Descubra para onde levaram o Josef
+
+[M3_MSG_17]
+ANYA: 3) Por fim, fuja usando o avião. Parece que aquele apoio vai ser útil, afinal.
+
+[M3_MSG_18]
+JONES: Anya - descobri para onde levaram o Josef. Enviando as coordenadas agora. Que estranho - o registro diz que havia dois Priboi a bordo.
+
+[M3_MSG_19]
+ANYA: Só saia daí, Jones. Eu vou verificar isso.
+
+# ---- Mission 4: GOD ----
+
+[M4_CUT_01]
+ANYA: Jones, você identificou esta prisão como destino do Josef. Um homem que bate com a descrição dele chegou aqui ontem.
+
+[M4_CUT_02]
+JONES: O reforço já chegou. Quem está no comando? Qual é a função deles?
+
+[M4_CUT_03]
+ANYA: O capitão Harrison está no comando - ex-Boina Verde. Ele vai liderar o ataque; os homens dele vão entrar e trazer o Josef.
+
+[M4_CUT_04]
+ANYA: Falta a eles um atirador de elite experiente. Você vai dar cobertura enquanto eles entram.
+
+[M4_CUT_05]
+JONES: Beleza! Então eu vou brincar de Deus?
+
+[M4_CUT_06]
+ANYA: Acho que esse vai ser o seu código de chamada. O de Harrison será Moisés.
+
+[M4_CUT_07]
+JONES: Demais.
+
+[M4_CUT_08]
+ANYA: Jones, seus objetivos são os seguintes:
+
+[M4_CUT_09]
+ANYA: 1) Tome as ruínas na linha do morro acima da prisão. Dali você terá um excelente campo de tiro.
+
+[M4_CUT_10]
+ANYA: 2) Dê cobertura aos homens de Harrison durante o ataque.
+
+[M4_CUT_11]
+ANYA: 3) Quando nossos rapazes estiverem com o Josef, dê fogo de cobertura para a extração.
+
+[M4_CUT_12]
+ANYA: 4) Quando o Josef estiver em segurança, Harrison vai lhe dar o sinal para ir ao ponto de encontro para a extração.
+
+[M4_MSG_1]
+ANYA: Proteja a vila, depois suba na caixa d'água e dê cobertura de atirador às tropas aliadas.
+
+[M4_MSG_2]
+ANYA: Assuma a posição e dê cobertura às tropas aliadas.
+
+[M4_MSG_3]
+ANYA: Blindado chegando.
+
+[M4_MSG_4]
+ANYA: Um helicóptero de ataque está se aproximando da sua posição. Cuidado!
+
+[M4_MSG_5]
+ANYA: O Josef morreu, Jones! Fracassamos. Harrison, tire seus homens daí, deixe o corpo, missão abortada! Repito, missão abortada!
+
+[M4_MSG_6]
+SOLDADO ALIADO: Equipe Alfa, homem ferido!
+
+[M4_MSG_7]
+CAPITÃO HARRISON: Equipe Alfa, estamos sofrendo baixas demais, abortar a missão! Repito, abortar a missão!
+
+[M4_MSG_8]
+CAPITÃO HARRISON: Josef localizado, estamos trazendo ele.
+
+[M4_MSG_9]
+ANYA: O helicóptero vai entrar assim que você estiver em posição na caixa d'água
+
+[M4_MSG_10]
+ANYA: A equipe está em terra. Eles estão assumindo posição
+
+[M4_MSG_11]
+ANYA: Jones - lembra do segundo Priboi do registro de voo? Eu o localizei. Veja só. Nome: Priboi, Jach. Idade: 45. 'Empresário'.
+
+[M4_MSG_12]
+ANYA: Tio de um tal Josef Priboi. A família controla uma rede de empresas de importação e exportação - uma fachada conhecida para contrabando e falsificação no mercado negro.
+
+[M4_MSG_13]
+ANYA: Recentemente suspeito de tráfico internacional de armas. Também tem ligações financeiras com políticos importantes, comandantes militares e policiais desta região do país.
+
+[M4_MSG_14]
+ANYA: O apelido dele é Jach, o Martelo - famoso por usar um martelo de unha nas surras de castigo.
+
+[M4_MSG_15]
+JONES: Ai! Então ele pegou o Josef - o próprio sobrinho - por quê? Chantagem do Josef?
+
+[M4_MSG_16]
+ANYA: Talvez, quem sabe uma traição. As negociações com o Josef nunca chegaram tão longe.
+
+[M4_MSG_17]
+ANYA: Jones - soldados inimigos estão chegando de fininho! Cuidado!
+
+[M4_MSG_18]
+JONES: Obrigado pelo aviso, fico te devendo uma.
+
+[M4_MSG_19]
+CAPITÃO HARRISON: Andando!
+
+[M4_MSG_20]
+SOLDADO ALIADO: Sala limpa!
+
+[M4_MSG_21]
+SOLDADO ALIADO: Estou segurando a escada.
+
+[M4_MSG_22]
+SOLDADO ALIADO: Porão limpo! Alvo encontrado, repito, alvo encontrado
+
+# ---- Mission 5: Radar Base ----
+
+[M5_CUT_01]
+JONES: Como foi o interrogatório do Priboi, Anya?
+
+[M5_CUT_02]
+ANYA: Muito fácil! Josef já tinha levado uma bela surra - a maior parte do tio, Jach.
+
+[M5_CUT_03]
+ANYA: Não sei por quê, mas Jach Priboi é um homem muito assustado. Então, eis o que sabemos agora. Jach com certeza está no comando dos negócios.
+
+[M5_CUT_04]
+ANYA: Ele organizou o roubo da ogiva. Quando Josef foi sequestrado, a ogiva ainda estava com Jach; não tinha sido entregue.
+
+[M5_CUT_05]
+JONES: Isso! Mais um sucesso de David Jones! IGI!
+
+[M5_CUT_06]
+ANYA: Sim. Tudo sozinho. Muito bem. Então encare esta. Jach tem mais de 50 propriedades e armazéns. A ogiva pode estar em qualquer um deles.
+
+[M5_CUT_07]
+ANYA: Mas Jach Priboi usa vários canais seguros de comunicação militar. Josef nos deu os códigos dos canais e eu identifiquei o nó principal.
+
+[M5_CUT_08]
+ANYA: Se eu conseguir entrar na rede, posso acessar as conversas particulares de Jach - tudo o que ele disser, eu vou saber. Inclusive onde está a ogiva.
+
+[M5_CUT_09]
+ANYA: Invada este nó de comunicações. Vá até esta cúpula - ela abriga os computadores principais. Eles roteiam todo o tráfego de comunicações.
+
+[M5_CUT_10]
+ANYA: Quando chegar lá, carregue o vírus e eu faço o resto. Ah, e talvez você queira fugir depois.
+
+[M5_CUT_11]
+ANYA: O tempo está firme, meio nublado; esperamos neve talvez amanhã. Por favor, tente não estragar esta, Jones.
+
+[M5_MSG_1]
+ANYA: Encontre o cartão de acesso da cúpula do radar no setor de escritórios.
+
+[M5_MSG_2]
+ANYA: Cartão encontrado! Agora insira o vírus no terminal da cúpula do radar.
+
+[M5_MSG_3]
+ANYA: Estes portões estão trancados, você precisa achar outro caminho.
+
+[M5_MSG_4]
+ANYA: Vírus carregado.
+
+[M5_MSG_5]
+JONES: Carregando o vírus agora.
+
+[M5_MSG_6]
+ANYA: Está funcionando. Escute isto.
+
+[M5_MSG_7]
+ANYA: É o Jach Priboi!
+
+[M5_MSG_8]
+ANYA: Jones! Acabei de captar outro sinal. Priboi trocou a arma. Repito, a ogiva foi transferida - eu ouvi ele mesmo dizer.
+
+[M5_MSG_9]
+JONES: Droga. Temos que pegar o Priboi e descobrir para onde foi essa ogiva.
+
+[M5_MSG_10]
+ANYA: Temos?
+
+[M5_MSG_11]
+JONES: Tudo bem, Anya. Chega de bancar o machão. Você me salvou quando resgatamos o Josef. Talvez. Eu... hã... não consigo fazer isso sem você.
+
+[M5_MSG_12]
+ANYA: Proteja o heliponto e aguarde a extração
+
+# ---- Mission 6: Get Priboi ----
+
+[M6_CUT_01]
+JONES: Você acha que o Priboi está aqui?
+
+[M6_CUT_02]
+ANYA: Jones, eu sei. O vírus que você carregou? Funciona que é uma beleza.
+
+[M6_CUT_03]
+ANYA: Este é um dos depósitos mais isolados dele.
+
+[M6_CUT_04]
+ANYA: Veja só - ele está fazendo uma maldita venda de armas agora mesmo.
+
+[M6_CUT_05]
+JONES: Você está me levando para más companhias - minha mãe me avisou sobre mulheres como você - elas desencaminham a gente.
+
+[M6_CUT_06]
+ANYA: E o que aconteceu?
+
+[M6_CUT_07]
+JONES: Fui desencaminhado, basicamente.
+
+[M6_CUT_08]
+ANYA: Típico. Escute, Priboi faz todos os negócios na limusine dele - à prova de balas, é claro, e estacionada perto dos portões.
+
+[M6_CUT_09]
+ANYA: Se algo der errado, Priboi tem um único plano: fugir pela estrada e deixar os homens dele lutando. Quero explorar esse plano.
+
+[M6_CUT_10]
+ANYA: Harrison e os homens dele estão se posicionando na estrada de saída.
+
+[M6_CUT_11]
+ANYA: Quero que você entre na base e faça um barulho dos infernos. Priboi vai fugir correndo. Harrison vai interceptá-lo, parar a limusine e capturar Priboi. Harrison tem um helicóptero por perto.
+
+[M6_CUT_12]
+ANYA: Estes são os parâmetros da missão: entre na base - você precisa manter o elemento surpresa, isso é crucial.
+
+[M6_CUT_13]
+ANYA: Pegue os explosivos no armazém; você vai precisar deles para criar a distração certa. Depois vá até o depósito de combustível e crie a distração com os explosivos
+
+[M6_CUT_14]
+ANYA: Priboi deve disparar como um coelho assustado. Harrison vai derrubá-lo.
+
+[M6_MSG_1]
+ANYA: Pegue os explosivos no armazém principal dele.
+
+[M6_MSG_2]
+ANYA: Desligue o gerador para desativar a cerca elétrica.
+
+[M6_MSG_3]
+ANYA: Coloque cargas no depósito de combustível. A explosão vai fazer Priboi fugir da segurança do armazém.
+
+[M6_MSG_4]
+ANYA: Vasculhe todos os arquivos em busca de provas incriminadoras.
+
+[M6_MSG_5]
+ANYA: Objetivo 1 concluído: isso deve ser C4 suficiente; use-o nos dois grandes tanques de combustível no complexo de Priboi.
+
+[M6_MSG_6]
+ANYA: Objetivo 2 concluído: gerador desligado - cercas elétricas desativadas.
+
+[M6_MSG_7]
+ANYA: Objetivo 3 concluído: isso deve tirar o Priboi da toca...
+
+[M6_MSG_8]
+ANYA: Objetivo 4 concluído: muito bem! São esses os dados de que precisamos.
+
+[M6_MSG_9]
+ANYA: O caminho mais rápido até o complexo de Priboi é pelo cabo, do alto da torre de alta tensão
+
+[M6_MSG_10]
+ANYA: Estes portões estão trancados; você vai ter que achar outra saída
+
+[M6_MSG_11]
+HARRISON: Veículo da frente abatido
+
+[M6_MSG_12]
+SOLDADO ALIADO: Carro 2 abatido, carro 4 abatido
+
+[M6_MSG_13]
+SOLDADO ALIADO: A estrada está bloqueada
+
+[M6_MSG_14]
+HARRISON: Atiradores, carro três
+
+[M6_MSG_15]
+SOLDADO ALIADO: Médico! Médico!
+
+[M6_MSG_16]
+SOLDADO ALIADO: Estamos sofrendo baixas, senhor!
+
+[M6_MSG_17]
+SOLDADO ALIADO: Atiradores neutralizados.
+
+[M6_MSG_18]
+SOLDADO ALIADO: Belo tiro!
+
+[M6_MSG_19]
+HARRISON: Pegue aquela metralhadora - agora, soldado, agora!
+
+[M6_MSG_20]
+SOLDADO ALIADO: Pegamos o Priboi - alvo sob controle.
+
+[M6_MSG_21]
+SOLDADO ALIADO: Área protegida
+
+[M6_MSG_22]
+ANYA: Pegamos o Priboi. Ele está preso.
+
+[M6_MSG_23]
+JONES: Excelente! Alguma baixa?
+
+[M6_MSG_24]
+ANYA: Perdemos dois homens. O piloto também foi ferido. Jones.....
+
+[M6_MSG_25]
+JONES: Já sei, eu levo ele no avião - você organiza a rota de voo, estou indo agora.
+
+# ---- Mission 7: Border Crossing ----
+
+[M7_CUT_01]
+ANYA: Logo você estará de volta, Jones. Continue. Estou preparando as salas de interrogatório. Como o Priboi está aguentando?
+
+[M7_CUT_02]
+JONES: Não se preocupe - ele está bem <Priboi resmunga com desdém> e vai falar.
+
+[M7_CUT_03]
+EKK: Aqui é o controle aéreo russo - vocês estão entrando em espaço aéreo soberano; desviem imediatamente a aeronave para o rumo 0 9 9, repito, 0 9 9.
+
+[M7_CUT_04]
+EKK: Você tem trinta segundos para obedecer, Jones
+
+[M7_CUT_05]
+PRIBOI: É ela!
+
+[M7_CUT_06]
+JONES: Quem?
+
+[M7_CUT_07]
+PRIBOI: Faça o que ela diz, ela é loca, maluca.
+
+[M7_CUT_08]
+EKK: Travar mísseis. Disparar quando pronto.
+
+[M7_CUT_09]
+PILOTO RUSSO: Ordem recebida.
+
+[M7_CUT_10]
+PILOTO RUSSO: Mísseis disparados.
+
+[M7_CUT_11]
+PRIBOI: Tarde demais!
+
+[M7_CUT_12]
+JONES: Anya, fomos atingidos, mayday, mayday, estamos caindo, vamos bater!
+
+[M7_CUT_13]
+EKK: Encontrem o Priboi. Tragam-no até mim se ainda estiver vivo; senão, queimem o corpo no local da queda.
+
+[M7_CUT_14]
+SOLDADO RUSSO: E o soldado inglês?
+
+[M7_CUT_15]
+EKK: Matem-no! O caminho dele termina aqui
+
+[M7_MSG_1]
+ANYA: Jones - você está vivo, graças a Deus! Você está bem?
+
+[M7_MSG_2]
+ANYA: Pegue o fuzil de precisão do guarda.
+
+[M7_MSG_3]
+ANYA: Jones, estou captando um helicóptero de ataque indo na sua direção... procure abrigo.
+
+[M7_MSG_4]
+ANYA: Não alerte o posto de controle, aquele blindado pode dar problema.
+
+[M7_MSG_5]
+ANYA: Jones... atualização de inteligência. Há um helicóptero de ataque Hind Mil Mi-24 logo à frente. Esconda-se!
+
+[M7_MSG_6]
+ANYA: Desligue o alarme!
+
+[M7_MSG_7]
+ANYA: Os portões principais estão bem defendidos... veja se há outra entrada.
+
+[M7_MSG_8]
+ANYA: Você conseguiu entrar... tente chegar até o caminhão, e lembre-se: ele não vai a lugar nenhum com o alarme ligado.
+
+[M7_MSG_9]
+ANYA: Você perdeu o caminhão, Jones... dizem que morrer congelado é bem indolor...
+
+[M7_MSG_10]
+JONES: Minha cabeça está doendo demais. Ah, cadê o Priboi? Droga, cadê o meu computador de mapa?
+
+[M7_MSG_11]
+ANYA: Calma, David. Chegaram soldados. Russos, estavam procurando o Priboi. Ele foi levado para o outro lado da fronteira. Eles também estão com o seu equipamento. Só temos este rádio fraco até você recuperar o computador de mapa.
+
+[M7_MSG_12]
+ANYA: Siga a estrada, ela leva a um posto de controle na fronteira, a uns dois ou três quilômetros. Um dos caminhões deles fica lá. Chegue até lá; eu vou descobrir para onde levaram o Priboi e o seu equipamento.
+
+[M7_MSG_13]
+ANYA: Jones! Acabei de captar este sinal. Escute.
+
+[M7_MSG_14]
+EKK: Excelente trabalho, capitão - você e sua unidade serão bem recompensados por isso.
+
+[M7_MSG_15]
+CAPITÃO RUSSO: O soldado estrangeiro ainda não foi encontrado
+
+[M7_MSG_16]
+EKK: Procurem por mais trinta minutos e depois vão embora, nem um minuto a mais. Ele logo vai morrer de frio.
+
+[M7_MSG_17]
+CAPITÃO RUSSO: E o equipamento dele?
+
+[M7_MSG_18]
+EKK: Levem para o seu quartel-general e providenciem o envio para mim.
+
+[M7_MSG_19]
+ANYA: 30 minutos, Jones - é tudo o que você tem! A neve vai piorar. Vá até a fronteira; suba no caminhão antes que ele parta. Você precisa chegar ao quartel-general deles se quiser ter alguma esperança.
+
+# ---- Mission 8: Re-supply ----
+
+[M8_CUT_01]
+ANYA: David - você está bem?
+
+[M8_CUT_02]
+JONES: Estou. Está um frio danado, Anya!
+
+[M8_CUT_03]
+ANYA: Eu sei. Estou com a posição de você e do computador de mapa. O sinal de socorro foi ativado.
+
+[M8_CUT_04]
+ANYA: Escute - você está numa base avançada da força de reação rápida - isso quer dizer...
+
+[M8_CUT_05]
+JONES: Infantaria mecanizada, blindados de apoio, apoio aéreo integrado - não esqueci tanto assim.
+
+[M8_CUT_06]
+ANYA: Desculpe. Olhe, o caminhão está perto do alojamento da infantaria. O computador de mapa está transmitindo de um bunker de munição num pátio de manutenção, a cerca de 1 km.
+
+[M8_CUT_07]
+ANYA: Suas ordens são estas. Saia daí, David, e encontre o pátio de manutenção. Vá até a oficina e recupere o computador de mapa. Já providenciei a evacuação. Andando, soldado.
+
+[M8_MSG_1]
+ANYA: Você precisa sair deste complexo e encontrar o seu computador de mapa no pátio dos tanques.
+
+[M8_MSG_2]
+Computador de mapa recuperado.
+
+[M8_MSG_3]
+ANYA: O gerador está ligado.
+
+[M8_MSG_4]
+ANYA: Você precisa ligar o gerador para abrir as portas.
+
+[M8_MSG_5]
+ANYA: Seu computador de mapa está no porão do depósito de munição.
+
+[M8_MSG_6]
+ANYA: Você precisa desligar o radar e desativar o rádio antes que possamos tirá-lo daí.
+
+[M8_MSG_7]
+ANYA: Radar um resolvido.
+
+[M8_MSG_8]
+ANYA: Radar dois desligado.
+
+[M8_MSG_9]
+ANYA: Isso deve dar conta do rádio.
+
+[M8_MSG_10]
+ANYA: O alarme tem controle sobre os portões. Você vai ter que desligá-lo.
+
+[M8_MSG_11]
+ANYA: Jones, coloque o designador na traseira do lançador SAM... objetivo 4 marcado no seu computador de mapa.
+
+[M8_MSG_12]
+ANYA: OK... helicóptero de extração chega em 30 segundos.
+
+[M8_MSG_13]
+ANYA: Ataque aéreo a caminho. Saia daí!
+
+[M8_MSG_14]
+ANYA: Agora encontre o sinalizador.
+
+[M8_MSG_15]
+ANYA: Agora encontre o computador de mapa.
+
+[M8_MSG_16]
+Sinalizador obtido.
+
+[M8_MSG_17]
+ANYA: Os portões principais são controlados do prédio de dois andares.
+
+[M8_MSG_18]
+ANYA: Você vai ter que desativar as defesas antiaéreas locais antes que eu possa mandar uma evacuação.
+
+[M8_MSG_19]
+JONES: Resgate aéreo com banho quente?
+
+[M8_MSG_20]
+ANYA: Quase. Um helicóptero está a caminho. Escute, aqueles sinalizadores que você pegou? Coloque-os na bateria de mísseis terra-ar. Eu posso, hum, desviar um dos jatos da unidade. Vai parecer um acidente de treinamento. Certo?
+
+[M8_MSG_21]
+JONES: Claro - é sempre bom deixar uma impressão marcante.
+
+[M8_MSG_22]
+ANYA: Ai, ai, dá para ver que você está bem. David, coloque o dispositivo de mira nas defesas e derrube o radar. Quando as bombas acertarem aquela bateria de mísseis, a gente entra de fininho com o helicóptero e tira você daí.
+
+[M8_MSG_23]
+ANYA: Jones! Localizei o Priboi; Harrison e os rapazes dele mandaram muito bem. Eles o rastrearam e estou seguindo o Priboi por satélite - ele está a bordo de um trem.
+
+[M8_MSG_24]
+JONES: Um trem?
+
+[M8_MSG_25]
+ANYA: Só se apresse. Precisamos de você no helicóptero e em rota de interceptação.
+
+[M8_MSG_26]
+ANYA: Vamos, David - Harrison tem comida e roupa limpa esperando
+
+[M8_MSG_27]
+JONES: Nada de banho quente - Anya, você está perdendo o jeito
+
+[M8_MSG_28]
+ANYA: Isso é o que vamos ver; vamos andando, David
+
+[M8_MSG_29]
+ANYA: Graças a Deus! Estamos em contato de novo. Preparei uma... pequena surpresa para você
+
+[M8_MSG_30]
+ANYA: Você precisa sair deste complexo e encontrar o seu computador de mapa no pátio dos tanques, a leste
+
+[M8_MSG_31]
+ANYA: Radar desligado; agora vá até o ponto de encontro
+
+# ---- Mission 9: Missile Trainyard ----
+
+[M9_CUT_01]
+ANYA: Jones - estive pensando. O Priboi. Num trem, sendo levado para onde? Para quem?
+
+[M9_CUT_02]
+JONES: Hum, eu aposto na voz que me derrubou.
+
+[M9_CUT_03]
+ANYA: Concordo. Mas o Priboi num trem?!? Não é um jeito estranho de transportar alguém?
+
+[M9_CUT_04]
+JONES: É. Se o Priboi é tão importante, por que não usar transporte aéreo ou um comboio militar?
+
+[M9_CUT_05]
+ANYA: Exatamente! Nosso misterioso interlocutor não é tão poderoso assim.
+
+[M9_CUT_06]
+ANYA: Acredito mesmo que estamos lidando com um grupo pequeno, talvez oficiais renegados do exército, quem sabe um extremista político.
+
+[M9_CUT_07]
+ANYA: Mas eles estão com pressa; precisam ver o Priboi rápido. Ele é importante para eles. Claro, mas por quê?
+
+[M9_CUT_08]
+JONES: Bom, ele é a única ligação - entre nós e eles. Eles querem saber o tamanho da ameaça que representamos. Senão, o Priboi já estaria morto, não num trem.
+
+[M9_CUT_09]
+ANYA: Você precisa trazer o Priboi de volta, gângster ou não - ele é a ligação entre eles e nós.
+
+[M9_CUT_10]
+ANYA: O trem dele vai passar por este pátio ferroviário. Ele é usado para guardar mísseis desativados. Jones, você precisa embarcar naquele trem.
+
+[M9_CUT_11]
+ANYA: Estes são os seus objetivos. Primeiro, atravesse o perímetro do pátio ferroviário. Quando o trem chegar, suba nele.
+
+[M9_CUT_12]
+ANYA: Lembre-se: se houver um alerta de segurança, o trem provavelmente não vai entrar na base; não podemos correr esse risco, então não deixe os alarmes tocando. Vá, David - boa sorte
+
+[M9_MSG_1]
+ANYA: O sistema de alarme vai avisar o trem se ficar tocando por muito tempo. Você tem uns 30 segundos para desligá-lo. O trem vai abortar se receber um aviso.
+
+[M9_MSG_2]
+ANYA: Missão fracassada - o trem abortou. O Priboi não vai chegar aqui.
+
+[M9_MSG_3]
+ANYA: O Priboi está morto - missão fracassada.
+
+[M9_MSG_4]
+ANYA: O controle das câmeras de segurança fica no prédio perto da ponte.
+
+[M9_MSG_5]
+Câmeras de segurança desligadas por um minuto...
+
+[M9_MSG_6]
+ANYA: Bom trabalho... agora sequestre aquele trem e dê o fora daí..
+
+# ---- Mission 10: Defend Priboi ----
+
+[M10_CUT_01]
+JONES: Anya, encontrei o Priboi! O trem está sob controle. Finalmente cheguei.
+
+[M10_CUT_02]
+ANYA: Até que enfim!
+
+[M10_CUT_03]
+PRIBOI: Você demorou. Primeiro você me sequestra, depois me perde. Achei que fosse um profissional
+
+[M10_CUT_04]
+ANYA: Jones - há dois aviões se aproximando
+
+[M10_CUT_05]
+PILOTO RUSSO: Victor Três para o comando, temos contato visual com o trem
+
+[M10_CUT_06]
+EKK: Parem aquele trem. Fogo, fogo!
+
+[M10_CUT_07]
+PILOTO RUSSO: Mísseis disparados!
+
+[M10_CUT_08]
+ANYA: Jones - segure firme.
+
+[M10_CUT_09]
+JONES: Aaaaaah!
+
+[M10_CUT_10]
+PRIBOI: Aaaaaah!
+
+[M10_MSG_1]
+PRIBOI: Eu espero aqui enquanto você verifica aqueles armazéns; venha me buscar quando terminar.
+
+[M10_MSG_2]
+PRIBOI: Vamos sair daqui antes que nos vejam.
+
+[M10_MSG_3]
+ANYA: Missão abortada! O Priboi morreu. Agora nunca vamos conseguir aquela informação.
+
+[M10_MSG_4]
+PRIBOI: Vou me proteger numa casa!
+
+[M10_MSG_5]
+ANYA: Jones - aquele tanque! Destrua-o para podermos mandar a evacuação.
+
+[M10_MSG_6]
+PRIBOI: Fique de olhos abertos, deve haver algo útil neste complexo
+
+[M10_MSG_7]
+ANYA: Jones, transmissões de rádio indicam tropas inimigas chegando
+
+[M10_MSG_8]
+JONES: Anya - estamos bem. Priboi. Quem está atrás de você? Quem diabos está atrás de você? Eles querem muito te pegar.
+
+[M10_MSG_9]
+PRIBOI: Que diferença faz, já estou morto mesmo. Ela deve ter mandado tropas. Ela é Vladimira Ekk, ex-comandante da KGB e agora, bem, acho que mulher louca, maluca, psicopata.
+
+[M10_MSG_10]
+JONES: Pegue aquele fuzil - você vem comigo, nenhum de nós vai morrer hoje.
+
+[M10_MSG_11]
+PRIBOI: Então um cuida do outro.
+
+[M10_MSG_12]
+JONES: É o único jeito de sairmos vivos - topa?
+
+[M10_MSG_13]
+PRIBOI: Da, gosto de você, igual De Niro, não desiste, só morde mais fundo e segura mais forte.
+
+[M10_MSG_14]
+JONES: De Niro, o ator?
+
+[M10_MSG_15]
+PRIBOI: Niet, De Niro, meu cachorro, bull terrier.
+
+[M10_MSG_16]
+JONES: Deus me ajude..
+
+[M10_MSG_17]
+PRIBOI: Eu conheço esta área - tenho o maior dos armazéns na cidade aqui perto. Tem uma vila antiga logo ali - totalmente abandonada. Podemos encontrar o helicóptero lá - venha! Eu mostro o caminho.
+
+[M10_MSG_18]
+ANYA: É melhor confiar nele, Jones; os soldados de Ekk estão a caminho. Fique perto do Jach. Não o perca.
+
+# ---- Mission 11: Eagle's Nest I ----
+
+[M11_CUT_01]
+JONES: Encontrei a tripulação do helicóptero como você pediu; 05:00 foi cedo demais. Para onde estamos indo? Você não me disse nada. E a bomba? E a Ekk?
+
+[M11_CUT_02]
+ANYA: Ekk usava um antigo reduto da KGB como campo de treinamento; é para lá que ela deve ter levado a bomba. O campo dela fica nas ruínas de um castelo. O castelo fica no alto de um penhasco rochoso, a uns 50 km da sua posição atual.
+
+[M11_CUT_03]
+ANYA: O acesso é só por teleférico. Não posso arriscar levar você e o helicóptero muito perto; um míssil SAM portátil derrubaria vocês facilmente.
+
+[M11_CUT_04]
+ANYA: O acesso ao teleférico fica num forte de treinamento do exército regular, no pé da montanha.
+
+[M11_CUT_05]
+ANYA: Vamos deixar você a certa distância. Um esconderijo de armas foi preparado para você. Um dos homens de Harrison o deixou lá.
+
+[M11_CUT_06]
+ANYA: Pegue as armas escondidas, vá até o forte de treinamento e suba de teleférico até o pico da montanha.
+
+[M11_CUT_07]
+ANYA: David, consegui acessar as plantas do forte. Meu contato em Moscou mandou muito bem. O teleférico tem fonte de energia própria. A energia está desligada, eu verifiquei. Encontre o gerador.
+
+[M11_MSG_1]
+ANYA: Um dos nossos agentes deixou um fuzil de precisão no telhado do grande prédio em ruínas; encontre-o e pegue-o.
+
+[M11_MSG_2]
+ANYA: Desça até o complexo principal e encontre o gerador de energia.
+
+[M11_MSG_3]
+ANYA: Use o painel para ligar o gerador; o guincho do teleférico será energizado.
+
+[M11_MSG_4]
+ANYA: Suba até a casa do guincho.
+
+[M11_MSG_5]
+ANYA: Use o painel para acionar o guincho do teleférico.
+
+[M11_MSG_6]
+ANYA: Entre no teleférico.
+
+[M11_MSG_7]
+ANYA: Aquelas tropas devem ter visto o homem de Harrison. Você precisa cuidar delas em silêncio
+
+# ---- Mission 12: Eagle's Nest II ----
+
+[M12_CUT_01]
+ANYA: O castelo está aqui desde o século XIV - Ekk o usa há um ano. Originalmente o castelo era controlado pela KGB, mas foi transferido para os militares em 1990.
+
+[M12_CUT_02]
+ANYA: Os militares não tinham uso para ele e o deixaram apodrecer. Ekk pagou o comandante local para fazer vista grossa.
+
+[M12_CUT_03]
+ANYA: Imagens de satélite mostram construções novas entre as ruínas. Mas não tenho dados concretos.
+
+[M12_CUT_04]
+ANYA: A vigilância identificou uns 30 soldados, algumas áreas de treinamento, nada muito pesado.
+
+[M12_CUT_05]
+ANYA: Há pelo menos um helicóptero; conte com um helicóptero de ataque.
+
+[M12_CUT_06]
+ANYA: Resumindo: entre na base. Encontre a bomba. Capture Ekk; se não for possível, a eliminação dela vai satisfazer o Estado-Maior.
+
+[M12_CUT_07]
+ANYA: Depois proteja a área e nós tiramos você e a bomba de lá. David, tome cuidado.
+
+[M12_CUT_08]
+ANYA: Chegamos tão perto; não quero que nada dê errado. Por favor, nada de erros precipitados.
+
+[M12_CUT_09]
+JONES: Anya, o que vai acontecer com o Priboi agora?
+
+[M12_CUT_10]
+ANYA: Ele está, ele está... isso é confidencial.
+
+[M12_CUT_11]
+JONES: O quê? Não brinque comigo, Anya, por favor.
+
+[M12_CUT_12]
+ANYA: Ele está na nossa folha de pagamento.
+
+[M12_CUT_13]
+JONES: O quê? Que cara de pau!
+
+[M12_CUT_14]
+ANYA: Não seja tão ingênuo, Jones - ele é um empresário, está vendendo informação e, bem, nós estamos comprando. Além disso, agora estamos de olho no Sr. Jach Priboi.
+
+[M12_OUT_01]
+JONES: Anya! A Ekk fugiu! Saiu voando num helicóptero. Rastreie aquele helicóptero. Droga! Cadê o meu transporte?
+
+[M12_OUT_02]
+ANYA: Perdemos o helicóptero, a Ekk escapou. Havia nuvens demais. Sinto muito.
+
+[M12_OUT_03]
+ANYA: O computador tem a última trajetória conhecida do helicóptero. Está procurando alvos prováveis. Só nos resta esperar.
+
+[M12_OUT_04]
+JONES: Enquanto a Ekk foge? Chegamos tão longe
+
+[M12_OUT_05]
+ANYA: Calma. Vamos encontrá-la. Reuni as informações que os homens de Harrison coletaram lá.
+
+[M12_OUT_06]
+ANYA: A Ekk é uma nacionalista e tanto - quer que os gastos com armas voltem ao nível de antes da Glasnost, a estatização das indústrias privadas, o fechamento das fronteiras,
+
+[M12_OUT_07]
+ANYA: mudanças nas relações diplomáticas com as ex-repúblicas soviéticas - nossa, ela quer muita coisa.
+
+[M12_OUT_08]
+ANYA: O Priboi trouxe mais informações. A Ekk falou longamente sobre a colaboração entre EUA e Rússia.
+
+[M12_OUT_09]
+ANYA: Ela odiava isso. A última queixa dela era a pesquisa conjunta de defesa antimísseis. Jones, mexa-se! Descobri.
+
+[M12_OUT_10]
+JONES: O quê? O destino da Ekk?
+
+[M12_OUT_11]
+ANYA: Sim! Sei onde ela está. Vinte graus a leste e a 100 km daqui, há um centro de pesquisa, e veja só!
+
+[M12_OUT_12]
+ANYA: Ele relatou problemas nas redes de comunicação duas horas atrás; tiveram que reiniciá-las e estão fora do ar desde então.
+
+[M12_OUT_13]
+JONES: Só pode ser isso!
+
+[M12_MSG_1]
+ANYA: Encontre o elevador para a superfície.
+
+[M12_MSG_2]
+ANYA: A inteligência indica que o QG da Ekk fica nos fundos da base.
+
+[M12_MSG_3]
+ANYA: O QG deve ser subterrâneo; encontre a entrada.
+
+[M12_MSG_4]
+ANYA: A Ekk fugiu com a bomba.
+
+[M12_MSG_5]
+ANYA: Estes portões estão trancados; você vai ter que achar outro caminho.
+
+[M12_MSG_6]
+ANYA: Este lugar está cheio de soldados Spetsnaz; cuidado, Jones.
+
+[M12_MSG_7]
+JONES: Anya, o que vai acontecer com o Priboi agora?
+
+[M12_MSG_8]
+ANYA: Ele está, ele está... isso é confidencial.
+
+[M12_MSG_9]
+JONES: O quê? Não brinque comigo, Anya, por favor
+
+[M12_MSG_10]
+ANYA: Ele está na nossa folha de pagamento
+
+[M12_MSG_11]
+JONES: O quê? Que cara de pau!
+
+[M12_MSG_12]
+ANYA: Não seja tão ingênuo, Jones - ele é um empresário, está vendendo informação e, bem, nós estamos comprando. Além disso, agora estamos de olho no Sr. Jach Priboi.
+
+[M12_MSG_13]
+JONES: Anya - eu, eu encontrei a ogiva - mas ela foi desmontada, totalmente desmontada!
+
+[M12_MSG_14]
+ANYA: Aponte sua minicâmera para ela. Meu Deus - eu vi isso no treinamento - ela construiu uma bomba de mala - sabe, um pequeno artefato nuclear, bem portátil.
+
+[M12_MSG_15]
+ANYA: A potência é relativamente pequena, mas é uma bomba nuclear. Continua sendo mortal.
+
+[M12_MSG_16]
+ANYA: Onde está a Ekk?
+
+[M12_MSG_17]
+JONES: Eu vou encontrá-la.
+
+# ---- Mission 13: Nuclear Infiltration ----
+
+[M13_CUT_01]
+ANYA: Esta foi uma grande usina de refino de plutônio durante a Guerra Fria. Hoje é usada para pesquisa de armas - tecnologia antimísseis - aí está a ligação com a Ekk!
+
+[M13_CUT_02]
+ANYA: A usina ainda abriga um reator nuclear em funcionamento.
+
+[M13_CUT_03]
+ANYA: Com certeza a Ekk tomou o controle da instalação. Vimos estes soldados andando por lá - os uniformes estão errados. E veja aqui - houve tiroteio recentemente.
+
+[M13_CUT_04]
+ANYA: Vamos deixar você perto do perímetro; você precisa proteger o complexo interno em volta do posto de comunicações.
+
+[M13_CUT_05]
+ANYA: Harrison, quatro homens e eu vamos chegar depois de helicóptero.
+
+[M13_CUT_06]
+ANYA: Estou saindo para encontrar você agora.
+
+[M13_CUT_07]
+ANYA: Quando o posto de comunicações estiver seguro, poderemos acessar a rede de computadores da usina - vou descobrir que diabos ela fez
+
+[M13_CUT_08]
+JONES: Área limpa.
+
+[M13_CUT_09]
+ANYA: Estamos entrando.
+
+[M13_CUT_10]
+JONES: Eliminei a maior parte das forças da Ekk na superfície; deve haver mais alguns escondidos por aí como ratos.\tAnya? Harrison? Precisamos começar a descer para o subsolo; precisamos de informações.
+
+[M13_CUT_12]
+ANYA: Vou acessar as redes; você terá essas informações em breve.
+
+[M13_CUT_13]
+CAP. HARRISON: Leonard, pegue 5 homens e vasculhe a área toda. Atirem para matar. Nagochi, Skinner, vão com o Jones, espalhem-se e descubram como chegar ao subsolo. Warren e eu ficamos aqui cobrindo a Anya.
+
+[M13_CUT_14]
+JONES: Vamos nessa. IGI!
+
+[M13_MSG_1]
+ANYA: Encontre a entrada subterrânea.
+
+[M13_MSG_2]
+ANYA: Atravesse a seção subterrânea.
+
+[M13_MSG_3]
+ANYA: Vá até a seção de comunicações.
+
+[M13_MSG_4]
+ANYA: Proteja o complexo. Elimine todos os guardas inimigos.
+
+[M13_MSG_5]
+ANYA: A Ekk transmitiu exigências ao governo russo - parar a pesquisa conjunta com governos estrangeiros e aumentar imediatamente o orçamento militar em 50%, tudo em nome do orgulho nacional, ou ela ameaça detonar a bomba.
+
+[M13_MSG_6]
+ANYA: Ela calculou tudo muito bem. Há 85% de chance de o reator ser danificado mas não desligar; ele vai ficar exposto à atmosfera e ainda em funcionamento. A Ekk pode pôr a culpa de tudo na tecnologia estrangeira insegura - a nossa!
+
+[M13_MSG_7]
+JONES: E se qualquer um dos governos negar o ocorrido, muita gente vai acreditar neles. O governo daqui não pode arcar com um escândalo desses.
+
+[M13_MSG_8]
+JONES: Área limpa
+
+[M13_MSG_9]
+ANYA: Estamos entrando.
+
+# ---- Mission 14: Finding the bomb ----
+
+[M14_CUT_01]
+ANYA: Jones! Nossa prioridade máxima é encontrar aquela bomba. Quando encontrar, proteja a área até eu chegar. Eu assumo a responsabilidade de desarmar o artefato.
+
+[M14_CUT_02]
+JONES: Você?
+
+[M14_CUT_03]
+ANYA: David, você é extremamente prático, mas é preciso mais do que uma faca de campanha e um curso básico de oficina. Uma garota não rala três anos de eletrônica e física nuclear à toa.
+
+[M14_CUT_04]
+JONES: Hã! Tudo bem!
+
+[M14_CUT_05]
+ANYA: Se você vir a Ekk,
+
+[M14_CUT_06]
+JONES: Não se preocupe; só preciso de um tiro limpo.
+
+[M14_CUT_07]
+ANYA: Tenho acesso aos registros de segurança. Foi assim que a Ekk entrou aqui: ela esperou a troca da equipe de fim de semana, e então os guardas dela entraram disfarçados de pessoal de apoio.
+
+[M14_CUT_08]
+Eles tomaram o controle do sistema de segurança e de ventilação, trancando do lado de fora ou asfixiando com gás qualquer oposição. Estou desativando os acessos de segurança da Ekk, mas vai levar tempo.
+
+[M14_CUT_09]
+JONES: Hum, Anya - mais alguma coisa ativa?
+
+[M14_CUT_10]
+ANYA: Meu Deus! Desculpe, David, as armas de segurança estão ativas - logo vão ser desligadas. Tome cuidado, os homens dela podem estar em qualquer lugar.
+
+[M14_CUT_11]
+Lembre-se: - encontre a bomba; proteja a área até eu chegar. Mate a Ekk se a vir.
+
+[M14_OBJ1]
+Encontre Ekk e mate-a.
+
+[M14_OBJ2]
+Encontre a bomba e desative-a.
+
+[M14_MSG_1]
+Atenção! Intruso detectado.
+
+[M14_MSG_2]
+Atenção! Torres de tiro automáticas ativadas.
+
+[M14_MSG_3]
+EKK: Desta vez você não vai conseguir, Jones.
+
+[M14_MSG_4]
+ANYA: Jones, acabei de detectar um blindado descendo pelo elevador. Cuidado, eles devem estar esperando por você agora..
+
+[M14_MSG_5]
+Sistemas de refrigeração ligados.
+
+[M14_MSG_6]
+Atenção! Sistemas de refrigeração desligados. Repito, sistemas de refrigeração desligados.
+
+[M14_MSG_7]
+ANYA: Estou a caminho neste momento! Logo estarei com você.
+
+[M14_MSG_8]
+ANYA: E Jones... cuidado! A Ekk não é alguém com quem se brinca!
+
+[M14_MSG_9]
+ANYA: A porta da área de escritórios está trancada. Tente encontrar um terminal para destravá-la.
+
+[M14_MSG_10]
+ANYA: A Ekk provavelmente colocou a bomba na grande câmara de geração de energia, no segundo nível. Você vai ter que passar pela área de escritórios à sua direita e seguir até o elevador depois dos dormitórios.
+
+[M14_MSG_11]
+ANYA: A câmara de geração de energia fica numa área isolada ao lado da sala dos ventiladores. Dá para chegar à sala dos ventiladores pelos laboratórios de pesquisa
+
+[M14_MSG_12]
+SOLDADO RUSSO: A Ekk mandou a gente vigiar esta porta. Se alguém passar por ela, atire!
+
+[M14_MSG_13]
+EKK: Parabéns, você chegou até aqui, mas aqui você morre.
+
+[M14_MSG_14]
+ANYA: Você a pegou!
+
+[M14_MSG_15]
+ANYA: Jones, a bomba foi desarmada!! Consegui.
+
+[M14_MSG_16]
+ANYA: Jones, cuidado! As torres de tiro estão prestes a voltar a funcionar. Consegue encontrar um terminal de segurança? Invadir o sistema de segurança vai inverter o programa de mira das armas
+
+[M14_MSG_17]
+ANYA: Jones. Cheguei; proteja minha retaguarda enquanto eu desarmo a bomba. Os homens de Harrison vão chegar; eles estão cuidando do que restou das forças da Ekk
+
+[M14_MSG_18]
+SOLDADO ALIADO: Apresentando-me para o serviço, senhor!
+
+[M14_MSG_19]
+ANYA: Jones, você está quase na câmara de geração. Chego lá em poucos minutos.
+
+[M14_MSG_20]
+ANYA: A Ekk deve estar desesperada! Não vejo motivo nenhum para provocar um derretimento do reator. Jones, você precisa religar o sistema de refrigeração!
+
+[M14_MSG_21]
+EKK: Falhou de novo, Jones, tão perto e ainda tão longe
+
+[M14_MSG_22]
+EKK: Você vai ter que ser mais rápido do que isso para me pegar, soldado.
+
+[M14_MSG_23]
+Atenção! Sistemas de refrigeração em estado crítico!
+
+[M14_MSG_24]
+Torres de tiro desativadas por 2 minutos e 30 segundos.
+
+[M14_MSG_25]
+Torres de tiro redefinindo alvos.
+
+[M14_MSG_26]
+Atenção! Derretimento do reator iminente!
+
+[M14_MSG_27]
+ANYA: Jones! Fui atingida!
+
+[M14_MSG_28]
+ANYA: Quando eu chegar, vou começar a desarmar a bomba. Preciso que você proteja minha retaguarda!
+
+[M14_MSG_29]
+Porta aberta!
