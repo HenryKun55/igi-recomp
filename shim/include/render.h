@@ -95,4 +95,28 @@ int render_draw_vb(void **slot, uint32_t gen, const RVertex *all, uint32_t count
 void render_vb_release(void **slot);
 void render_clear(uint32_t nrects, const Rect *rects, uint32_t flags, uint32_t color, float z);
 
+/* ---- pack thread ------------------------------------------------------------
+ * With the render thread on, the game thread only records each draw: copies of
+ * the game's vertex and index bytes the draw reads (or a reference to an
+ * immutable decoded copy of an unchanged vertex buffer) and, when the state
+ * changed, a snapshot of it. The render thread then runs the whole draw front end
+ * (index scan and rebasing, decoding, rhw and near-plane tests, clipping, batching
+ * and packing into GPU memory) before the GL calls. pack_thread=0 in igi.cfg or
+ * IGI_PACK_THREAD=0 keeps that work on the game thread. */
+extern int g_pack_thread;   /* decided by render_init; never changes afterwards */
+/* Game thread, before recording a draw: sends the state snapshot (and texture
+ * uploads, lighting) the draw needs unless the render thread has it already. */
+void render_pk_prepare(int pretransformed, int has_normal);
+/* Game thread: a draw was recorded (statistics, and render_flush has work to end). */
+void render_pk_recorded(void);
+/* Render thread, at the start of a recorded draw: the diagnostic mode and trace
+ * flag the game thread had when recording it. */
+void render_pk_draw_begin(int diag, int trace);
+int render_diag_mode(void);
+/* From render_queue.h (which needs the GL headers). */
+void rq_exec(void (*fn)(const void *args), const void *args, size_t size);
+void *rq_data(size_t n);
+/* Game thread: the diagnostic mode that decodes whole index ranges is on. */
+int render_pk_no_compact(void);
+
 #endif

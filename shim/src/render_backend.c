@@ -743,6 +743,20 @@ static int apply_stages(const DrawCmd *d)
     return active;
 }
 
+void bk_sampler(const void *draw_stage)
+{
+    const DrawStage *st = draw_stage;
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, rq_tex_name(st->tex));
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, st->minf);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, st->magf);
+#if !defined(__vita__)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, st->max_level);
+#endif
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, st->wrap_s);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, st->wrap_t);
+}
+
 /* Lighting inputs: the latest from the front end, and what was last sent to GL.
  * vitaGL re-uploads its uniforms (and transforms light positions) on every
  * glLight/glMaterial call, so the whole setup is skipped while they match. */

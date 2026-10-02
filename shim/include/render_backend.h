@@ -118,6 +118,8 @@ void bk_clear(const void *clear_cmd);
 void bk_quad(const void *quad_cmd);
 void bk_lights(const void *light_snapshot);
 void bk_draw(const void *draw_cmd);
+/* Sends a texture stage's sampler state on its own (normally part of bk_draw). */
+void bk_sampler(const void *draw_stage);
 void bk_overlay(const void *overlay_cmd);
 /* Single-thread mode with timing on: state setup and draw-call microseconds since the last call. */
 void bk_take_timing(uint64_t *state_us, uint64_t *gl_us);

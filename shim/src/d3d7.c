@@ -1,9 +1,13 @@
 /* Direct3D 7: IDirect3D7, IDirect3DDevice7 and IDirect3DVertexBuffer7. */
 #include "igi_fixes.h"
+#include "platform.h"
 #include "render.h"
 
 #include <stdio.h>
 #include <stdlib.h>
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
+#endif
 
 #define D3D_OK 0u
 #define D3DERR_INVALIDVERTEXTYPE 0x88760809u
@@ -150,15 +154,15 @@ typedef struct VertexBuffer {
     uint32_t fvf, count, stride, mem;
     uint32_t gen;              /* bumped by every writable Lock */
     uint32_t lock_frame;       /* g_frame_serial at the last writable Lock */
-    uint32_t cache_gen;        /* gen the decoded copy matches (0 = none) */
-    struct RVertex *cache;     /* whole buffer decoded (static geometry is drawn every frame) */
+    struct VBVersion *cache;   /* whole buffer decoded (static geometry is drawn every frame) */
     void *gl;                  /* renderer's GPU copy (render_draw_vb) */
-    float lo[3], hi[3];        /* bounds of the decoded copy */
     uint32_t lock_id;          /* unique id of the last writable Lock (all buffers) */
     uint32_t drawn_lock, drawn_start, drawn_nv;   /* lock_id and range of the last indexed draw */
     uint32_t drawn_count;      /* indexed draws in a row of that lock and range */
     int multi_drawn;           /* the previous lock's contents were drawn so at least twice */
-    struct RangeBounds *ranges;   /* bounds of drawn ranges (set_range_bounds) */
+    /* Pack thread: copy of the range the terrain path draws, for one lock and frame. */
+    const uint8_t *snap;
+    uint32_t snap_lock, snap_start, snap_nv, snap_frame;
 } VertexBuffer;
 
 static uint32_t vb_lock_serial;
@@ -230,24 +234,47 @@ typedef struct Decoded {
     int pretransformed, has_normal, has_color, has_spec, ntex;
 } Decoded;
 
-/* Decodes `count` vertices: vertex i comes from base + (src ? src[i] : i) * stride. */
-static RVertex *decode_vertices(uint32_t fvf, uint32_t base, uint32_t stride, const uint32_t *src, uint32_t count,
-                               Decoded *d);
+/* The sampling profiler's section markers belong to the game thread: code that
+ * runs on the render thread with the pack thread only sets them without it. */
+#if defined(IGI_PROFILE)
+#define PROF_RS(id)                          \
+    const uint32_t prof_hprev = rt_prof_cur; \
+    if (!g_pack_thread)                      \
+    rt_prof_cur = (id)
+#define PROF_RS_END                   \
+    do {                              \
+        if (!g_pack_thread)           \
+            rt_prof_cur = prof_hprev; \
+    } while (0)
+#else
+#define PROF_RS(id) ((void)0)
+#define PROF_RS_END ((void)0)
+#endif
 
-static RVertex *decode(uint32_t fvf, uint32_t base, uint32_t stride, const uint32_t *src, uint32_t count, Decoded *d)
+/* Decodes `count` vertices into `out`: vertex i comes from vb + (src ? src[i] : i) * stride. */
+static void decode_vertices(uint32_t fvf, const uint8_t *vb, uint32_t stride, const uint32_t *src, uint32_t count,
+                            Decoded *d, RVertex *out);
+
+/* Same into the draw scratch buffer (front end). */
+static RVertex *decode(uint32_t fvf, const uint8_t *vb, uint32_t stride, const uint32_t *src, uint32_t count,
+                       Decoded *d)
 {
-    PROF_SECTION(PROF_H_DECODE);
-    RVertex *r = decode_vertices(fvf, base, stride, src, count, d);
-    PROF_SECTION_END;
-    return r;
+    PROF_RS(PROF_H_DECODE);
+    if (count > vbuf_cap) {
+        vbuf_cap = count + 256u;
+        vbuf = realloc(vbuf, vbuf_cap * sizeof(RVertex));
+    }
+    decode_vertices(fvf, vb, stride, src, count, d, vbuf);
+    PROF_RS_END;
+    return vbuf;
 }
 
 /* The game's vertex layout for the renderer (vertex i at base + (src ? src[i] : i) * stride). */
-static void guest_verts(uint32_t fvf, uint32_t base, uint32_t stride, const uint32_t *src, GuestVerts *g)
+static void guest_verts(uint32_t fvf, const uint8_t *base, uint32_t stride, const uint32_t *src, GuestVerts *g)
 {
     uint32_t pos = fvf & 0x0Eu;
     memset(g, 0, sizeof(*g));
-    g->base = g_mem + base;
+    g->base = base;
     g->stride = stride;
     g->src = src;
     g->has_normal = (fvf & 0x10u) != 0;
@@ -278,8 +305,8 @@ static void guest_verts(uint32_t fvf, uint32_t base, uint32_t stride, const uint
 
 /* Hands untransformed vertices to the renderer in the game's layout when it can
  * take them directly; otherwise decodes them to RVertex. */
-static void emit(uint32_t prim, uint32_t fvf, uint32_t base, uint32_t stride, const uint32_t *src, uint32_t count,
-                 const uint16_t *idx, uint32_t ni)
+static void emit(uint32_t prim, uint32_t fvf, const uint8_t *base, uint32_t stride, const uint32_t *src,
+                 uint32_t count, const uint16_t *idx, uint32_t ni)
 {
     {
         GuestVerts g;
@@ -292,13 +319,9 @@ static void emit(uint32_t prim, uint32_t fvf, uint32_t base, uint32_t stride, co
     render_draw((int)prim, v, count, idx, ni, d.pretransformed, d.has_normal, d.has_color, d.has_spec, d.ntex);
 }
 
-static RVertex *decode_vertices(uint32_t fvf, uint32_t base, uint32_t stride, const uint32_t *src, uint32_t count,
-                               Decoded *d)
+static void decode_vertices(uint32_t fvf, const uint8_t *vb, uint32_t stride, const uint32_t *src, uint32_t count,
+                            Decoded *d, RVertex *out)
 {
-    if (count > vbuf_cap) {
-        vbuf_cap = count + 256u;
-        vbuf = realloc(vbuf, vbuf_cap * sizeof(RVertex));
-    }
     uint32_t pos = fvf & 0x0Eu;
     d->pretransformed = pos == 0x4u;
     d->has_normal = (fvf & 0x10u) != 0;
@@ -330,10 +353,9 @@ static RVertex *decode_vertices(uint32_t fvf, uint32_t base, uint32_t stride, co
     }
     const int pretransformed = d->pretransformed, has_normal = d->has_normal;
     const int has_color = d->has_color, has_spec = d->has_spec;
-    const uint8_t *vb = g_mem + base;
     for (uint32_t i = 0; i < count; i++) {
         const uint8_t *p = vb + (size_t)(src ? src[i] : i) * stride;
-        RVertex *v = &vbuf[i];
+        RVertex *v = &out[i];
         memcpy(&v->x, p, 12);
         if (pretransformed)
             memcpy(&v->w, p + 12, 4);
@@ -357,7 +379,6 @@ static RVertex *decode_vertices(uint32_t fvf, uint32_t base, uint32_t stride, co
             }
         }
     }
-    return vbuf;
 }
 
 static uint32_t prim_vertex_count(uint32_t prim, uint32_t n)
@@ -747,9 +768,6 @@ static RVertex *gather(const RVertex *cache, const uint32_t *src, uint32_t count
     return g;
 }
 
-static void draw_indexed(uint32_t prim, uint32_t fvf, uint32_t verts, uint32_t stride, uint32_t nv,
-                         uint32_t indices, uint32_t ni, RVertex *cache, const Decoded *cd);
-
 /* Bounds of vertex ranges of a decoded buffer, remembered per range: static
  * geometry draws the same ranges every frame, and bounds that fit the draw
  * (rather than the whole buffer) usually show it in front of the near plane,
@@ -760,14 +778,53 @@ typedef struct RangeBounds {
 } RangeBounds;
 #define RANGE_BITS 10
 
-static VertexBuffer *draw_vb;    /* buffer of the DrawPrimitiveVB call in progress (decoded copy in use) */
+/* A vertex buffer's contents decoded, for one version of them (gen). Without the
+ * pack thread it is refreshed in place; with it the render thread may still draw
+ * from it, so a new version is made instead and the old one freed by the render
+ * thread once the draws recorded before are done. The range bounds are the
+ * front end's (render thread with the pack thread). */
+typedef struct VBVersion {
+    RVertex *v;
+    uint32_t count, gen;
+    float lo[3], hi[3];        /* bounds of all vertices */
+    Decoded d;
+    RangeBounds *ranges;       /* bounds of drawn ranges (set_range_bounds) */
+} VBVersion;
+
+static void vb_version_free(VBVersion *c)
+{
+    free(c->v);
+    free(c->ranges);
+    free(c);
+}
+
+static void pk_free_version(const void *p)
+{
+    VBVersion *c;
+    memcpy(&c, p, sizeof(c));
+    vb_version_free(c);
+}
+
+/* The buffer no longer uses this version. */
+static void vb_version_retire(VBVersion *c)
+{
+    if (g_pack_thread)
+        rq_exec(pk_free_version, &c, sizeof(c));
+    else
+        vb_version_free(c);
+}
+
+static void draw_indexed(uint32_t prim, uint32_t fvf, const uint8_t *verts, uint32_t vfirst, uint32_t stride,
+                         uint32_t nv, const uint16_t *ip, uint32_t ni, const RVertex *cache, const Decoded *cd);
+
+static VBVersion *draw_vb;    /* decoded copy the draw in progress uses */
 static uint32_t draw_vb_start;
 
 /* Sets the renderer's bounds to those of vertices first .. first + count - 1 of
  * the draw's decoded vertices (relative to its start vertex). */
 static void set_range_bounds(uint32_t first, uint32_t count)
 {
-    VertexBuffer *vb = draw_vb;
+    VBVersion *vb = draw_vb;
     if (!vb)
         return;
     first += draw_vb_start;
@@ -779,13 +836,13 @@ static void set_range_bounds(uint32_t first, uint32_t count)
             return;
     }
     RangeBounds *e = &vb->ranges[((first * 2654435761u) ^ (count * 40503u)) >> (32 - RANGE_BITS)];
-    if (e->gen != vb->cache_gen || e->first != first || e->count != count) {
+    if (e->gen != vb->gen || e->first != first || e->count != count) {
         for (int k = 0; k < 3; k++) {
             e->lo[k] = 1e30f;
             e->hi[k] = -1e30f;
         }
         for (uint32_t i = first; i < first + count; i++) {
-            const float *p = &vb->cache[i].x;
+            const float *p = &vb->v[i].x;
             for (int k = 0; k < 3; k++) {
                 e->lo[k] = p[k] < e->lo[k] ? p[k] : e->lo[k];
                 e->hi[k] = p[k] > e->hi[k] ? p[k] : e->hi[k];
@@ -793,32 +850,39 @@ static void set_range_bounds(uint32_t first, uint32_t count)
         }
         e->first = first;
         e->count = count;
-        e->gen = vb->cache_gen;
+        e->gen = vb->gen;
     }
     render_set_bounds(e->lo, e->hi);
 }
 
-/* `cache`, when set, is the decoded copy of the vertices at `verts` (with `cd` its format). */
-static void draw(uint32_t prim, uint32_t fvf, uint32_t verts, uint32_t stride, uint32_t nv,
-                 uint32_t indices, uint32_t ni, RVertex *cache, const Decoded *cd)
+/* Pre-transformed draws without a texture the game wants hidden (igi_fixes). */
+static int skip_untextured_2d(uint32_t fvf)
 {
-    if ((fvf & 0x0Eu) == 0x4u && !g_rs.stage[0].texture && igi_skip_untextured_2d())
+    return (fvf & 0x0Eu) == 0x4u && !g_rs.stage[0].texture && igi_skip_untextured_2d();
+}
+
+/* `cache`, when set, is the decoded copy of the vertices at `verts` (with `cd` its format). */
+static void draw(uint32_t prim, uint32_t fvf, const uint8_t *verts, uint32_t stride, uint32_t nv,
+                 const uint16_t *ip, uint32_t ni, const RVertex *cache, const Decoded *cd)
+{
+    if (skip_untextured_2d(fvf))
         return;
     PROF_SECTION(PROF_H_INDEX);
-    draw_indexed(prim, fvf, verts, stride, nv, indices, ni, cache, cd);
+    draw_indexed(prim, fvf, verts, 0, stride, nv, ip, ni, cache, cd);
     PROF_SECTION_END;
 }
 
-static void draw_indexed(uint32_t prim, uint32_t fvf, uint32_t verts, uint32_t stride, uint32_t nv,
-                         uint32_t indices, uint32_t ni, RVertex *cache, const Decoded *cd)
+/* Vertex i of the draw is at verts + (i - vfirst) * stride (vfirst: the first
+ * vertex the memory at `verts` holds). */
+static void draw_indexed(uint32_t prim, uint32_t fvf, const uint8_t *verts, uint32_t vfirst, uint32_t stride,
+                         uint32_t nv, const uint16_t *ip, uint32_t ni, const RVertex *cache, const Decoded *cd)
 {
     Decoded d;
-    if (indices && ni) {
+    if (ip && ni) {
         /* D3D passes the whole vertex buffer size; decode only the range the
          * indices touch and rebase them (IGI draws small pieces of big buffers). */
         static uint16_t *rebased;
         static uint32_t rebased_cap;
-        const uint16_t *ip = (const uint16_t *)(g_mem + indices);   /* little endian, ldrh handles alignment */
         uint32_t lo = 0xFFFFu, hi = 0;
         for (uint32_t i = 0; i < ni; i++) {
             uint32_t x = ip[i];
@@ -834,11 +898,12 @@ static void draw_indexed(uint32_t prim, uint32_t fvf, uint32_t verts, uint32_t s
             rebased = realloc(rebased, rebased_cap * sizeof(uint16_t));
         }
         uint32_t range = hi - lo + 1u;
+        const uint8_t *vlo = cache ? NULL : verts + (size_t)(lo - vfirst) * stride;
         if (range <= ni || render_diag_no_compact()) {
             for (uint32_t i = 0; i < ni; i++)
                 rebased[i] = (uint16_t)(ip[i] - lo);
             if (!cache) {
-                emit(prim, fvf, verts + lo * stride, stride, NULL, range, rebased, ni);
+                emit(prim, fvf, vlo, stride, NULL, range, rebased, ni);
                 return;
             }
             d = *cd;
@@ -879,7 +944,7 @@ static void draw_indexed(uint32_t prim, uint32_t fvf, uint32_t verts, uint32_t s
             rebased[i] = (uint16_t)slot[x];
         }
         if (!cache) {
-            emit(prim, fvf, verts + lo * stride, stride, used, nu, rebased, ni);
+            emit(prim, fvf, vlo, stride, used, nu, rebased, ni);
             return;
         }
         d = *cd;
@@ -897,70 +962,333 @@ static void draw_indexed(uint32_t prim, uint32_t fvf, uint32_t verts, uint32_t s
     render_draw((int)prim, cache, nv, NULL, 0, d.pretransformed, d.has_normal, d.has_color, d.has_spec, d.ntex);
 }
 
+/* Decoded copy of the whole buffer, refreshed after a writable Lock. */
+static VBVersion *vb_cache(VertexBuffer *vb)
+{
+    /* Only buffers left untouched since an earlier frame: dynamic buffers
+     * (refilled every frame) are decoded per draw, just the part drawn. */
+    if (render_diag_no_vb_cache() || !vb->count || vb->lock_frame == g_frame_serial)
+        return NULL;
+    VBVersion *c = vb->cache;
+    if (c && c->gen == vb->gen)
+        return c;
+    if (c && g_pack_thread) {
+        vb_version_retire(c);
+        c = NULL;
+    }
+    if (!c) {
+        c = calloc(1, sizeof(*c));
+        c->v = malloc((size_t)vb->count * sizeof(RVertex));
+        c->count = vb->count;
+        vb->cache = c;
+    }
+    PROF_SECTION(PROF_H_DECODE);
+    decode_vertices(vb->fvf, g_mem + vb->mem, vb->stride, NULL, vb->count, &c->d, c->v);
+    PROF_SECTION_END;
+    c->gen = vb->gen;
+    for (int k = 0; k < 3; k++) {
+        c->lo[k] = 1e30f;
+        c->hi[k] = -1e30f;
+    }
+    for (uint32_t i = 0; i < vb->count; i++) {
+        const float *p = &c->v[i].x;
+        for (int k = 0; k < 3; k++) {
+            c->lo[k] = p[k] < c->lo[k] ? p[k] : c->lo[k];
+            c->hi[k] = p[k] > c->hi[k] ? p[k] : c->hi[k];
+        }
+    }
+    return c;
+}
+
+/* ---- pack thread: draws recorded for the render thread ---------------------
+ * The game's vertex and index memory may change right after the call: a draw
+ * takes copies of the bytes it reads (decoded vertex buffer versions are never
+ * changed once made). The render thread runs draw_indexed and the renderer's
+ * front end on them, as the game thread does without the pack thread. */
+enum { PK_RAW, PK_CACHE, PK_DYN };
+
+typedef struct PkDraw {
+    uint8_t kind, diag, trace;
+    uint32_t prim, fvf, stride;
+    uint32_t nv, ni;
+    uint32_t vfirst;           /* PK_RAW: the vertex `verts` starts with */
+    uint32_t start, lock_id;   /* PK_CACHE, PK_DYN: start vertex in the buffer; PK_DYN: its lock */
+    const uint8_t *verts;      /* PK_RAW, PK_DYN: copied vertices */
+    const uint16_t *idx;       /* copied indices, NULL: none */
+    VBVersion *cache;          /* PK_CACHE */
+} PkDraw;
+
+/* Render thread: one recorded draw. */
+static void pk_exec(const void *p)
+{
+    const PkDraw *c = p;
+    render_pk_draw_begin(c->diag, c->trace);
+    if (c->kind == PK_CACHE) {
+        VBVersion *ver = c->cache;
+        render_set_bounds(ver->lo, ver->hi);
+        draw_vb = ver;
+        draw_vb_start = c->start;
+        draw_indexed(c->prim, c->fvf, NULL, 0, c->stride, c->nv, c->idx, c->ni, ver->v + c->start, &ver->d);
+        draw_vb = NULL;
+        render_set_bounds(NULL, NULL);
+        return;
+    }
+    if (c->kind == PK_DYN) {
+        GuestVerts g;
+        guest_verts(c->fvf, c->verts, c->stride, NULL, &g);
+        if (render_draw_dynvb(c->lock_id, c->start, &g, c->nv, (int)c->prim, c->idx, c->ni))
+            return;
+    }
+    draw_indexed(c->prim, c->fvf, c->verts, c->vfirst, c->stride, c->nv, c->idx, c->ni, NULL, NULL);
+}
+
+static void pk_record(PkDraw *c)
+{
+    render_pk_prepare((c->fvf & 0x0Eu) == 0x4u, (c->fvf & 0x10u) != 0);
+    c->diag = (uint8_t)render_diag_mode();
+    c->trace = g_trace_next_frame == 2;
+    rq_exec(pk_exec, c, sizeof(*c));
+    render_pk_recorded();
+}
+
+/* Copies n indices from the game and returns their lowest and highest. */
+static uint16_t *pk_indices(const uint16_t *s, uint32_t n, uint32_t *lo_out, uint32_t *hi_out)
+{
+    uint16_t *d = rq_data((size_t)n * sizeof(uint16_t));
+    memcpy(d, s, (size_t)n * sizeof(uint16_t));   /* the game's may be 2-byte aligned only */
+    uint32_t i = 0, lo = 0xFFFFu, hi = 0;
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+    if (n >= 8u) {
+        uint16x8_t a = vdupq_n_u16(0xFFFFu), b = vdupq_n_u16(0);
+        for (; i + 8u <= n; i += 8u) {
+            uint16x8_t v = vld1q_u16(d + i);
+            a = vminq_u16(a, v);
+            b = vmaxq_u16(b, v);
+        }
+        uint16x4_t a4 = vmin_u16(vget_low_u16(a), vget_high_u16(a));
+        uint16x4_t b4 = vmax_u16(vget_low_u16(b), vget_high_u16(b));
+        a4 = vpmin_u16(a4, a4);
+        a4 = vpmin_u16(a4, a4);
+        b4 = vpmax_u16(b4, b4);
+        b4 = vpmax_u16(b4, b4);
+        lo = vget_lane_u16(a4, 0);
+        hi = vget_lane_u16(b4, 0);
+    }
+#endif
+    for (; i < n; i++) {
+        uint32_t x = d[i];
+        lo = x < lo ? x : lo;
+        hi = x > hi ? x : hi;
+    }
+    *lo_out = lo;
+    *hi_out = hi;
+    return d;
+}
+
+static const uint8_t *pk_bytes(const uint8_t *s, size_t n)
+{
+    uint8_t *d = rq_data(n);
+    memcpy(d, s, n);
+    return d;
+}
+
+/* Records a draw of the game's vertices at `verts` (vertex 0 of the draw) with
+ * indices `ip` (or none): the same choices as draw_indexed, so the render thread
+ * gets the vertices draw_indexed would read. */
+static void pk_record_raw(uint32_t prim, uint32_t fvf, const uint8_t *verts, uint32_t stride, uint32_t nv,
+                          const uint16_t *ip, uint32_t ni)
+{
+    PkDraw c;
+    memset(&c, 0, sizeof(c));
+    c.kind = PK_RAW;
+    c.prim = prim;
+    c.fvf = fvf;
+    c.stride = stride;
+    c.nv = nv;
+    if (!(ip && ni)) {
+        c.verts = pk_bytes(verts, (size_t)nv * stride);
+        pk_record(&c);
+        return;
+    }
+    uint32_t lo, hi;
+    uint16_t *ic = pk_indices(ip, ni, &lo, &hi);
+    if (hi >= nv)
+        hi = nv ? nv - 1u : 0u;
+    if (lo > hi)
+        return;
+    uint32_t range = hi - lo + 1u;
+    c.idx = ic;
+    c.ni = ni;
+    if (range <= ni || render_pk_no_compact()) {
+        c.verts = pk_bytes(verts + (size_t)lo * stride, (size_t)range * stride);
+        c.vfirst = lo;
+        pk_record(&c);
+        return;
+    }
+    /* Sparse use of a big range: only the referenced vertices, in first-use order,
+     * with the indices rebased to them (what draw_indexed would make of it). */
+    static uint32_t *slot, *slot_gen, *used;
+    static uint32_t slot_cap, used_cap, gen;
+    if (range > slot_cap) {
+        slot_cap = range + 1024u;
+        slot = realloc(slot, slot_cap * sizeof(uint32_t));
+        slot_gen = realloc(slot_gen, slot_cap * sizeof(uint32_t));
+        memset(slot_gen, 0, slot_cap * sizeof(uint32_t));
+        gen = 0;
+    }
+    if (ni > used_cap) {
+        used_cap = ni + 1024u;
+        used = realloc(used, used_cap * sizeof(uint32_t));
+    }
+    if (++gen == 0) {
+        memset(slot_gen, 0, slot_cap * sizeof(uint32_t));
+        gen = 1;
+    }
+    uint32_t nu = 0;
+    for (uint32_t i = 0; i < ni; i++) {
+        uint32_t x = (uint32_t)ic[i] - lo;
+        if (x >= range)
+            x = range - 1u;
+        if (slot_gen[x] != gen) {
+            slot_gen[x] = gen;
+            slot[x] = nu;
+            used[nu++] = x;
+        }
+        ic[i] = (uint16_t)slot[x];
+    }
+    uint8_t *v = rq_data((size_t)nu * stride);
+    const uint8_t *s = verts + (size_t)lo * stride;
+    for (uint32_t i = 0; i < nu; i++)
+        memcpy(v + (size_t)i * stride, s + (size_t)used[i] * stride, stride);
+    c.verts = v;
+    c.nv = nu;
+    pk_record(&c);
+}
+
+/* Records a draw from a vertex buffer (DrawPrimitiveVB: no indices). */
+static void pk_draw_vb(VertexBuffer *vb, uint32_t prim, uint32_t start, uint32_t nv, const uint16_t *ip, uint32_t ni)
+{
+    if (skip_untextured_2d(vb->fvf))
+        return;
+    VBVersion *ver = vb_cache(vb);
+    if (ver && start + nv > vb->count)
+        ver = NULL;
+    if (ver) {
+        PkDraw c;
+        memset(&c, 0, sizeof(c));
+        c.kind = PK_CACHE;
+        c.prim = prim;
+        c.fvf = vb->fvf;
+        c.stride = vb->stride;
+        c.nv = nv;
+        c.start = start;
+        c.cache = ver;
+        if (ip && ni) {
+            c.idx = (const uint16_t *)(const void *)pk_bytes((const uint8_t *)ip, (size_t)ni * sizeof(uint16_t));
+            c.ni = ni;
+        }
+        pk_record(&c);
+        return;
+    }
+    /* A pre-transformed buffer filled for this frame and drawn again over the
+     * same range (the terrain): its vertices are copied once for all such draws
+     * and render_draw_dynvb packs them once (see dev_DrawIndexedPrimitiveVB). */
+    if (ip && ni && vb->lock_id && (vb->fvf & 0x0Eu) == 0x4u && start + nv <= vb->count) {
+        int first = vb->drawn_lock != vb->lock_id;
+        int same = !first && vb->drawn_start == start && vb->drawn_nv == nv;
+        if (first)
+            vb->multi_drawn = vb->drawn_count >= 2u;
+        vb->drawn_count = same ? vb->drawn_count + 1u : 1u;
+        vb->drawn_lock = vb->lock_id;
+        vb->drawn_start = start;
+        vb->drawn_nv = nv;
+        if (same || (first && vb->multi_drawn)) {
+            if (!vb->snap || vb->snap_lock != vb->lock_id || vb->snap_start != start || vb->snap_nv != nv ||
+                vb->snap_frame != g_frame_serial) {
+                vb->snap = pk_bytes(g_mem + vb->mem + (size_t)start * vb->stride, (size_t)nv * vb->stride);
+                vb->snap_lock = vb->lock_id;
+                vb->snap_start = start;
+                vb->snap_nv = nv;
+                vb->snap_frame = g_frame_serial;
+            }
+            PkDraw c;
+            memset(&c, 0, sizeof(c));
+            c.kind = PK_DYN;
+            c.prim = prim;
+            c.fvf = vb->fvf;
+            c.stride = vb->stride;
+            c.nv = nv;
+            c.start = start;
+            c.lock_id = vb->lock_id;
+            c.verts = vb->snap;
+            c.idx = (const uint16_t *)(const void *)pk_bytes((const uint8_t *)ip, (size_t)ni * sizeof(uint16_t));
+            c.ni = ni;
+            pk_record(&c);
+            return;
+        }
+    }
+    pk_record_raw(prim, vb->fvf, g_mem + vb->mem + (size_t)start * vb->stride, vb->stride, nv, ip, ni);
+}
+
 static void dev_DrawPrimitive(Ctx *c)
 {
     uint32_t prim = ARG(1), fvf = ARG(2), verts = ARG(3), n = ARG(4);
-    draw(prim, fvf, verts, fvf_stride(fvf), prim_vertex_count(prim, n), 0, 0, NULL, NULL);
+    if (g_pack_thread) {
+        if (!skip_untextured_2d(fvf)) {
+            PROF_SECTION(PROF_H_INDEX);
+            pk_record_raw(prim, fvf, g_mem + verts, fvf_stride(fvf), prim_vertex_count(prim, n), NULL, 0);
+            PROF_SECTION_END;
+        }
+        stdcall_ret(c, D3D_OK, 6);
+        return;
+    }
+    draw(prim, fvf, g_mem + verts, fvf_stride(fvf), prim_vertex_count(prim, n), NULL, 0, NULL, NULL);
     stdcall_ret(c, D3D_OK, 6);
 }
 
 static void dev_DrawIndexedPrimitive(Ctx *c)
 {
     uint32_t prim = ARG(1), fvf = ARG(2), verts = ARG(3), nv = ARG(4), idx = ARG(5), ni = ARG(6);
-    draw(prim, fvf, verts, fvf_stride(fvf), nv, idx, ni, NULL, NULL);
-    stdcall_ret(c, D3D_OK, 8);
-}
-
-/* Decoded copy of the whole buffer, refreshed after a writable Lock. */
-static RVertex *vb_cache(VertexBuffer *vb, Decoded *d)
-{
-    /* Only buffers left untouched since an earlier frame: dynamic buffers
-     * (refilled every frame) are decoded per draw, just the part drawn. */
-    if (render_diag_no_vb_cache() || !vb->count || vb->lock_frame == g_frame_serial)
-        return NULL;
-    if (vb->cache_gen != vb->gen || !vb->cache) {
-        if (!vb->cache)
-            vb->cache = malloc((size_t)vb->count * sizeof(RVertex));
-        RVertex *v = decode(vb->fvf, vb->mem, vb->stride, NULL, vb->count, d);
-        memcpy(vb->cache, v, (size_t)vb->count * sizeof(RVertex));
-        vb->cache_gen = vb->gen;
-        for (int k = 0; k < 3; k++) {
-            vb->lo[k] = 1e30f;
-            vb->hi[k] = -1e30f;
+    const uint16_t *ip = idx ? (const uint16_t *)gptr(idx) : NULL;   /* little endian, ldrh handles alignment */
+    if (g_pack_thread) {
+        if (!skip_untextured_2d(fvf)) {
+            PROF_SECTION(PROF_H_INDEX);
+            pk_record_raw(prim, fvf, g_mem + verts, fvf_stride(fvf), nv, ip, ni);
+            PROF_SECTION_END;
         }
-        for (uint32_t i = 0; i < vb->count; i++) {
-            const float *p = &vb->cache[i].x;
-            for (int k = 0; k < 3; k++) {
-                vb->lo[k] = p[k] < vb->lo[k] ? p[k] : vb->lo[k];
-                vb->hi[k] = p[k] > vb->hi[k] ? p[k] : vb->hi[k];
-            }
-        }
-    } else {
-        decode(vb->fvf, vb->mem, vb->stride, NULL, 0, d);   /* format only */
+        stdcall_ret(c, D3D_OK, 8);
+        return;
     }
-    return vb->cache;
+    draw(prim, fvf, g_mem + verts, fvf_stride(fvf), nv, ip, ni, NULL, NULL);
+    stdcall_ret(c, D3D_OK, 8);
 }
 
 static void dev_DrawPrimitiveVB(Ctx *c)
 {
     uint32_t prim = ARG(1), start = ARG(3), n = ARG(4);
     VertexBuffer *vb = com_host(ARG(2));
-    Decoded d;
-    RVertex *cache = vb_cache(vb, &d);
-    if (start + n > vb->count)
-        cache = NULL;
-    if (cache && !d.pretransformed &&
-        !((vb->fvf & 0x0Eu) == 0x4u && !g_rs.stage[0].texture && igi_skip_untextured_2d()) &&
-        render_draw_vb(&vb->gl, vb->cache_gen, cache, vb->count, start, (int)prim, n, NULL, 0, d.has_normal,
-                       d.has_color, d.has_spec, d.ntex)) {
+    if (g_pack_thread) {
+        PROF_SECTION(PROF_H_INDEX);
+        pk_draw_vb(vb, prim, start, n, NULL, 0);
+        PROF_SECTION_END;
         stdcall_ret(c, D3D_OK, 6);
         return;
     }
-    if (cache)
-        render_set_bounds(vb->lo, vb->hi);
-    draw_vb = cache ? vb : NULL;
+    VBVersion *ver = vb_cache(vb);
+    if (ver && start + n > vb->count)
+        ver = NULL;
+    if (ver && !ver->d.pretransformed && !skip_untextured_2d(vb->fvf) &&
+        render_draw_vb(&vb->gl, ver->gen, ver->v, vb->count, start, (int)prim, n, NULL, 0, ver->d.has_normal,
+                       ver->d.has_color, ver->d.has_spec, ver->d.ntex)) {
+        stdcall_ret(c, D3D_OK, 6);
+        return;
+    }
+    if (ver)
+        render_set_bounds(ver->lo, ver->hi);
+    draw_vb = ver;
     draw_vb_start = start;
-    draw(prim, vb->fvf, vb->mem + start * vb->stride, vb->stride, n, 0, 0, cache ? cache + start : NULL, &d);
+    draw(prim, vb->fvf, g_mem + vb->mem + start * vb->stride, vb->stride, n, NULL, 0, ver ? ver->v + start : NULL,
+         ver ? &ver->d : NULL);
     draw_vb = NULL;
     render_set_bounds(NULL, NULL);
     stdcall_ret(c, D3D_OK, 6);
@@ -970,13 +1298,20 @@ static void dev_DrawIndexedPrimitiveVB(Ctx *c)
 {
     uint32_t prim = ARG(1), start = ARG(3), nv = ARG(4), idx = ARG(5), ni = ARG(6);
     VertexBuffer *vb = com_host(ARG(2));
-    Decoded d;
-    RVertex *cache = vb_cache(vb, &d);
-    if (start + nv > vb->count)
-        cache = NULL;
-    if (cache && !d.pretransformed && idx && ni &&
-        render_draw_vb(&vb->gl, vb->cache_gen, cache, vb->count, start, (int)prim, nv, (const uint16_t *)gptr(idx),
-                       ni, d.has_normal, d.has_color, d.has_spec, d.ntex)) {
+    const uint16_t *ip = idx ? (const uint16_t *)gptr(idx) : NULL;
+    if (g_pack_thread) {
+        PROF_SECTION(PROF_H_INDEX);
+        pk_draw_vb(vb, prim, start, nv, ip, ni);
+        PROF_SECTION_END;
+        stdcall_ret(c, D3D_OK, 8);
+        return;
+    }
+    VBVersion *ver = vb_cache(vb);
+    if (ver && start + nv > vb->count)
+        ver = NULL;
+    if (ver && !ver->d.pretransformed && ip && ni &&
+        render_draw_vb(&vb->gl, ver->gen, ver->v, vb->count, start, (int)prim, nv, ip, ni, ver->d.has_normal,
+                       ver->d.has_color, ver->d.has_spec, ver->d.ntex)) {
         stdcall_ret(c, D3D_OK, 8);
         return;
     }
@@ -984,8 +1319,8 @@ static void dev_DrawIndexedPrimitiveVB(Ctx *c)
      * same range (the terrain: one draw per texture batch): packed once. A
      * buffer whose previous contents were drawn that way takes this path from
      * its first draw. */
-    if (!cache && idx && ni && vb->lock_id && (vb->fvf & 0x0Eu) == 0x4u && start + nv <= vb->count &&
-        !(!g_rs.stage[0].texture && igi_skip_untextured_2d())) {
+    if (!ver && ip && ni && vb->lock_id && (vb->fvf & 0x0Eu) == 0x4u && start + nv <= vb->count &&
+        !skip_untextured_2d(vb->fvf)) {
         int first = vb->drawn_lock != vb->lock_id;
         int same = !first && vb->drawn_start == start && vb->drawn_nv == nv;
         if (first)
@@ -996,23 +1331,23 @@ static void dev_DrawIndexedPrimitiveVB(Ctx *c)
         vb->drawn_nv = nv;
         if (same || (first && vb->multi_drawn)) {
             GuestVerts g;
-            guest_verts(vb->fvf, vb->mem + start * vb->stride, vb->stride, NULL, &g);
-            if (render_draw_dynvb(vb->lock_id, start, &g, nv, (int)prim, (const uint16_t *)gptr(idx), ni)) {
+            guest_verts(vb->fvf, g_mem + vb->mem + start * vb->stride, vb->stride, NULL, &g);
+            if (render_draw_dynvb(vb->lock_id, start, &g, nv, (int)prim, ip, ni)) {
                 stdcall_ret(c, D3D_OK, 8);
                 return;
             }
         }
     }
-    if (cache)
-        render_set_bounds(vb->lo, vb->hi);
-    draw_vb = cache ? vb : NULL;
+    if (ver)
+        render_set_bounds(ver->lo, ver->hi);
+    draw_vb = ver;
     draw_vb_start = start;
-    draw(prim, vb->fvf, vb->mem + start * vb->stride, vb->stride, nv, idx, ni, cache ? cache + start : NULL, &d);
+    draw(prim, vb->fvf, g_mem + vb->mem + start * vb->stride, vb->stride, nv, ip, ni, ver ? ver->v + start : NULL,
+         ver ? &ver->d : NULL);
     draw_vb = NULL;
     render_set_bounds(NULL, NULL);
     stdcall_ret(c, D3D_OK, 8);
 }
-
 static void dev_SetClipStatus(Ctx *c) { stdcall_ret(c, D3D_OK, 2); }
 
 static void dev_GetClipStatus(Ctx *c)
@@ -1122,8 +1457,8 @@ static void vb_Release(Ctx *c)
     uint32_t n = RD32(obj + 8u);
     if (n <= 1u) {
         heap_free(vb->mem);
-        free(vb->cache);
-        free(vb->ranges);
+        if (vb->cache)
+            vb_version_retire(vb->cache);
         render_vb_release(&vb->gl);
         free(vb);
     }
