@@ -449,6 +449,9 @@ int rt_hle_memset(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *re
 /* Hand-decompiled game functions (runtime/src/native_*.c, NATIVE table in gen.py),
  * same convention. g_igi_native = 0 (IGI_NATIVE=0) makes them all decline. */
 extern int g_igi_native;
+/* 1: the terrain renderer runs its bit-exact version (IGI_TERRAIN_EXACT=1 /
+ * terrain_exact=1 in igi.cfg), 0: the single-precision one (native_terrain.c). */
+extern int g_terrain_exact;
 int rt_native_terrain_render(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
 int rt_native_skin_mesh(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
 int rt_native_mesh_draw(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);

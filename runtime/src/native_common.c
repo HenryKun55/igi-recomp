@@ -9,6 +9,7 @@
 
 /* IGI_NATIVE=0 / native=0 in igi.cfg (runtime/src/main.c): all decline. */
 int g_igi_native = 1;
+int g_terrain_exact;
 NativeHook g_native_hook;
 uint32_t g_native_decline;
 

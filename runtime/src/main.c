@@ -234,6 +234,29 @@ static void native_setting(void)
     rt_log("native game functions: %s", g_igi_native ? "on" : "off (recompiled code)");
 }
 
+/* Terrain renderer version: IGI_TERRAIN_EXACT=0|1 (desktop) or terrain_exact=0|1
+ * in ux0:data/igi/igi.cfg (Vita); see runtime/src/native_terrain.c. */
+static void terrain_setting(void)
+{
+    const char *v = getenv("IGI_TERRAIN_EXACT");
+#if defined(__vita__)
+    static char line[16];
+    FILE *f = fopen("ux0:data/igi/igi.cfg", "r");
+    if (f) {
+        char buf[64];
+        while (fgets(buf, sizeof(buf), f))
+            if (strncmp(buf, "terrain_exact=", 14) == 0) {
+                line[0] = buf[14];
+                v = line;
+            }
+        fclose(f);
+    }
+#endif
+    if (v && *v)
+        g_terrain_exact = v[0] != '0';
+    rt_log("terrain renderer: %s", g_terrain_exact ? "bit-exact (double precision)" : "fast (single precision)");
+}
+
 int main(int argc, char **argv)
 {
     const char *dir = getenv("IGI_DIR");
@@ -254,6 +277,7 @@ int main(int argc, char **argv)
 
     mem_init();
     native_setting();
+    terrain_setting();
     capture_init();
     char exe[1100];
     snprintf(exe, sizeof(exe), "%s/IGI.exe", g_game_dir);
