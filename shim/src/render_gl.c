@@ -1039,6 +1039,28 @@ static void send_lights(void)
     for (int i = 0; i < MAX_LIGHTS; i++)
         if (g_rs.lights[i].enabled)
             cur->lights[i] = g_rs.lights[i];
+    if (g_trace_next_frame == 2) {
+        rt_log("lights: ambient %08X colorvertex %u diffsrc %u ambsrc %u specsrc %u emissrc %u specular %u normalize %u",
+               rs[139], rs[141], rs[145], rs[147], rs[146], rs[148], rs[29], rs[143]);
+        const float *m = cur->mat;
+        rt_log("    material: diff %.2f %.2f %.2f %.2f amb %.2f %.2f %.2f %.2f spec %.2f %.2f %.2f %.2f "
+               "emis %.2f %.2f %.2f %.2f power %.1f",
+               (double)m[0], (double)m[1], (double)m[2], (double)m[3], (double)m[4], (double)m[5], (double)m[6],
+               (double)m[7], (double)m[8], (double)m[9], (double)m[10], (double)m[11], (double)m[12], (double)m[13],
+               (double)m[14], (double)m[15], (double)m[16]);
+        for (int i = 0; i < MAX_LIGHTS; i++) {
+            const Light *l = &cur->lights[i];
+            if (l->enabled)
+                rt_log("    light %d: type %u diff %.2f %.2f %.2f amb %.2f %.2f %.2f spec %.2f %.2f %.2f pos %.1f %.1f "
+                       "%.1f dir %.2f %.2f %.2f range %.1f att %.4f %.6f %.8f theta %.2f phi %.2f falloff %.2f",
+                       i, l->type, (double)l->diffuse[0], (double)l->diffuse[1], (double)l->diffuse[2],
+                       (double)l->ambient[0], (double)l->ambient[1], (double)l->ambient[2], (double)l->specular[0],
+                       (double)l->specular[1], (double)l->specular[2], (double)l->pos[0], (double)l->pos[1],
+                       (double)l->pos[2], (double)l->dir[0], (double)l->dir[1], (double)l->dir[2], (double)l->range,
+                       (double)l->att0, (double)l->att1, (double)l->att2, (double)l->theta, (double)l->phi,
+                       (double)l->falloff);
+        }
+    }
     rq_end();
 }
 
@@ -1136,26 +1158,38 @@ static void layout_init(Layout *L, int pretransformed, int has_normal, int has_c
     L->ntex = ntex;
     L->pos_size = pretransformed ? 4 : 3;
     L->use_color = has_color || pretransformed;
-#if !defined(__vita__)
     L->use_fog = li->fog && (pretransformed || (!li->fogtable && !li->fogvertex)) && has_spec;
-#else
-    L->use_fog = 0;
-#endif
     L->stages = li->stages;
-    uint32_t o = (uint32_t)L->pos_size * 4u;
-    L->off_col = o;
-    o += L->use_color ? 4u : 0u;
-    L->off_nrm = o;
-    o += has_normal ? 12u : 0u;
-    L->off_fog = o;
-    o += L->use_fog ? 4u : 0u;
     for (int s = 0; s < MAX_STAGES; s++) {
         L->uv_src[s] = -1;
         uint32_t ci = li->tci[s] & 0xFFFFu;
         if (s < L->stages && (int)ci < ntex)
             L->uv_src[s] = ci < MAX_STAGES ? (int)ci : 0;
+    }
+#if defined(__vita__)
+    /* vitaGL (tools/vitagl) reads the fog coordinate as a third texture coordinate
+     * of the first unit: it follows uv0 there, and needs that unit. */
+    L->use_fog &= L->uv_src[0] >= 0;
+    const int fog_after_uv0 = 1;
+#else
+    const int fog_after_uv0 = 0;
+#endif
+    uint32_t o = (uint32_t)L->pos_size * 4u;
+    L->off_col = o;
+    o += L->use_color ? 4u : 0u;
+    L->off_nrm = o;
+    o += has_normal ? 12u : 0u;
+    if (!fog_after_uv0) {
+        L->off_fog = o;
+        o += L->use_fog ? 4u : 0u;
+    }
+    for (int s = 0; s < MAX_STAGES; s++) {
         L->off_uv[s] = o;
         o += L->uv_src[s] >= 0 ? 8u : 0u;
+        if (s == 0 && fog_after_uv0) {
+            L->off_fog = o;
+            o += L->use_fog ? 4u : 0u;
+        }
     }
     L->stride = o;
 }
@@ -1523,6 +1557,18 @@ static void trace_draw(int prim, const RVertex *v, uint32_t nv, uint32_t ni, int
                d->stage[0].alphaarg1, d->stage[0].alphaarg2, d->stage[0].tex, d->stage[1].colorop,
                d->stage[1].alphaop, d->stage[1].tex, d->tfactor, d->vp_x, d->vp_y, d->vp_w, d->vp_h,
                (double)d->world[12], (double)d->world[13], (double)d->world[14]);
+        float fs, fe, fd;
+        memcpy(&fs, &d->fogstart, 4);
+        memcpy(&fe, &d->fogend, 4);
+        memcpy(&fd, &d->fogdensity, 4);
+        uint32_t smin = 0xFFu, smax = 0u;
+        for (uint32_t i = 0; i < nv; i++) {
+            uint32_t a = v[i].spec >> 24;
+            smin = a < smin ? a : smin;
+            smax = a > smax ? a : smax;
+        }
+        rt_log("    fog: table %u vertex %u start %.1f end %.1f density %.5f color %08X spec alpha %u..%u",
+               d->fogtablemode, d->fogvertexmode, (double)fs, (double)fe, (double)fd, d->fogcolor, smin, smax);
         return;
     }
     const StageState *s0 = &g_rs.stage[0], *s1 = &g_rs.stage[1];
@@ -2149,12 +2195,16 @@ int render_draw_vb(void **slot, uint32_t gen, const RVertex *all, uint32_t count
     if (cur_diag() != DIAG_NO_NEARCLIP && !vb_in_front(g))
         return 0;
 #endif
-    flush_local();
-    uint64_t t0 = fine_now_fe();
-    perf.draws++;
     Layout L;
     layout_init(&L, 0, has_normal, has_color, has_spec, ntex);
     L.use_color = has_color;
+#if defined(__vita__)
+    if (L.use_fog)
+        return 0;   /* the fog coordinate must follow uv0 (layout_init): not in these arrays */
+#endif
+    flush_local();
+    uint64_t t0 = fine_now_fe();
+    perf.draws++;
     DrawArrays A;
     memset(&A, 0, sizeof(A));
     A.vbo = g->buf;
@@ -2201,11 +2251,13 @@ static void pack_guest_to(uint8_t *d0, const Layout *L, const GuestVerts *g, uin
     /* The terrain's layout (pre-transformed, colour, desktop fog factor, one
      * texture coordinate set): one pass over the vertices. */
     const uint32_t fog = L->use_fog ? 1u : 0u;
-    int one_uv = L->uv_src[0] == 0 && g->uv_bytes[0] == 8u && L->off_uv[0] == 20u + 4u * fog;
+    /* Fog factor before uv0 (desktop) or after it (Vita): word indices. */
+    const uint32_t fi = L->off_fog / 4u, ui = L->off_uv[0] / 4u;
+    int one_uv = L->uv_src[0] == 0 && g->uv_bytes[0] == 8u && (fog ? (fi == 5u && ui == 6u) || (ui == 5u && fi == 7u) : ui == 5u);
     for (int s = 1; s < MAX_STAGES; s++)
         one_uv &= L->uv_src[s] < 0;
     if (L->pretransformed && !src && L->use_color && g->has_color && !L->has_normal && L->off_col == 16u &&
-        (!fog || (g->has_spec && L->off_fog == 20u)) && st == 28u + 4u * fog && one_uv &&
+        (!fog || g->has_spec) && st == 28u + 4u * fog && one_uv &&
         (((uintptr_t)vb | stride | g->uv_off[0]) & 3u) == 0) {
         const uint32_t col = g->col_off, spec = g->spec_off, uv = g->uv_off[0];
         float *p = (float *)d;
@@ -2224,10 +2276,10 @@ static void pack_guest_to(uint8_t *d0, const Layout *L, const GuestVerts *g, uin
             if (fog) {
                 uint32_t s;
                 memcpy(&s, vb + spec, 4);
-                p[5] = (float)(s >> 24) * (1.0f / 255.0f);
+                p[fi] = (float)(s >> 24) * (1.0f / 255.0f);
             }
-            p[5 + fog] = t[0];
-            p[6 + fog] = t[1];
+            p[ui] = t[0];
+            p[ui + 1u] = t[1];
         }
         PROF_RS_END;
         return;

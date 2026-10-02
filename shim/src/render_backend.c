@@ -800,9 +800,22 @@ static void apply_lights(void)
         glDisable(GL_NORMALIZE);
     /* Light positions are transformed by the modelview matrix current at glLight time. */
     c_load_matrix(GL_MODELVIEW, cur->view);
+#if defined(__vita__)
+    /* Lighting with no light still gives emissive + ambient * material in D3D and GL;
+     * vitaGL then skips lighting altogether (the vertex color shows instead, often
+     * white). A black directional light keeps its lighting path on. */
+    int any = 0;
+    for (int i = 0; i < MAX_LIGHTS; i++)
+        any |= cur->lights[i].enabled;
+    static const Light black_light = { .type = 3u, .dir = { 0.0f, 0.0f, 1.0f }, .enabled = 1 };
+#endif
     for (int i = 0; i < MAX_LIGHTS; i++) {
         const Light *l = &cur->lights[i];
         GLenum gl = GL_LIGHT0 + (GLenum)i;
+#if defined(__vita__)
+        if (!any && i == 0)
+            l = &black_light;
+#endif
         if (!l->enabled) {
             glDisable(gl);
             continue;
@@ -908,18 +921,34 @@ static void apply_states(const DrawCmd *d)
         memcpy(&end, &d->fogend, 4);
         memcpy(&dens, &d->fogdensity, 4);
         if (pretransformed || !mode) {
-#if defined(__vita__)
-            /* No fog coordinates in vitaGL: game-computed vertex fog is not drawn yet. */
+#if defined(__vita__) && !defined(GL_FOG_COORDINATE_SOURCE)
+            /* The SDK's vitaGL has no fog coordinates: game-computed vertex fog is not drawn. */
             glDisable(GL_FOG);
 #else
-            /* Vertex fog computed by the game: the factor is in the specular alpha. */
-            glFogi(GL_FOG_COORDINATE_SOURCE, GL_FOG_COORDINATE);
-            glFogi(GL_FOG_MODE, GL_LINEAR);
-            glFogf(GL_FOG_START, 1.0f);
-            glFogf(GL_FOG_END, 0.0f);
+            /* Vertex fog computed by the game: the factor is in the specular alpha
+             * (no factor in the vertices: no fog, like a factor of 1). */
+            if (d->L.use_fog) {
+                glFogi(GL_FOG_COORDINATE_SOURCE, GL_FOG_COORDINATE);
+#if !defined(__vita__)
+                glFogi(GL_FOG_MODE, GL_LINEAR);
+                glFogf(GL_FOG_START, 1.0f);
+                glFogf(GL_FOG_END, 0.0f);
+#endif
+                /* The private vitaGL uses the coordinate as the fog factor whatever
+                 * the mode and range (tools/vitagl), which then stay as they are. */
+            } else {
+#if defined(__vita__)
+                glDisable(GL_FOG);
+#else
+                glFogi(GL_FOG_COORDINATE_SOURCE, GL_FOG_COORDINATE);
+                glFogi(GL_FOG_MODE, GL_LINEAR);
+                glFogf(GL_FOG_START, 1.0f);
+                glFogf(GL_FOG_END, 0.0f);
+#endif
+            }
 #endif
         } else {
-#if !defined(__vita__)
+#if defined(GL_FOG_COORDINATE_SOURCE)
             glFogi(GL_FOG_COORDINATE_SOURCE, GL_FRAGMENT_DEPTH);
 #endif
             glFogi(GL_FOG_MODE, mode == 1u ? GL_EXP : mode == 2u ? GL_EXP2 : GL_LINEAR);
@@ -1066,8 +1095,14 @@ void bk_draw(const void *cmd)
         glClientActiveTexture(GL_TEXTURE0 + (GLenum)s);
         if (s < L->stages && L->uv_src[s] >= 0) {
             glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-            if (ptr_changed(PTR_TEX0 + s, vbo, A->uv[s], 2, st))
-                glTexCoordPointer(2, GL_FLOAT, st, A->uv[s]);
+#if defined(__vita__)
+            /* The fog coordinate rides along as uv0's third component (layout_init). */
+            const int uv_size = s == 0 && L->use_fog ? 3 : 2;
+#else
+            const int uv_size = 2;
+#endif
+            if (ptr_changed(PTR_TEX0 + s, vbo, A->uv[s], uv_size, st))
+                glTexCoordPointer(uv_size, GL_FLOAT, st, A->uv[s]);
         } else {
 #if defined(__vita__)
             /* Audit experiment (diagnostic mode 9): zero texcoord array on units
