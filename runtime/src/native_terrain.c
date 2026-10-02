@@ -1949,7 +1949,8 @@ static inline void fast_pass_end(uint32_t batch, uint32_t ntris, uint32_t nclip,
 
 /* Draws a pass from the prepared stream: clipper output vertices after the
  * patch's own, then the indices. */
-static inline void fast_emit(const Frame *f, FastWork *w, int32_t ntotal, uint32_t batch, uint32_t vbase)
+static inline __attribute__((always_inline)) void fast_emit(const Frame *f, FastWork *w, int32_t ntotal,
+                                                            uint32_t batch, uint32_t vbase)
 {
     uint8_t *d = g_mem + RD32(G_VBUF_PTR) + 32u * (uint32_t)ntotal;
     for (uint32_t e = 0; e < w->nclist; e++) {
@@ -1964,6 +1965,10 @@ static inline void fast_emit(const Frame *f, FastWork *w, int32_t ntotal, uint32
     uint16x8_t vb = vdupq_n_u16((uint16_t)vbase);
     for (; i + 8u <= n; i += 8u)
         vst1q_u8(ip + 2u * i, vreinterpretq_u8_u16(vaddq_u16(vld1q_u16(rel + i), vb)));
+    if (i + 4u <= n) {
+        vst1_u8(ip + 2u * i, vreinterpret_u8_u16(vadd_u16(vld1_u16(rel + i), vget_low_u16(vb))));
+        i += 4u;
+    }
 #endif
     for (; i < n; i++) {
         uint16_t x = (uint16_t)(rel[i] + vbase);
