@@ -8,6 +8,11 @@
  * both functions match. The native version replaces the whole call: the
  * recompiled 0x514760 is only ever called from 0x512C30 and from itself.
  *
+ * Two versions: the bit-exact one (terrain_exact=1 in igi.cfg, IGI_TERRAIN_EXACT=1,
+ * and always under IGI_NATIVE_CHECK), described here, and the default fast one
+ * in single precision (see "fast version" below; terrainbench.py fast compares
+ * the two).
+ *
  * Arithmetic follows the guest's x87 code as the recompiler models it (every x87
  * register a double, rounded to float wherever the game stores a float): the
  * same operations in the same order, so the results are bit-identical to the
