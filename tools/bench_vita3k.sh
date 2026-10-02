@@ -16,10 +16,17 @@
 #        SHOT_DIR where the captures go (default $BUILD/shots)
 #        HOLD     seconds the game sleeps at the main menu, before the mission starts
 #                 and when gameplay begins (see shim/src/bench.c; for profiles)
+#        MISSION  mission list entry to start (default 1)
+#        VIEWS    views mode (see shim/src/bench.c): k traced views of a full turn at
+#                 the start position, captured like SHOT into $SHOT_DIR; igi.log (with
+#                 the traces) is copied there too
 #
 # Only the instance started here is killed ("Vita3K -r PIGI00001"); other Vita3K
 # instances and other apps' data are left alone.
 set -u
+if [ "${VIEWS:-0}" -gt 0 ]; then
+    SHOT=1
+fi
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 SECS=${1:-30}
 if [ -z "${BUILD:-}" ]; then
@@ -49,7 +56,7 @@ unzip -p "$BUILD/igi.vpk" eboot.bin > "$APP/eboot.bin" || exit 1
 echo "installed $BUILD/igi.vpk eboot.bin"
 rm -f "$DATA/bench_result.txt"
 touch "$DATA/.bench_start"
-echo "$SECS ${SHOT:-0} ${HOLD:-0}" > "$DATA/bench.txt"
+echo "$SECS ${SHOT:-0} ${HOLD:-0} ${MISSION:-1} ${VIEWS:-0}" > "$DATA/bench.txt"
 
 stop() {
     pkill -9 -f "Vita3K -r PIGI00001" 2>/dev/null
@@ -114,5 +121,8 @@ if [ "$DATA/profile.txt" -nt "$DATA/.bench_start" ]; then
 fi
 if [ "${SHOT:-0}" -gt 0 ]; then
     echo "screenshots: $shots in $SHOT_DIR"
+fi
+if [ "${VIEWS:-0}" -gt 0 ]; then
+    cp "$DATA/igi.log" "$SHOT_DIR/igi.log"
 fi
 cat "$DATA/bench_result.txt"

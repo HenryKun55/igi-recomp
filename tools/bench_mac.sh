@@ -9,6 +9,7 @@
 #        TIMEOUT  seconds before giving up (default seconds + 180)
 #        IGI_VSYNC  default 0, so the swap does not wait for the display
 #        IGI_BENCH_SHOT  screenshot every N measured frames (bench_shot_*.bmp in the run directory)
+#        IGI_BENCH_MISSION, IGI_BENCH_VIEWS  mission and traced views (see shim/src/bench.c)
 # The run happens in $BUILD/bench (igi.log, bench_result.txt, igi_profile.txt).
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)

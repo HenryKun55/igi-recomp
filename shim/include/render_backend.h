@@ -18,7 +18,7 @@ typedef struct Layout {
     int pretransformed, has_normal, has_color, has_spec, ntex;   /* draw key */
     int pos_size;               /* 4: pre-transformed (x/w, y/w, z/w, 1/w); 3: object space */
     int use_color;
-    int use_fog;                /* desktop only: game vertex fog taken from the specular alpha */
+    int use_fog;                /* game vertex fog taken from the specular alpha (Vita: right after uv0) */
     int stages;                 /* texture stages the backend enables */
     int uv_src[MAX_STAGES];     /* RVertex uv set feeding each stage, -1 = none */
     uint32_t stride;            /* bytes per interleaved vertex */

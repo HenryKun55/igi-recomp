@@ -18,7 +18,13 @@
  * hold time (IGI_BENCH_HOLD=<seconds>, or a third number in bench.txt) the game
  * thread also sleeps that long, with "hold: <where>" in bench_phase.txt, when the main
  * menu shows, before the mission is started and when gameplay begins: the boot and the
- * mission load then stand apart in an external profiler (tools/profile_vita3k.sh). */
+ * mission load then stand apart in an external profiler (tools/profile_vita3k.sh).
+ *
+ * Mission and views (render comparisons between platforms): a fourth number in
+ * bench.txt (IGI_BENCH_MISSION) picks the mission from the list (1 = first), and a
+ * fifth (IGI_BENCH_VIEWS=k) replaces the movement pattern: the player stands still
+ * and turns a full circle in k steps; each view is traced (per-draw log) and
+ * captured as screenshot <view>, then the process exits. The run time is ignored. */
 #include "bench.h"
 #include "igi_fixes.h"
 #include "platform.h"
@@ -46,6 +52,7 @@
 #define DIK_ESCAPE 0x01u
 #define DIK_RETURN 0x1Cu
 #define DIK_UP 0xC8u
+#define DIK_DOWN 0xD0u
 
 #define UI_MENU_IDLE 2u        /* menu window idle (any menu screen) */
 #define UI_CUTSCENE 16u
@@ -78,6 +85,11 @@ typedef enum Phase {
 static int bench_secs = -1;
 static int shot_every;          /* screenshot every N measured frames (0: none) */
 static int hold_secs;           /* sleep at the phase boundaries (see the top) */
+static int mission = 1;         /* mission list entry to start (1 = first) */
+static int views;               /* views mode: number of traced views (0: movement pattern) */
+static int view, view_frames, view_pending;
+#define VIEW_TURN_FRAMES 10u
+#define VIEW_SETTLE_FRAMES 10u
 static Phase phase;
 static uint64_t phase_start_us, start_us, run_start_us, last_us;
 static uint32_t phase_frames, state_frames, last_state = IGI_UI_NONE, steps;
@@ -105,7 +117,11 @@ int bench_enabled(void)
                 char *end;
                 bench_secs = (int)strtol(buf, &end, 10);
                 shot_every = (int)strtol(end, &end, 10);   /* optional second number */
-                hold_secs = atoi(end);                     /* and third */
+                hold_secs = (int)strtol(end, &end, 10);    /* and third */
+                int m = (int)strtol(end, &end, 10);
+                views = (int)strtol(end, &end, 10);
+                if (m > 0)
+                    mission = m;
             }
             fclose(f);
         }
@@ -119,9 +135,15 @@ int bench_enabled(void)
         e = getenv("IGI_BENCH_HOLD");
         if (e)
             hold_secs = atoi(e);
+        e = getenv("IGI_BENCH_MISSION");
+        if (e && atoi(e) > 0)
+            mission = atoi(e);
+        e = getenv("IGI_BENCH_VIEWS");
+        if (e)
+            views = atoi(e);
 #endif
         if (bench_secs > 0)
-            rt_log("bench: enabled, %d s of gameplay", bench_secs);
+            rt_log("bench: enabled, %d s of gameplay, mission %d, %d views", bench_secs, mission, views);
         else
             bench_secs = 0;
     }
@@ -210,6 +232,28 @@ static void run_pattern(double t, double dt)
     g_mouse.dx += dx;
 }
 
+/* Views mode: turn, settle, trace and capture, view after view (see the top). */
+static void run_views(void)
+{
+    if (view_pending) {
+        if (g_trace_next_frame == 0) {   /* the traced frame was presented */
+            view_pending = 0;
+            view++;
+            view_frames = 0;
+        }
+        return;
+    }
+    /* The turn is fed in small steps: the game limits the movement per frame. */
+    int32_t step = (int32_t)(TURN_UNITS / (double)views) / (int32_t)VIEW_TURN_FRAMES;
+    if (view > 0 && view_frames < (int)VIEW_TURN_FRAMES)
+        g_mouse.dx += step;
+    if (++view_frames >= (int)(VIEW_TURN_FRAMES + VIEW_SETTLE_FRAMES) && !g_trace_next_frame) {
+        rt_log("bench: view %d", view);
+        g_trace_next_frame = 1;
+        view_pending = 1;
+    }
+}
+
 static int cmp_float(const void *a, const void *b)
 {
     float x = *(const float *)a, y = *(const float *)b;
@@ -272,6 +316,8 @@ static void finish(uint64_t now)
 
 int bench_shot_due(void)
 {
+    if (views > 0)
+        return bench_enabled() && phase == PH_RUN && view_pending && g_trace_next_frame == 2 ? view : -1;
     if (!bench_enabled() || phase != PH_RUN || shot_every <= 0 || !samples || n_samples % (uint32_t)shot_every)
         return -1;
     return (int)n_samples;
@@ -334,12 +380,17 @@ void bench_frame(uint64_t now, uint64_t frame_us, uint64_t draw_us, uint64_t swa
             set_phase(PH_MISSIONS, now);
         break;
     case PH_MISSIONS:
-        if (steps && state != UI_MENU_IDLE)
+        if (steps >= (uint32_t)mission && state != UI_MENU_IDLE)
             set_phase(PH_LOADING, now);
-        else if (!steps && !held_key && phase_frames >= SETTLE_FRAMES) {
+        else if (steps < (uint32_t)mission && !held_key && phase_frames >= SETTLE_FRAMES * (steps + 1u)) {
+            if (steps + 1u < (uint32_t)mission) {
+                tap(DIK_DOWN, now);
+                steps++;
+                break;
+            }
             hold("mission start");
             tap(DIK_RETURN, now);
-            steps++;
+            steps = (uint32_t)mission;
         }
         break;
     case PH_LOADING:
@@ -383,6 +434,12 @@ void bench_frame(uint64_t now, uint64_t frame_us, uint64_t draw_us, uint64_t swa
             s->verts = verts;
         }
         last_idle_us = g_idle_us;
+        if (views > 0) {
+            run_views();
+            if (view >= views)
+                finish(now);
+            break;
+        }
         double t = (double)(now - run_start_us) / 1e6;
         if (t >= (double)bench_secs)
             finish(now);

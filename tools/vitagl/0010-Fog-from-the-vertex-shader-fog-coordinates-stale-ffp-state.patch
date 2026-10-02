@@ -1,0 +1,377 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: HenryKun55 <henriqueflavio55@gmail.com>
+Date: Fri, 2 Oct 2026 06:00:00 -0300
+Subject: [PATCH] Fog from the vertex shader, fog coordinates, stale ffp state
+ and uniforms
+
+Fog: the distance comes from the vertex shader (clip w, the eye-space depth)
+through TEXCOORD7 instead of WPOS z/w. With GL_FOG_COORDINATE_SOURCE set to
+GL_FOG_COORDINATE the vertex shader takes a fog coordinate from the third
+component of the first unit's texture coordinates and the fragment shader
+uses it as the fog factor itself. GL_EXP/GL_EXP2 use exp2 with LOG2E (they
+were exp with LOG2E). Fog state changes now flag the vertex shader dirty.
+
+Shader selection: a vertex or fragment shader whose mask (or combiner setup)
+is not cached is built even when no state setter flagged it dirty; before,
+the previous program stayed bound for that mask.
+
+Uniforms: glTexEnvi/glTexEnvf scales and glAlphaFunc flag their uniforms
+dirty; the normal matrix is recomputed and uploaded for the first lit draw
+after a modelview change; the default uniform buffers are reserved again
+after clears/blits/custom programs unbound the ffp programs.
+
+---
+diff --git a/source/ffp.c b/source/ffp.c
+--- a/source/ffp.c
++++ b/source/ffp.c
+@@ -106,6 +106,7 @@
+ GLfloat fog_far = 1.0f; // Current fogging far distance
+ GLfloat fog_range = 1.0f; // Current fogging range (fog far - fog near)
+ vector4f fog_color = {0.0f, 0.0f, 0.0f, 0.0f}; // Current fogging color
++GLenum fog_coord_src = GL_FRAGMENT_DEPTH; // Current fog coordinate source
+ 
+ // Clipping Planes
+ GLboolean clip_planes_aligned = GL_TRUE; // Are clip planes in a contiguous range?
+@@ -179,12 +180,13 @@
+ 		uint64_t point_sprite : 1; // Frag
+ 		uint64_t fast_perspective_correction : 1; // Frag/Vert
+ 		uint64_t srgb_mode : 1; // Frag
+-		uint64_t UNUSED : 29;
++		uint64_t fog_coord : 1; // Frag/Vert
++		uint64_t UNUSED : 28;
+ 	};
+ 	uint64_t raw;
+ } shader_mask;
+-#define VERTEX_SHADER_MASK   (0b0000000000000000000000000000001011111100011000000111111100111000)
+-#define FRAGMENT_SHADER_MASK (0b0000000000000000000000000000011100000011101111111111100011111111)
++#define VERTEX_SHADER_MASK   (0b0000000000000000000000000000101011111100011000000111111111111000)
++#define FRAGMENT_SHADER_MASK (0b0000000000000000000000000000111100000011101111111111100011111111)
+ #else
+ typedef union {
+ 	struct {
+@@ -203,11 +205,12 @@
+ 		uint32_t point_sprite : 1; // Frag
+ 		uint32_t fast_perspective_correction : 1; // Frag/Vert
+ 		uint32_t srgb_mode : 1; // Frag
++		uint32_t fog_coord : 1; // Frag/Vert
+ 	};
+ 	uint32_t raw;
+ } shader_mask;
+-#define VERTEX_SHADER_MASK   (0b0101111111000000111111100111000)
+-#define FRAGMENT_SHADER_MASK (0b1110000001111111111100011111111)
++#define VERTEX_SHADER_MASK   (0b10101111111000000111111111111000)
++#define FRAGMENT_SHADER_MASK (0b11110000001111111111100011111111)
+ #endif
+ #ifndef DISABLE_TEXTURE_COMBINER
+ typedef union {
+@@ -758,6 +761,12 @@
+ 		}
+ 	}
+ 
++#ifndef HAVE_HIGH_FFP_TEXUNITS
++	// Fog coordinates come in as a third texture coordinate of the first texture unit
++	// and are used as the fog factor itself (GL_LINEAR from 1 to 0, whatever the mode)
++	mask.fog_coord = mask.fog_mode != DISABLED && fog_coord_src == GL_FOG_COORDINATE && mask.num_textures > 0;
++#endif
++
+ 	vector4f *clip_planes;
+ 	vector4f temp_clip_planes[MAX_CLIP_PLANES_NUM];
+ 	if (clip_planes_aligned) {
+@@ -833,6 +842,8 @@
+ 		if ((ffp_mask.raw & VERTEX_SHADER_MASK) == vert_shader_mask) {
+ 			ffp_dirty_vert = GL_FALSE;
+ 		} else {
++			// A vertex shader not in the cache must be built even when no state setter flagged it
++			ffp_dirty_vert = GL_TRUE;
+ 			for (int i = 0; i < vert_shader_cache_size; i++) {
+ 				if (vert_shader_cache[i].mask.raw == vert_shader_mask) {
+ 					ffp_vertex_program = vert_shader_cache[i].prog;
+@@ -847,9 +858,19 @@
+ 			dirty_vert_unifs = 0xFFFF;
+ 		}
+ 
++#ifdef DISABLE_TEXTURE_COMBINER
+ 		if ((ffp_mask.raw & FRAGMENT_SHADER_MASK) == frag_shader_mask) {
++#else
++#ifdef HAVE_HIGH_FFP_TEXUNITS
++		if ((ffp_mask.raw & FRAGMENT_SHADER_MASK) == frag_shader_mask && ffp_combiner_mask.raw_high == cmb_mask.raw_high && ffp_combiner_mask.raw_low == cmb_mask.raw_low) {
++#else
++		if ((ffp_mask.raw & FRAGMENT_SHADER_MASK) == frag_shader_mask && ffp_combiner_mask.raw == cmb_mask.raw) {
++#endif
++#endif
+ 			ffp_dirty_frag = GL_FALSE;
+ 		} else {
++			// Same for a fragment shader
++			ffp_dirty_frag = GL_TRUE;
+ 			for (int i = 0; i < frag_shader_cache_size; i++) {
+ #ifdef DISABLE_TEXTURE_COMBINER
+ 				if (frag_shader_cache[i].mask.raw == frag_shader_mask) {
+@@ -906,7 +927,7 @@
+ 
+ 			// Compiling the new shader
+ 			char vshader[8192];
+-			sprintf(vshader, ffp_vert_src, mask.clip_planes_num, mask.num_textures, mask.has_colors, mask.lights_num, mask.shading_mode, mask.normalize, mask.fixed_mask, mask.pos_fixed_mask, WVP_ON_GPU, mask.fast_perspective_correction);
++			sprintf(vshader, ffp_vert_src, mask.clip_planes_num, mask.num_textures, mask.has_colors, mask.lights_num, mask.shading_mode, mask.normalize, mask.fixed_mask, mask.pos_fixed_mask, WVP_ON_GPU, mask.fast_perspective_correction, mask.fog_mode, mask.fog_coord);
+ 			uint32_t size = strlen(vshader);
+ 			SceGxmProgram *t = shark_compile_shader_extended(vshader, &size, SHARK_VERTEX_SHADER, compiler_opts, compiler_fastmath, compiler_fastprecision, compiler_fastint);
+ #ifdef DUMP_SHADER_SOURCES
+@@ -1317,13 +1338,13 @@
+ 				(mask.tex_env_mode_pass0 != COMBINE) ? mask.tex_env_mode_pass0 : 50,
+ 				(mask.tex_env_mode_pass1 != COMBINE) ? mask.tex_env_mode_pass1 : 51,
+ 				(mask.tex_env_mode_pass2 != COMBINE) ? mask.tex_env_mode_pass2 : 52,
+-				mask.lights_num, mask.shading_mode, mask.point_sprite, mask.fast_perspective_correction, mask.srgb_mode);
++				mask.lights_num, mask.shading_mode, mask.point_sprite, mask.fast_perspective_correction, mask.srgb_mode, mask.fog_coord);
+ #else
+ 			sprintf(fshader, ffp_frag_src, texenv_shad, alpha_op,
+ 				mask.num_textures, mask.has_colors, mask.fog_mode,
+ 				(mask.tex_env_mode_pass0 != COMBINE) ? mask.tex_env_mode_pass0 : 50,
+ 				(mask.tex_env_mode_pass1 != COMBINE) ? mask.tex_env_mode_pass1 : 51,
+-				mask.lights_num, mask.shading_mode, mask.point_sprite, mask.fast_perspective_correction, mask.srgb_mode);
++				mask.lights_num, mask.shading_mode, mask.point_sprite, mask.fast_perspective_correction, mask.srgb_mode, mask.fog_coord);
+ #endif
+ 			uint32_t size = strlen(fshader);
+ 			SceGxmProgram *t = shark_compile_shader_extended(fshader, &size, SHARK_FRAGMENT_SHADER, compiler_opts, compiler_fastmath, compiler_fastprecision, compiler_fastint);
+@@ -1409,6 +1430,12 @@
+ 		ffp_blend_info.raw = blend_info.raw;
+ 	}
+ 
++	// Programs unbound by other draws (clears, scissor, blits, custom shaders) left
++	// their own default uniform buffers reserved: ours must be reserved again
++	if (!vgl_bound_vprog)
++		dirty_vert_unifs = 0xFFFF;
++	if (!vgl_bound_fprog)
++		dirty_frag_unifs = 0xFFFFFFFF;
+ 	if (vgl_bound_vprog != ffp_vertex_program_patched) {
+ 		sceGxmSetVertexProgram(gxm_context, ffp_vertex_program_patched);
+ 		vgl_bound_vprog = ffp_vertex_program_patched;
+@@ -1420,17 +1447,21 @@
+ 
+ 	VGL_PROF(5);
+ 	// Recalculating MVP matrix if necessary
++	// The normal matrix follows the modelview matrix of the first lit draw after it
++	// changed (unlit draws skip it), and must then be uploaded too
++	static GLboolean normal_matrix_stale = GL_TRUE;
+ 	if (mvp_modified) {
+ #ifndef HAVE_WVP_ON_GPU
+ 		matrix4x4_multiply(vgl_mvp_matrix, projection_matrix, modelview_matrix);
+ #endif
+-		// Recalculating normal matrix if necessary (TODO: This should be recalculated only when MV changes)
+-		if (mask.lights_num > 0) {
+-			recalculate_normal_matrix();
+-		}
+-
++		normal_matrix_stale = GL_TRUE;
+ 		mvp_modified = GL_FALSE;
+ 	}
++	if (normal_matrix_stale && mask.lights_num > 0) {
++		recalculate_normal_matrix();
++		flag_dirty_vert_unif(NORMAL_MATRIX_UNIF)
++		normal_matrix_stale = GL_FALSE;
++	}
+ 
+ 	// Uploading fragment shader uniforms
+ 	#define upload_ffp_fragment_unif(x, offs, cnt, size, ptr) \
+@@ -2052,6 +2083,7 @@
+ 
+ void update_fogging_state() {
+ 	ffp_dirty_frag = GL_TRUE;
++	ffp_dirty_vert = GL_TRUE; // The vertex shader outputs the fog distance
+ 	if (fogging) {
+ 		switch (fog_mode) {
+ 		case GL_LINEAR:
+@@ -3181,6 +3213,7 @@
+ 			}
+ #endif
+ 			tex_unit->rgb_scale = param;
++			flag_dirty_frag_unif(SCALE_PASS_0_UNIF + server_texture_unit)
+ 			break;
+ 		case GL_ALPHA_SCALE:
+ #ifndef SKIP_ERROR_HANDLING
+@@ -3189,6 +3222,7 @@
+ 			}
+ #endif
+ 			tex_unit->a_scale = param;
++			flag_dirty_frag_unif(SCALE_PASS_0_UNIF + server_texture_unit)
+ 			break;
+ #endif
+ 		case GL_TEXTURE_ENV_MODE:
+@@ -3914,6 +3948,10 @@
+ 		return;
+ #endif
+ 	switch (pname) {
++	case GL_FOG_COORDINATE_SOURCE:
++		fog_coord_src = (GLenum)param;
++		update_fogging_state();
++		break;
+ 	case GL_FOG_MODE:
+ 		fog_mode = param;
+ 		update_fogging_state();
+@@ -3980,6 +4018,10 @@
+ 		return;
+ #endif
+ 	switch (pname) {
++	case GL_FOG_COORDINATE_SOURCE:
++		fog_coord_src = (GLenum)params[0];
++		update_fogging_state();
++		break;
+ 	case GL_FOG_MODE:
+ 		fog_mode = params[0];
+ 		update_fogging_state();
+@@ -4057,6 +4099,10 @@
+ 		return;
+ #endif
+ 	switch (pname) {
++	case GL_FOG_COORDINATE_SOURCE:
++		fog_coord_src = param;
++		update_fogging_state();
++		break;
+ 	case GL_FOG_MODE:
+ 		fog_mode = param;
+ 		update_fogging_state();
+diff --git a/source/shaders/ffp_f.h b/source/shaders/ffp_f.h
+--- a/source/shaders/ffp_f.h
++++ b/source/shaders/ffp_f.h
+@@ -15,6 +15,7 @@
+ #define point_sprite %d
+ #define interp %d
+ #define srgb_mode %d
++#define fog_coord %d
+ 
+ #if interp == 1
+ #define TEXCOORD0 TEXCOORD0_HALF
+@@ -89,7 +90,7 @@
+ 	float4 vColor : COLOR,
+ #endif
+ #if fog_mode < 3
+-	float4 coords : WPOS,
++	float vFogDist : TEXCOORD7,
+ #endif
+ #if point_sprite > 0 && num_textures > 0
+ 	float2 point_coords : SPRITECOORD,
+@@ -174,16 +175,18 @@
+ 
+ 	// Fogging
+ #if fog_mode < 3
+-	float fog_dist = coords.z / coords.w;
+-#if fog_mode == 0 // GL_LINEAR
++	float fog_dist = vFogDist;
++#if fog_coord == 1 // the fog factor itself
++	float vFog = fog_dist;
++#elif fog_mode == 0 // GL_LINEAR
+ 	float vFog = (Nfog_far - fog_dist) / Mfog_range;
+ #else
+ 	const float LOG2E = 1.442695f;
+ #if fog_mode == 1  // GL_EXP
+-	float vFog = exp(-Hfog_density * fog_dist * LOG2E);
++	float vFog = exp2(-Hfog_density * fog_dist * LOG2E);
+ #endif
+ #if fog_mode == 2  // GL_EXP2
+-	float vFog = exp(-Hfog_density * Hfog_density * fog_dist * fog_dist * LOG2E);
++	float vFog = exp2(-Hfog_density * Hfog_density * fog_dist * fog_dist * LOG2E);
+ #endif
+ #endif
+ 	vFog = clamp(vFog, 0.0f, 1.0f);
+diff --git a/source/shaders/ffp_v.h b/source/shaders/ffp_v.h
+--- a/source/shaders/ffp_v.h
++++ b/source/shaders/ffp_v.h
+@@ -16,6 +16,8 @@
+ #define fixed_mode_pos %d
+ #define calculate_wvp %d
+ #define interp %d
++#define fog_mode %d
++#define fog_coord %d
+ 
+ #if interp == 1
+ #define TEXCOORD0 TEXCOORD0_HALF
+@@ -80,7 +82,11 @@
+ void main(
+ 	float4 position,
+ #if num_textures > 0
++#if fog_coord == 1
++	float3 texcoord0, // z: fog coordinate
++#else
+ 	float2 texcoord0,
++#endif
+ #if num_textures > 1
+ 	float2 texcoord1,
+ #endif
+@@ -108,6 +114,9 @@
+ 	float4 out vEmission : TEXCOORD6,
+ #endif
+ 	float4 out vPosition : POSITION,
++#if fog_mode < 3
++	float out vFogDist : TEXCOORD7,
++#endif
+ #if has_colors == 1 || lights_num > 0
+ 	float4 out vColor : COLOR,
+ #endif
+@@ -172,9 +181,9 @@
+ 
+ #if num_textures > 0
+ #if (fixed_mode_mask & 0x02) == 0x02
+-	texcoord0 = GLFixed2ToFloat2(texcoord0);
++	texcoord0.xy = GLFixed2ToFloat2(texcoord0.xy);
+ #endif
+-	vTexcoord = mul(Ktexmat[0], float4(texcoord0, 0.f, 1.f)).xy;
++	vTexcoord = mul(Ktexmat[0], float4(texcoord0.xy, 0.f, 1.f)).xy;
+ #if num_textures > 1
+ #if (fixed_mode_mask & 0x04) == 0x04
+ 	texcoord1 = GLFixed2ToFloat2(texcoord1);
+@@ -200,5 +209,13 @@
+ 	vColor = color;
+ #endif
+ 	psize = Mpoint_size;
++	// Fog distance: the fog coordinate, else the eye-space depth (clip w)
++#if fog_mode < 3
++#if fog_coord == 1
++	vFogDist = texcoord0.z;
++#else
++	vFogDist = vPosition.w;
++#endif
++#endif
+ }
+ )";
+diff --git a/source/shared.h b/source/shared.h
+--- a/source/shared.h
++++ b/source/shared.h
+@@ -298,7 +298,7 @@
+ 
+ // Fixed-function pipeline shader cache settings
+ #ifndef DISABLE_FS_SHADER_CACHE
+-#define SHADER_CACHE_MAGIC 27 // This must be increased whenever ffp shader sources or shader mask/combiner mask changes
++#define SHADER_CACHE_MAGIC 28 // This must be increased whenever ffp shader sources or shader mask/combiner mask changes
+ //#define DUMP_SHADER_SOURCES // Enable this flag to dump shader sources inside shader cache
+ #endif
+ 
+diff --git a/source/tests.c b/source/tests.c
+--- a/source/tests.c
++++ b/source/tests.c
+@@ -472,6 +472,7 @@
+ 	// Updating in use alpha test parameters
+ 	alpha_func = func;
+ 	vgl_alpha_ref = ref;
++	flag_dirty_frag_unif(ALPHA_CUT_UNIF)
+ 	update_alpha_test_settings();
+ }
+ 
+@@ -481,6 +482,7 @@
+ 	// Updating in use alpha test parameters
+ 	alpha_func = func;
+ 	vgl_alpha_ref = (float)ref / 65536.0f;
++	flag_dirty_frag_unif(ALPHA_CUT_UNIF)
+ 	update_alpha_test_settings();
+ }
+ 
+diff --git a/source/vitaGL.h b/source/vitaGL.h
+--- a/source/vitaGL.h
++++ b/source/vitaGL.h
+@@ -134,6 +134,9 @@
+ #define GL_FOG_START                                    0x0B63
+ #define GL_FOG_END                                      0x0B64
+ #define GL_FOG_MODE                                     0x0B65
++#define GL_FOG_COORDINATE_SOURCE                        0x8450
++#define GL_FOG_COORDINATE                               0x8451
++#define GL_FRAGMENT_DEPTH                               0x8452
+ #define GL_FOG_COLOR                                    0x0B66
+ #define GL_DEPTH_RANGE                                  0x0B70
+ #define GL_DEPTH_TEST                                   0x0B71
