@@ -167,6 +167,10 @@ void rt_probe(Ctx *c, uint32_t func)
     case 0x0048A5D0u:
         loading_screen(func, sp);
         break;
+    case 0x004A53B3u:
+    case 0x004B8810u:
+        igi_language_probe(c, func, sp);
+        return;   /* frequent: kept out of the probe log */
     default:
         break;
     }
