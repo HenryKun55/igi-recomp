@@ -667,7 +667,8 @@ static void dev_SetRenderState(Ctx *c)
     if (s < 256u && g_rs.rs[s] != ARG(2)) {
         render_state_changing();
         g_rs_parts |= RS_PART_RS;
-        if (s == 139u || s == 141u || s == 143u || s == 145u)   /* AMBIENT, COLORVERTEX, NORMALIZENORMALS, DIFFUSEMATERIALSOURCE */
+        /* SPECULARENABLE, AMBIENT, COLORVERTEX, NORMALIZENORMALS, DIFFUSEMATERIALSOURCE */
+        if (s == 29u || s == 139u || s == 141u || s == 143u || s == 145u)
             g_light_serial++;
         g_rs.rs[s] = ARG(2);
     }
