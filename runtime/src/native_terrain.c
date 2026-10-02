@@ -1148,7 +1148,16 @@ static void flush_batches(const Frame *f)
  *     linear in the attributes), and each pass only evaluates the colour and
  *     texture coordinates of the output vertices from them;
  *   - the index stream of a pass (strip triangles and clipped ones) is built once
- *     per patch and written with the pass's vertex base added, eight at a time.
+ *     per patch, while culling, and written with the pass's vertex base added,
+ *     eight at a time;
+ *   - a pass writes only the vertices a drawn triangle uses (a list made once per
+ *     patch), position and tail as two NEON stores; clipper output colours are
+ *     evaluated with the source triangle's colours unpacked once per pass;
+ *   - morph vertices are moved four at a time; repeated batch lookups of a call
+ *     come from a cache (fast_get_batch).
+ * Speed is measured in ARM instructions (terrainbench.py run with two ELFs and
+ * --exact 0 also checks that two builds of the fast version write the same
+ * guest memory): Vita3K's speed emulation bills guest instructions.
  *
  * The guest's detail pass reads triangle flags it has overwritten itself (see
  * overlay_detail_flags). That is reproduced with the fast version's values, so
