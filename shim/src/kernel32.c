@@ -1,6 +1,7 @@
 /* kernel32.dll: process, memory, file, time and locale APIs used by IGI.exe and its CRT. */
 #include "shim.h"
 
+#include <SDL.h>
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
@@ -58,11 +59,15 @@ HandleObj *handle_get(uint32_t h, int type)
     return &handles[i];
 }
 
+static void rb_release(HandleObj *o);   /* below: buffered reads */
+
 void handle_close(uint32_t h)
 {
     HandleObj *o = handle_get(h, H_FREE);
     if (!o)
         return;
+    if (o->type == H_FILE)
+        rb_release(o);   /* waits for a prefetch still reading this descriptor */
     if (o->type == H_FILE && o->fd >= 0)
         close(o->fd);
     if (o->type == H_FILE) {
@@ -449,7 +454,85 @@ SHIM(kernel32, CreateFileA)
  */
 #define READ_AHEAD (64u * 1024u)
 
+/* ---- asynchronous read-ahead -----------------------------------------------
+ * Sequential readers (the streamed music and ambience, level data) get the next
+ * block read on an I/O thread while they consume the current one, so the game
+ * thread doesn't wait for the memory card (it stalled frames on the Vita). */
+typedef struct Prefetch {
+    volatile int state;   /* 0 idle, 1 queued/reading, 2 done */
+    int fd;
+    off_t base;
+    ssize_t len;
+    uint8_t data[READ_AHEAD];
+} Prefetch;
+
+#define PF_QUEUE 32
+static Prefetch *pf_queue[PF_QUEUE];
+static unsigned pf_head, pf_tail;
+static SDL_mutex *pf_lock;
+static SDL_cond *pf_work, *pf_done;
+
+static int pf_thread(void *unused)
+{
+    (void)unused;
+    SDL_LockMutex(pf_lock);
+    for (;;) {
+        while (pf_head == pf_tail)
+            SDL_CondWait(pf_work, pf_lock);
+        Prefetch *p = pf_queue[pf_head % PF_QUEUE];
+        pf_head++;
+        SDL_UnlockMutex(pf_lock);
+        ssize_t got = pread(p->fd, p->data, READ_AHEAD, p->base);
+        SDL_LockMutex(pf_lock);
+        p->len = got;
+        p->state = 2;
+        SDL_CondBroadcast(pf_done);
+    }
+    return 0;
+}
+
+static int pf_start(void)
+{
+    static int started = -1;
+    if (started < 0) {
+        pf_lock = SDL_CreateMutex();
+        pf_work = SDL_CreateCond();
+        pf_done = SDL_CreateCond();
+        started = pf_lock && pf_work && pf_done && SDL_CreateThread(pf_thread, "igi-io", NULL) != NULL;
+        if (!started)
+            rt_log("I/O read-ahead thread unavailable: reads stay synchronous");
+    }
+    return started;
+}
+
+static void pf_request(Prefetch *p, int fd, off_t base)
+{
+    SDL_LockMutex(pf_lock);
+    if (pf_tail - pf_head < PF_QUEUE) {
+        p->fd = fd;
+        p->base = base;
+        p->state = 1;
+        pf_queue[pf_tail % PF_QUEUE] = p;
+        pf_tail++;
+        SDL_CondSignal(pf_work);
+    }
+    SDL_UnlockMutex(pf_lock);
+}
+
+/* Waits until a queued read is done (state 0 or 2 afterwards). */
+static void pf_wait(Prefetch *p)
+{
+    if (!p || p->state != 1)
+        return;
+    SDL_LockMutex(pf_lock);
+    while (p->state == 1)
+        SDL_CondWait(pf_done, pf_lock);
+    SDL_UnlockMutex(pf_lock);
+}
+
 typedef struct ReadBuf {
+    Prefetch *pf;    /* next block read in the background (sequential readers) */
+    off_t last_end;  /* end of the previous refill, to spot sequential reading */
     int active;      /* cur is the file position (else the descriptor's) */
     int size_ok;     /* size is known */
     off_t cur, size;
@@ -471,6 +554,16 @@ static void rb_drop(HandleObj *o)
     if (b) {
         b->len = 0;
         b->size_ok = 0;
+    }
+}
+
+static void rb_release(HandleObj *o)
+{
+    ReadBuf *b = o->ptr;
+    if (b && b->pf) {
+        pf_wait(b->pf);
+        free(b->pf);
+        b->pf = NULL;
     }
 }
 
@@ -515,15 +608,39 @@ static ssize_t rb_read(HandleObj *o, uint8_t *dst, uint32_t n)
             b->fd_at = b->cur;
             return total + got;
         }
-        ssize_t got = read(o->fd, b->data, READ_AHEAD);
+        /* Refill: from the block read in the background if it is the right one. */
+        ssize_t got = -1;
+        int sequential = b->cur == b->last_end;
+        if (b->pf && b->pf->state) {
+            pf_wait(b->pf);
+            if (b->pf->base == b->cur && b->pf->len > 0) {
+                got = b->pf->len;
+                memcpy(b->data, b->pf->data, (size_t)got);
+            }
+            b->pf->state = 0;
+        }
+        if (got < 0) {
+            if (b->fd_at != b->cur)
+                b->fd_at = lseek(o->fd, b->cur, SEEK_SET);
+            got = read(o->fd, b->data, READ_AHEAD);
+            b->fd_at = got > 0 ? b->cur + got : -1;
+        } else {
+            b->fd_at = -1;   /* the descriptor's position is wherever it was */
+        }
         if (got <= 0) {
             b->len = 0;
-            b->fd_at = -1;
             break;
         }
         b->base = b->cur;
-        b->fd_at = b->cur + got;
         b->len = (uint32_t)got;
+        b->last_end = b->base + got;
+        /* A second sequential full block in a row: read the next one ahead. */
+        if (sequential && got == READ_AHEAD && pf_start()) {
+            if (!b->pf)
+                b->pf = calloc(1, sizeof(*b->pf));
+            if (b->pf)
+                pf_request(b->pf, o->fd, b->last_end);
+        }
     }
     return total;
 }
@@ -548,7 +665,10 @@ SHIM(kernel32, ReadFile)
     io_us += t1 - t0;
     io_bytes += (uint64_t)got;
     io_calls++;
-    if (t1 - io_last >= 5000000u) {
+    static int io_log = -1;
+    if (io_log < 0)
+        io_log = getenv("IGI_IO_LOG") != NULL;
+    if (io_log && t1 - io_last >= 5000000u) {
         rt_log("io: %u ReadFile calls, %llu KB, %.1f ms in the last %.1f s", io_calls,
                (unsigned long long)(io_bytes / 1024u), (double)io_us / 1000.0, (double)(t1 - io_last) / 1e6);
         io_last = t1;

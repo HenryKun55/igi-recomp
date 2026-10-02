@@ -2977,6 +2977,9 @@ static void perf_frame_begin_swap(void)
             perf.acc_pc[i] = 0;
         }
         const float *a = perf.avg_pc;
+        /* Once a second into igi.log, only while measuring: each log line is
+         * flushed to the memory card, which can stall the game on the Vita. */
+        if (perf.enabled || bench_enabled()) {
         rt_log("perf: %.1f fps, frame %.1f ms = game %.1f + draw %.1f + swap %.1f, %u draws -> %u gpu draws; "
                "render thread busy %.1f ms",
                (double)perf.fps, (double)perf.ms_frame, (double)perf.ms_game, (double)perf.ms_draw,
@@ -2989,6 +2992,7 @@ static void perf_frame_begin_swap(void)
                (double)a[PC_INDICES], (double)a[PC_TEX_N], (double)a[PC_TEX_SKIP],
                (double)(a[PC_TEX_BYTES] / 1024.0f), (double)a[PC_2D_N], (double)(a[PC_2D_US] / 1000.0f),
                (double)(a[PC_2D_BYTES] / 1024.0f), (double)a[PC_READBACK_N]);
+        }
         perf.acc_frame = perf.acc_draw = perf.acc_swap = 0;
         perf.acc_draws = perf.acc_gpu_draws = 0;
         perf.frames = 0;
