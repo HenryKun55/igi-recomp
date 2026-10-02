@@ -801,7 +801,64 @@ def synth_bounds(seed, bases):
     return st
 
 
-SYNTH = {0x004DD7F0: synth_bounds, 0x0050D4C0: synth_poly2d, 0x0049B700: synth_skin, 0x004A1570: synth_mesh, 0x004D14E0: synth_tree, 0x00496280: synth_adpcm,
+def view_jitter(rnd, m, pk):
+    """Stale view ids (the side planes' slopes get recomputed), the viewport,
+    clip rectangle and projection scale (0x4D03D0). Kept finite: with NaN or
+    infinite slopes two different NaNs can meet in the sphere test (0x49FEB0),
+    and which one results depends on the compiler's operand order."""
+    if rnd.random() < 0.4:
+        a = rnd.choice([0xA4EEA0, 0xA4EE9C])
+        m.u32(a, pk.u32(a) ^ (1 << rnd.randrange(8)))
+    for a in (0xBCABB8, 0xBCABBC, 0xBCABC8, 0xBCABCC, 0xBCAB20, 0xBCAB24):
+        if rnd.random() < 0.2:
+            m.f32(a, pk.f32(a) * rnd.uniform(0.5, 1.5))
+    for a in (0xBCABD0, 0xBCABD4, 0xBCABD8, 0xBCABDC):
+        if rnd.random() < 0.2:
+            m.f32(a, pk.f32(a) + rnd.uniform(-50.0, 50.0))
+
+
+def synth_objcull(seed, bases):
+    """0x4D0510: a captured object with its position (the camera's sometimes),
+    rotation, scales (ties, special values), the mesh's sphere, the camera, its
+    rotation, the inside pointer, the view (see view_jitter) and the stale
+    frame randomised."""
+    rnd = random.Random(seed)
+    st = base_state(rnd, bases, 0x004D0510)
+    m, pk = st.mem, Peek(st.mem)
+    E = st.esp
+    obj = pk.u32(E + 4)
+    move = rnd.choice([0.0, 1.0, 50.0, 5000.0])
+    for k in range(3):
+        v = pk.f64(obj + 0x20 + 8 * k) + rnd.uniform(-move, move)
+        if rnd.random() < 0.05:
+            v = pk.f64(0xBCAB08 + 8 * k)
+        m.f64(obj + 0x20 + 8 * k, v)
+    small = rnd.choice([0.0, 0.01, 0.3])
+    for i in range(9):
+        # Without special values (see view_jitter): one NaN at a time.
+        for a in (obj + 0x70 + 4 * i, 0xBCAAE0 + 4 * i):
+            v = pk.f32(a)
+            m.f32(a, v + rnd.uniform(-small, small) * max(1.0, abs(v)))
+    sc = rnd.choice(['keep', 'one', 'rand', 'tie', 'nan'])
+    for k in range(3):
+        v = {'keep': pk.f32(obj + 0x98 + 4 * k), 'one': 1.0, 'rand': rnd.uniform(0.3, 3.0),
+             'tie': rnd.choice([1.5, 2.0]), 'nan': rnd.choice([1.0, 2.0, float('nan')])}[sc]
+        m.f32(obj + 0x98 + 4 * k, v)
+    model = pk.u32(obj + 0x6C)
+    mesh = pk.u32(pk.u32(pk.u32(model) + 0xC) + 0xC)
+    for k in range(4):
+        if rnd.random() < 0.3:
+            m.f32(mesh + 0x30 + 4 * k, jitter(rnd, pk.f32(mesh + 0x30 + 4 * k), 0.5))
+    if rnd.random() < 0.3:
+        m.u32(E + 8, rnd.choice([0, E + 0x40]))
+    view_jitter(rnd, m, pk)
+    if rnd.random() < 0.5:
+        for off in range(-0x60, 0, 4):
+            m.u32(E + off, rnd.getrandbits(32))
+    return st
+
+
+SYNTH = {0x004D0510: synth_objcull, 0x004DD7F0: synth_bounds, 0x0050D4C0: synth_poly2d, 0x0049B700: synth_skin, 0x004A1570: synth_mesh, 0x004D14E0: synth_tree, 0x00496280: synth_adpcm,
          0x0049CC80: synth_deform, 0x0049FEB0: synth_sphere, 0x0049BE10: synth_bend,
          0x00510010: synth_patch, 0x004C1840: synth_raycast}
 
