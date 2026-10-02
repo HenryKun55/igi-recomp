@@ -1,0 +1,86 @@
+# Project IGI - Brazilian Portuguese: language/portuguese/missions.res
+# Mission names and descriptions of the mission selection screen.
+
+[Mission 1 Name]
+Pátio ferroviário
+
+[Mission 2 Name]
+Base de mísseis SAM
+
+[Mission 3 Name]
+Base aérea militar
+
+[Mission 4 Name]
+DEUS
+
+[Mission 5 Name]
+Base de radar
+
+[Mission 6 Name]
+Pegar Priboi
+
+[Mission 7 Name]
+Travessia da fronteira
+
+[Mission 8 Name]
+Reabastecimento
+
+[Mission 9 Name]
+Pátio de mísseis
+
+[Mission 10 Name]
+Proteger Priboi
+
+[Mission 11 Name]
+Ninho da Águia I
+
+[Mission 12 Name]
+Ninho da Águia II
+
+[Mission 13 Name]
+Infiltração nuclear
+
+[Mission 14 Name]
+Encontrar a bomba
+
+[Mission 1 Desc]
+Pequeno pátio ferroviário no litoral
+
+[Mission 2 Desc]
+Pequena base de defesa antimísseis
+
+[Mission 3 Desc]
+Resgate Josef da base aérea
+
+[Mission 4 Desc]
+Proteja as tropas aliadas
+
+[Mission 5 Desc]
+Derrube a rede de comunicações de Jach
+
+[Mission 6 Desc]
+Sequestre Jach em sua base
+
+[Mission 7 Desc]
+Leve Jones através da fronteira
+
+[Mission 8 Desc]
+Recupere o equipamento de Jones
+
+[Mission 9 Desc]
+Embarque no trem
+
+[Mission 10 Desc]
+Leve Jach até o ponto de encontro
+
+[Mission 11 Desc]
+A aproximação da fortaleza de Ekk
+
+[Mission 12 Desc]
+A fortaleza de Ekk no alto da montanha
+
+[Mission 13 Desc]
+Infiltre-se na base nuclear
+
+[Mission 14 Desc]
+Mate Ekk e encontre a bomba

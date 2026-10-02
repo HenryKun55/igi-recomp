@@ -1,0 +1,20 @@
+# Project IGI - Brazilian Portuguese: language/portuguese/computer.res
+# Map computer tabs and status lines. Same order as the English file.
+
+[MAP]
+Mapa
+
+[OBJECTIVES]
+Objetivos
+
+[LOG]
+Registro
+
+[INITIALIZING]
+INICIALIZANDO
+
+[CONNECTING]
+CONECTANDO
+
+[DOWNLOADING]
+BAIXANDO

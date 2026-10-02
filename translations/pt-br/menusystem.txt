@@ -1,0 +1,789 @@
+# Project IGI - Brazilian Portuguese: language/portuguese/menusystem.res
+# Menus, options, control names, credits titles. Same order as the English file.
+# Format: tools/lang/build_language.py
+
+[Main Menu]
+Menu Principal
+
+[Single Player]
+Jogar Project IGI
+
+[Multi Player]
+Multijogador
+
+[Configuration]
+Configurações
+
+[Quit]
+Sair
+
+[Update IGI]
+Atualizar IGI
+
+[Visit Website]
+Visitar o site
+
+[Read Me]
+Leia-me
+
+[Credits]
+Créditos
+
+[Start New Game]
+Novo jogo
+
+[Load Game]
+Carregar jogo
+
+[Select Mission]
+Escolher missão
+
+[Sound Configuration]
+Configurações de som
+
+[Sound]
+Som
+
+[FX Volume]
+Volume dos efeitos
+
+[Music Volume]
+Volume da música
+
+[Graphics Configuration]
+Configurações gráficas
+
+[Graphics]
+Gráficos
+
+[Resolution]
+Resolução
+
+[Render Device]
+Dispositivo de vídeo
+
+[Gamma]
+Gama
+
+[Advanced Options]
+Opções avançadas
+
+[Advanced Graphic Options]
+Opções gráficas avançadas
+
+[Performance Level]
+Nível de detalhe
+
+[High speed]
+Alta velocidade
+
+[Low speed]
+Baixa velocidade
+
+[Full Size Textures]
+Texturas em tamanho real
+
+[Lightmaps]
+Mapas de luz ativados
+
+[Mipmapping]
+Mipmapping ativado
+
+[Controls]
+Controles
+
+[Controls Configuration]
+Configurar controles
+
+[Invert Mouse]
+Inverter mouse
+
+[Mouse Sensitivity]
+Sensibilidade do mouse
+
+[Reset to Default]
+Restaurar padrões
+
+[Select a key or button]
+Escolha uma tecla ou botão
+
+[MoveLeft]
+Mover para a esquerda
+
+[MoveRight]
+Mover para a direita
+
+[MoveUp]
+Avançar
+
+[MoveDown]
+Recuar
+
+[Fire]
+Atirar
+
+[AlternateFire]
+Tiro alternativo
+
+[Reload]
+Recarregar
+
+[Activate]
+Ativar
+
+[Crouch]
+Agachar
+
+[Jump]
+Pular
+
+[NextWeapon]
+Próxima arma
+
+[PrevWeapon]
+Arma anterior
+
+[Peek]
+Espiar
+
+[Binoculars]
+Binóculo
+
+[MapComputer]
+Computador de mapa
+
+[ToggleWalkRun]
+Andar/correr
+
+[ZoomIn]
+Aumentar zoom
+
+[ZoomOut]
+Diminuir zoom
+
+[WeaponCategory1]
+Selecionar faca
+
+[WeaponCategory2]
+Alternar pistolas
+
+[WeaponCategory3]
+Alternar submetralhadoras
+
+[WeaponCategory4]
+Alternar fuzis de assalto
+
+[WeaponCategory5]
+Alternar escopetas
+
+[WeaponCategory6]
+Selecionar fuzil de precisão
+
+[WeaponCategory7]
+Alternar granadas
+
+[WeaponCategory8]
+Selecionar LAW
+
+[WeaponCategory9]
+Selecionar kit médico
+
+[KEY_LEFT]
+Seta esquerda
+
+[KEY_RIGHT]
+Seta direita
+
+[KEY_UP]
+Seta para cima
+
+[KEY_DOWN]
+Seta para baixo
+
+[MOUSE_BUTTON_1]
+Botão esquerdo do mouse
+
+[MOUSE_BUTTON_2]
+Botão direito do mouse
+
+[MOUSE_BUTTON_3]
+Botão do meio do mouse
+
+[KEY_SPACE]
+Barra de espaço
+
+[KEY_BACKSPACE]
+Backspace
+
+[KEY_RETURN]
+Enter
+
+[KEY_LEFT_SHIFT]
+Shift esquerdo
+
+[KEY_RIGHT_SHIFT]
+Shift direito
+
+[KEY_LEFT_CTRL]
+Ctrl esquerdo
+
+[KEY_RIGHT_CTRL]
+Ctrl direito
+
+[KEY_LEFT_ALT]
+Alt esquerdo
+
+[KEY_RIGHT_ALT]
+Alt direito
+
+[KEY_SEPARATOR]
+.
+
+[KEY_ANGLE]
+\\
+
+[KEY_A]
+A
+
+[KEY_B]
+B
+
+[KEY_C]
+C
+
+[KEY_D]
+D
+
+[KEY_E]
+E
+
+[KEY_F]
+F
+
+[KEY_G]
+G
+
+[KEY_H]
+H
+
+[KEY_I]
+I
+
+[KEY_J]
+J
+
+[KEY_K]
+K
+
+[KEY_L]
+L
+
+[KEY_M]
+M
+
+[KEY_N]
+N
+
+[KEY_O]
+O
+
+[KEY_P]
+P
+
+[KEY_Q]
+Q
+
+[KEY_R]
+R
+
+[KEY_S]
+S
+
+[KEY_T]
+T
+
+[KEY_U]
+U
+
+[KEY_V]
+V
+
+[KEY_W]
+W
+
+[KEY_X]
+X
+
+[KEY_Y]
+Y
+
+[KEY_Z]
+Z
+
+[KEY_NUMPAD0]
+Teclado num. 0
+
+[KEY_NUMPAD1]
+Teclado num. 1
+
+[KEY_NUMPAD2]
+Teclado num. 2
+
+[KEY_NUMPAD3]
+Teclado num. 3
+
+[KEY_NUMPAD4]
+Teclado num. 4
+
+[KEY_NUMPAD5]
+Teclado num. 5
+
+[KEY_NUMPAD6]
+Teclado num. 6
+
+[KEY_NUMPAD7]
+Teclado num. 7
+
+[KEY_NUMPAD8]
+Teclado num. 8
+
+[KEY_NUMPAD9]
+Teclado num. 9
+
+[KEY_PAGEUP]
+Page Up
+
+[KEY_PAGEDOWN]
+Page Down
+
+[KEY_NUMPADENTER]
+Teclado num. Enter
+
+[KEY_NUMPADCOMMA]
+Teclado num. ,
+
+[KEY_NUMPADEQUALS]
+Teclado num. =
+
+[KEY_NUMPADSTAR]
+Teclado num. *
+
+[KEY_NUMPADMINUS]
+Teclado num. -
+
+[KEY_NUMPADPLUS]
+Teclado num. +
+
+[KEY_NUMPADPERIOD]
+Teclado num. ,
+
+[KEY_NUMPADSLASH]
+Teclado num. /
+
+[KEY_SCROLL]
+Scroll Lock
+
+[KEY_GRAVE]
+`
+
+[KEY_UNDERLINE]
+_
+
+[KEY_SLASH]
+/
+
+[KEY_MINUS]
+-
+
+[KEY_EQUALS]
+=
+
+[KEY_NUMLOCK]
+Num Lock
+
+[KEY_INSERT]
+Insert
+
+[KEY_DELETE]
+Delete
+
+[KEY_HOME]
+Home
+
+[KEY_END]
+End
+
+[KEY_MULTIPLY]
+*
+
+[KEY_DIVIDE]
+/
+
+[KEY_SUBTRACT]
+-
+
+[KEY_TAB]
+TAB
+
+[KEY_LEFT_BRACKET]
+[
+
+[KEY_RIGHT_BRACKET]
+]
+
+[KEY_ADD]
++
+
+[KEY_CAPITAL]
+Caps Lock
+
+[KEY_SEMICOLON]
+;
+
+[KEY_SEPERATOR]
+-
+
+[KEY_APOSTROPHE]
+'
+
+[KEY_BACKSLASH]
+#
+
+[KEY_DECIMAL]
+.
+
+[KEY_COMMA]
+,
+
+[KEY_SEPERATOR]
+-
+
+[KEY_F1]
+F1
+
+[KEY_F2]
+F2
+
+[KEY_F3]
+F3
+
+[KEY_F4]
+F4
+
+[KEY_F5]
+F5
+
+[KEY_F6]
+F6
+
+[KEY_F7]
+F7
+
+[KEY_F8]
+F8
+
+[KEY_F9]
+F9
+
+[KEY_F10]
+F10
+
+[KEY_F11]
+F11
+
+[KEY_F12]
+F12
+
+[KEY_F13]
+F13
+
+[KEY_F14]
+F14
+
+[KEY_F15]
+F15
+
+[KEY_0]
+0
+
+[KEY_1]
+1
+
+[KEY_2]
+2
+
+[KEY_3]
+3
+
+[KEY_4]
+4
+
+[KEY_5]
+5
+
+[KEY_6]
+6
+
+[KEY_7]
+7
+
+[KEY_8]
+8
+
+[KEY_9]
+9
+
+[MOUSE_WHEEL_UP]
+Roda do mouse para cima
+
+[MOUSE_WHEEL_DOWN]
+Roda do mouse para baixo
+
+[Language]
+Idioma
+
+[Select Language]
+Escolher idioma
+
+[english]
+English
+
+[German]
+Deutsch
+
+[French]
+Français
+
+[Spanish]
+Español
+
+[Italian]
+Italiano
+
+[Content Control]
+Controle de conteúdo
+
+[Blood Enabled]
+Sangue ativado
+
+[Enter Password]
+Digite a senha
+
+[Change Password]
+Alterar senha
+
+[Player Configuration]
+Configurar jogador
+
+[Add Player]
+Adicionar jogador
+
+[Delete Player]
+Excluir jogador
+
+[Select Player]
+Escolher jogador
+
+[Copy Player]
+Copiar jogador
+
+[Select Difficulty Level]
+Escolha a dificuldade
+
+[Easy]
+Fácil
+
+[Medium]
+Médio
+
+[Hard]
+Difícil
+
+[Quit Game]
+Sair do jogo
+
+[Quit Level]
+Abandonar fase
+
+[LoadingText]
+Carregando fase... Aguarde...
+
+[Quit Level]
+Abandonar fase
+
+[Game Paused]
+Jogo pausado
+
+[Game Over]
+Fim de jogo
+
+[Restart Game]
+Reiniciar missão
+
+[Resume Game]
+Continuar jogo
+
+[Quit to Main Menu]
+Voltar ao menu principal
+
+[Read Me First]
+Leia antes de jogar!
+
+[Innerloop]
+Innerloop Studios - uma empresa Vision Park
+
+[Game Concept]
+Conceito do jogo
+
+[Project Leader]
+Líder de projeto - Eidos Interactive
+
+[Programming]
+Programação
+
+[Lead Programmer]
+Programador-chefe
+
+[Programmer]
+Programador
+
+[Additional Programming]
+Programação adicional
+
+[Additional Engine Support]
+Suporte adicional ao motor
+
+[Level Design]
+Design de fases
+
+[Lead Level Designer]
+Designer de fases-chefe
+
+[Level Designer]
+Designer de fases
+
+[Art]
+Arte
+
+[Lead Artist]
+Artista-chefe
+
+[Artist1]
+Artista / Animação de personagens
+
+[Artist2]
+Artista / Design de personagens
+
+[Music]
+Música
+
+[Musician & Sound Designer]
+Músico e designer de som
+
+[QA]
+Controle de qualidade
+
+[IGI QA]
+Controle de qualidade IGI
+
+[Casting and Voice Production]
+Elenco e produção de vozes
+
+[Voice Talent]
+Vozes
+
+[Producer]
+Produtor
+
+[Executive Producer]
+Produtor executivo
+
+[Assistant Producer]
+Produtor assistente
+
+[Shadow Producer (US)]
+Produtor associado (EUA)
+
+[External Development Manager]
+Gerente de desenvolvimento externo
+
+[Lead Tester]
+Testador-chefe
+
+[Marketing]
+Marketing
+
+[Product Manager]
+Gerente de produto
+
+[Product Manager (Germany)]
+Gerente de produto (Alemanha)
+
+[Product Manager (France)]
+Gerente de produto (França)
+
+[Product Manager (US)]
+Gerente de produto (EUA)
+
+[PR]
+Relações públicas
+
+[PR Specialist]
+Especialista em relações públicas
+
+[Localisation]
+Localização
+
+[Localisation Manager]
+Gerente de localização
+
+[Group Localisation Manager]
+Gerente geral de localização
+
+[Printed Materials Coordinator]
+Coordenador de material impresso
+
+[Creative Services]
+Serviços de criação
+
+[Creative Services Manager]
+Gerente de serviços de criação
+
+[Creative Designer]
+Designer de criação
+
+[Manual Design & Layout]
+Design e diagramação do manual
+
+[Tester]
+Testador
+
+[QA Localisation]
+Controle de qualidade da localização
+
+[QA Manager]
+Gerente de controle de qualidade
+
+[Assistant QA Manager]
+Gerente assistente de controle de qualidade
+
+[Assistant QA Localisation Manager]
+Gerente assistente de qualidade da localização
+
+[OK]
+OK
+
+[Cancel]
+Cancelar
+
+[Back]
+Voltar
+
+[Are you sure?]
+Tem certeza?
+
+[Yes]
+Sim
+
+[No]
+Não

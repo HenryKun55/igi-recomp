@@ -1,0 +1,236 @@
+# Project IGI - Brazilian Portuguese: language/portuguese/objectives.res
+# Objective states and the objectives of each mission (map computer).
+
+[OBJECTIVE]
+Objetivo
+
+[COMPLETE]
+Concluído
+
+[INCOMPLETE]
+Pendente
+
+[FAILED]
+Falhou!
+
+[OBJ_1_COMPLETE]
+Objetivo 1 concluído.
+
+[OBJ_2_COMPLETE]
+Objetivo 2 concluído.
+
+[OBJ_3_COMPLETE]
+Objetivo 3 concluído.
+
+[OBJ_4_COMPLETE]
+Objetivo 4 concluído.
+
+[OBJ_5_COMPLETE]
+Objetivo 5 concluído.
+
+[OBJ_6_COMPLETE]
+Objetivo 6 concluído.
+
+[OBJ_7_COMPLETE]
+Objetivo 7 concluído.
+
+[OBJ_8_COMPLETE]
+Objetivo 8 concluído.
+
+[OBJ_9_COMPLETE]
+Objetivo 9 concluído.
+
+[OBJ_1_FAILED]
+Objetivo 1 falhou.
+
+[OBJ_2_FAILED]
+Objetivo 2 falhou.
+
+[OBJ_3_FAILED]
+Objetivo 3 falhou.
+
+[OBJ_4_FAILED]
+Objetivo 4 falhou.
+
+[OBJ_5_FAILED]
+Objetivo 5 falhou.
+
+[OBJ_6_FAILED]
+Objetivo 6 falhou.
+
+[OBJ_7_FAILED]
+Objetivo 7 falhou.
+
+[OBJ_8_FAILED]
+Objetivo 8 falhou.
+
+[OBJ_9_FAILED]
+Objetivo 9 falhou.
+
+[OBJ_1_INCOMPLETE]
+Objetivo 1 pendente.
+
+[OBJ_2_INCOMPLETE]
+Objetivo 2 pendente.
+
+[OBJ_3_INCOMPLETE]
+Objetivo 3 pendente.
+
+[OBJ_4_INCOMPLETE]
+Objetivo 4 pendente.
+
+[OBJ_5_INCOMPLETE]
+Objetivo 5 pendente.
+
+[OBJ_6_INCOMPLETE]
+Objetivo 6 pendente.
+
+[OBJ_7_INCOMPLETE]
+Objetivo 7 pendente.
+
+[OBJ_8_INCOMPLETE]
+Objetivo 8 pendente.
+
+[OBJ_9_INCOMPLETE]
+Objetivo 9 pendente.
+
+[M1_OBJ1]
+Roube o caminhão perto da entrada principal.
+
+[M2_OBJ1]
+Encontre e pegue as cargas de C4 no armazém.
+
+[M2_OBJ2]
+Coloque uma carga em cada lançador de mísseis SAM.
+
+[M2_OBJ3]
+Vá até o ponto de extração.
+
+[M3_OBJ1]
+Encontre e resgate Josef Priboi no prédio de segurança.
+
+[M3_OBJ2]
+Escolte Josef Priboi até o ponto de extração.
+
+[M3_OBJ3]
+Descubra o novo paradeiro de Josef Priboi nos registros de voo da torre de controle.
+
+[M3_OBJ4]
+Fuja roubando um dos caças.
+
+[M4_OBJ1]
+Proteja a vila e suba na caixa d'água para dar cobertura às tropas aliadas.
+
+[M4_OBJ2]
+Dê cobertura às tropas aliadas até Josef ser libertado
+
+[M5_OBJ1]
+Encontre o cartão de acesso da cúpula do radar.
+
+[M5_OBJ2]
+Insira o vírus no terminal da cúpula do radar.
+
+[M5_OBJ3]
+Proteja a zona de extração.
+
+[M6_OBJ1]
+Pegue os explosivos no armazém principal dele.
+
+[M6_OBJ2]
+Desligue o gerador para desativar a cerca elétrica.
+
+[M6_OBJ3]
+Coloque cargas no depósito de combustível para fazer Priboi fugir da segurança do armazém.
+
+[M6_OBJ4]
+Vasculhe todos os arquivos em busca de provas incriminadoras.
+
+[M7_OBJ1]
+Infiltre-se no posto de fronteira
+
+[M7_OBJ2]
+O alarme não pode disparar quando você entrar no caminhão
+
+[M7_OBJ3]
+Passe pelo posto de controle.
+
+[M7_OBJ4]
+Infiltre-se no posto de fronteira.
+
+[M7_OBJ5]
+Chegue ao caminhão que cruza a fronteira antes que o tempo acabe.
+
+[M8_OBJ1]
+Fuja da base de infantaria.
+
+[M8_OBJ2]
+Infiltre-se no pátio de manutenção de tanques e entre no depósito de munição.
+
+[M8_OBJ3]
+Pegue o computador de mapa e o sinalizador.
+
+[M8_OBJ4]
+Prepare e coloque o sinalizador no lançador SAM para o ataque aéreo.
+
+[M8_OBJ5]
+Infiltre-se no posto de escuta e no radar.
+
+[M8_OBJ6]
+Vá até o ponto de encontro.
+
+[M9_OBJ1]
+Entre na base e desative o sistema de segurança.
+
+[M9_OBJ2]
+Entre na área de alta segurança e embarque no trem.
+
+[M9_OBJ3]
+Elimine toda a resistência.
+
+[M10_OBJ1]
+Pegue as minas de proximidade no depósito.
+
+[M10_OBJ2]
+Vá até o prédio mais alto da vila abandonada e aguarde a evacuação.
+
+[M11_OBJ1]
+Encontre e pegue o fuzil de precisão.
+
+[M11_OBJ2]
+Religue o gerador para energizar o teleférico.
+
+[M11_OBJ3]
+Acione os controles do teleférico.
+
+[M12_OBJ1]
+Encontre a bomba e desative-a. Encontre Ekk e mate-a.
+
+[M13_OBJ1]
+Atravesse o perímetro.
+
+[M13_OBJ2]
+Proteja a zona de desembarque de Anya e das forças aliadas.
+
+[M13_OBJ3]
+Ligue o gerador no prédio do gerador.
+
+[M13_OBJ4]
+Ligue o transformador no grande prédio de armazenagem.
+
+[M13_OBJ5]
+Abra as portas da fábrica de armas.
+
+[M13_OBJ6]
+Atravesse a fábrica de armas.
+
+[M13_OBJ7]
+Passe pela entrada da seção das torres de resfriamento sem disparar o alarme...
+
+[M13_OBJ8]
+Entre no complexo subterrâneo.
+
+[M14_OBJ1]
+Encontre Ekk e mate-a.
+
+[M14_OBJ2]
+Encontre a bomba e desative-a.

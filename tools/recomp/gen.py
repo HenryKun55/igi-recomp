@@ -57,6 +57,8 @@ GAME_HOOKS = [
     0x0048A440,   # loading screen: create (background picture, progress bar)
     0x0048A620,   # loading screen: advance the progress bar
     0x0048A5D0,   # loading screen: destroy
+    0x004A53B3,   # sprintf: language directory / config line of the added language
+    0x004B8810,   # script constant registration (adds PORTUGUESE)
 ]
 
 # MSVC CRT setjmp/longjmp: setjmp call sites become host setjmp, and the
@@ -72,6 +74,13 @@ NORETURN_IMPORTS = {'ExitProcess', 'TerminateProcess', 'RaiseException'}
 HLE = {
     0x004A5980: ('rt_hle_stricmp', 140, 'b74eac9d136f17e68cc33c831146d506c0eb41ef'),
     0x004ACD10: ('rt_hle_memset', 88, '4fd4d112065490f5cdd92c83810b685d8c896ca8'),
+}
+
+# Game functions replaced for port features (runtime/src/igi_language.c), same
+# format and matching as HLE but always applied.
+PATCHES = {
+    0x00406310: ('rt_lang_count', 6, 'bc5fd08fad1be60d86791aa6084617ef2f754cf5'),
+    0x00406320: ('rt_lang_name', 13, 'c11dd2e08d865817f816c552d3eabf4616cbe5a9'),
 }
 
 # Game functions with hand-decompiled native versions (runtime/src/native_*.c): entry ->
@@ -1893,6 +1902,11 @@ class Generator:
         self.hle = {}
         # IGI_HLE=0 keeps the guest code for every C runtime routine (for A/B checks).
         for a, (name, size, digest) in (HLE.items() if os.environ.get('IGI_HLE') != '0' else ()):
+            if a in self.funcs and hashlib.sha1(self.an.pe.read(a, size)).hexdigest() == digest:
+                self.hle[a] = name
+            else:
+                print('warning: %08X does not match %s; running the guest code' % (a, name))
+        for a, (name, size, digest) in PATCHES.items():
             if a in self.funcs and hashlib.sha1(self.an.pe.read(a, size)).hexdigest() == digest:
                 self.hle[a] = name
             else:

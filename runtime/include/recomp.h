@@ -445,6 +445,10 @@ static inline __attribute__((always_inline)) RtStr rt_rep_stos(uint8_t *gm, uint
 /* Native C runtime routines (runtime/src/crt_hle.c); 0: run the guest code. */
 int rt_hle_stricmp(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
 int rt_hle_memset(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
+/* Added game language (runtime/src/igi_language.c, PATCHES table in gen.py), same convention. */
+int rt_lang_count(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
+int rt_lang_name(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
+void igi_language_probe(Ctx *c, uint32_t func, uint32_t sp);   /* its entry hooks */
 
 /* Hand-decompiled game functions (runtime/src/native_*.c, NATIVE table in gen.py),
  * same convention. g_igi_native = 0 (IGI_NATIVE=0) makes them all decline. */
