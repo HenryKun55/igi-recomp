@@ -464,13 +464,20 @@ static void d3d_depth_range(float minz, float maxz)
     c_depthrange(2.0f * minz - maxz, maxz);
 }
 
-/* Orthographic projection over the whole render target in D3D pixel coordinates. */
-static void load_screen_ortho(void)
+/* Orthographic projection over the whole render target in D3D pixel coordinates.
+ * D3D samples pixel centers at integer coordinates, GL at +0.5, so the image is
+ * moved by half a pixel. When the game image is scaled up, though, every window
+ * pixel samples the texture, not just the game pixel's center: a point-sampled
+ * texture mapped one texel per pixel (font glyphs) then shows half a texel of the
+ * neighbouring glyph along the edges. Such draws (texel_snap) skip the offset, so
+ * each game pixel covers exactly one texel; they end up half a game pixel lower
+ * and to the right. */
+static void load_screen_ortho(int texel_snap)
 {
     c_viewport(B.vp_x, B.vp_y, B.vp_w, B.vp_h);
-    /* D3D samples pixel centers at integer coordinates, GL at +0.5. */
+    double off = texel_snap && (B.vp_w != B.rt_w || B.vp_h != B.rt_h) ? 0.0 : 0.5;
     float m[16];
-    ortho_matrix(-0.5, B.rt_w - 0.5, B.rt_h - 0.5, -0.5, 0.0, -1.0, m);
+    ortho_matrix(-off, B.rt_w - off, B.rt_h - off, -off, 0.0, -1.0, m);
     if (use_z_remap()) {
         c_depthrange(0.0f, 1.0f);
     } else {
@@ -558,7 +565,7 @@ void bk_quad(const void *p)
         glDisable(GL_ALPHA_TEST);
     }
     glDisable(GL_BLEND);
-    load_screen_ortho();
+    load_screen_ortho(0);
     float m[16];
     ortho_matrix(0, B.rt_w, B.rt_h, 0, -1, 1, m);
     c_load_matrix(GL_PROJECTION, m);
@@ -979,7 +986,7 @@ static void apply_states(const DrawCmd *d)
 static void apply_transforms(const DrawCmd *d)
 {
     if (d->L.pretransformed) {
-        load_screen_ortho();
+        load_screen_ortho(d->stage[0].tex && d->stage[0].magf == GL_NEAREST);
         return;
     }
     GLint x, y;

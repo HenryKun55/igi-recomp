@@ -1101,10 +1101,10 @@ static void stages_for_draw(DrawStage *out)
                        (uint32_t)(wt == GL_REPEAT ? 0 : wt == GL_MIRRORED_REPEAT ? 1 : 2) << 7 |
                        (t->priv[0] & 0xFFu) << 9;
         ds->sampler = t->priv[TEXP_SAMPLER] != sig;
+        ds->magf = magf;   /* also read by the screen projection (texel snap) */
         if (ds->sampler) {
             t->priv[TEXP_SAMPLER] = sig;
             ds->minf = minf;
-            ds->magf = magf;
             ds->wrap_s = ws;
             ds->wrap_t = wt;
             ds->max_level = (GLint)t->priv[0] - 1;
