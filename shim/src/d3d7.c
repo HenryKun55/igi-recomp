@@ -164,6 +164,7 @@ typedef struct VertexBuffer {
     struct VBData *data;       /* pack thread: the contents recorded draws read in place */
     uint32_t spare_mem[2];     /* pack thread: memory the buffer had while draws read it ... */
     uint64_t spare_ref[2];     /* ... until these rq_mark()s */
+    int spare_tried;
 } VertexBuffer;
 #define VB_SPARES 2
 #define DDLOCK_DISCARDCONTENTS 0x2000u
@@ -521,6 +522,7 @@ static void dev_SetTransform(Ctx *c)
     float *m = transform_slot(ARG(1));
     if (m && words_differ(m, gptr(ARG(2)), 64)) {
         render_state_changing();
+        g_rs_parts |= m == g_rs.world ? RS_PART_WORLD : RS_PART_XF;
         memcpy(m, gptr(ARG(2)), 64);
         if (m == g_rs.view)
             g_light_serial++;
@@ -547,6 +549,7 @@ static void dev_MultiplyTransform(Ctx *c)
                 r[i * 4 + j] = m[i * 4] * b[j] + m[i * 4 + 1] * b[4 + j] + m[i * 4 + 2] * b[8 + j] + m[i * 4 + 3] * b[12 + j];
         if (words_differ(m, r, 64)) {
             render_state_changing();
+            g_rs_parts |= m == g_rs.world ? RS_PART_WORLD : RS_PART_XF;
             memcpy(m, r, 64);
             if (m == g_rs.view)
                 g_light_serial++;
@@ -567,6 +570,7 @@ static void dev_SetViewport(Ctx *c)
     if (vi[0] != g_rs.vp_x || vi[1] != g_rs.vp_y || vi[2] != g_rs.vp_w || vi[3] != g_rs.vp_h ||
         memcmp(&vz[0], &g_rs.vp_minz, 4) || memcmp(&vz[1], &g_rs.vp_maxz, 4)) {
         render_state_changing();
+        g_rs_parts |= RS_PART_XF;
         g_rs.vp_x = vi[0];
         g_rs.vp_y = vi[1];
         g_rs.vp_w = vi[2];
@@ -662,6 +666,7 @@ static void dev_SetRenderState(Ctx *c)
     uint32_t s = ARG(1);
     if (s < 256u && g_rs.rs[s] != ARG(2)) {
         render_state_changing();
+        g_rs_parts |= RS_PART_RS;
         if (s == 139u || s == 141u || s == 143u || s == 145u)   /* AMBIENT, COLORVERTEX, NORMALIZENORMALS, DIFFUSEMATERIALSOURCE */
             g_light_serial++;
         g_rs.rs[s] = ARG(2);
@@ -683,6 +688,7 @@ static void dev_SetTexture(Ctx *c)
         Surface *t = surface_from_obj(ARG(2));
         if (g_rs.stage[stage].texture != t) {
             render_state_changing();
+            g_rs_parts |= RS_PART_STAGE;
             g_rs.stage[stage].texture = t;
         }
     }
@@ -724,13 +730,16 @@ static void dev_SetTextureStageState(Ctx *c)
     if (stage < MAX_STAGES) {
         StageState *st = &g_rs.stage[stage];
         if (type == 12u) {           /* ADDRESS sets both */
-            if (st->addressu != value || st->addressv != value)
+            if (st->addressu != value || st->addressv != value) {
                 render_state_changing();
+                g_rs_parts |= RS_PART_STAGE;
+            }
             st->addressu = st->addressv = value;
         } else {
             uint32_t *p = tss_slot(st, type);
             if (p && *p != value) {
                 render_state_changing();
+                g_rs_parts |= RS_PART_STAGE;
                 *p = value;
             }
         }
@@ -965,6 +974,25 @@ static void draw_indexed(uint32_t prim, uint32_t fvf, const uint8_t *verts, uint
     render_draw((int)prim, cache, nv, NULL, 0, d.pretransformed, d.has_normal, d.has_color, d.has_spec, d.ntex);
 }
 
+/* Decodes the buffer contents at `base` into the version, with their bounds. */
+static void vb_version_decode(VBVersion *c, uint32_t fvf, const uint8_t *base, uint32_t stride)
+{
+    decode_vertices(fvf, base, stride, NULL, c->count, &c->d, c->v);
+    for (int k = 0; k < 3; k++) {
+        c->lo[k] = 1e30f;
+        c->hi[k] = -1e30f;
+    }
+    for (uint32_t i = 0; i < c->count; i++) {
+        const float *p = &c->v[i].x;
+        for (int k = 0; k < 3; k++) {
+            c->lo[k] = p[k] < c->lo[k] ? p[k] : c->lo[k];
+            c->hi[k] = p[k] > c->hi[k] ? p[k] : c->hi[k];
+        }
+    }
+}
+
+static void pk_decode_later(VertexBuffer *vb, VBVersion *c);
+
 /* Decoded copy of the whole buffer, refreshed after a writable Lock. */
 static VBVersion *vb_cache(VertexBuffer *vb)
 {
@@ -985,21 +1013,14 @@ static VBVersion *vb_cache(VertexBuffer *vb)
         c->count = vb->count;
         vb->cache = c;
     }
-    PROF_SECTION(PROF_H_DECODE);
-    decode_vertices(vb->fvf, g_mem + vb->mem, vb->stride, NULL, vb->count, &c->d, c->v);
-    PROF_SECTION_END;
     c->gen = vb->gen;
-    for (int k = 0; k < 3; k++) {
-        c->lo[k] = 1e30f;
-        c->hi[k] = -1e30f;
+    if (g_pack_thread) {
+        pk_decode_later(vb, c);   /* by the render thread, before the draws using it */
+        return c;
     }
-    for (uint32_t i = 0; i < vb->count; i++) {
-        const float *p = &c->v[i].x;
-        for (int k = 0; k < 3; k++) {
-            c->lo[k] = p[k] < c->lo[k] ? p[k] : c->lo[k];
-            c->hi[k] = p[k] > c->hi[k] ? p[k] : c->hi[k];
-        }
-    }
+    PROF_SECTION(PROF_H_DECODE);
+    vb_version_decode(c, vb->fvf, g_mem + vb->mem, vb->stride);
+    PROF_SECTION_END;
     return c;
 }
 
@@ -1045,20 +1066,7 @@ static void vb_data_detach(VertexBuffer *vb, uint32_t lock_flags, int release)
         return;
     }
     if (!release && (lock_flags & DDLOCK_DISCARDCONTENTS)) {
-        if (!vb->spare_mem[0]) {
-            /* Both spares at once: the guest heap is used the same way in every run. */
-            uint32_t bytes = vb->stride * vb->count + 16u;
-            uint32_t a = heap_alloc(bytes), b = heap_alloc(bytes);
-            if (a && b) {
-                vb->spare_mem[0] = a;
-                vb->spare_mem[1] = b;
-                vb->spare_ref[0] = vb->spare_ref[1] = 0;
-            } else {
-                heap_free(a);
-                heap_free(b);
-            }
-        }
-        for (int i = 0; i < VB_SPARES && vb->spare_mem[0]; i++) {
+        for (int i = 0; i < VB_SPARES && vb->spare_mem[i]; i++) {
             if (!rq_passed(vb->spare_ref[i]))
                 continue;
             uint32_t m = vb->spare_mem[i];
@@ -1106,6 +1114,36 @@ static VBData *vb_data(VertexBuffer *vb, uint32_t first, uint32_t count)
     d->lo = lo < d->lo ? lo : d->lo;
     d->hi = hi > d->hi ? hi : d->hi;
     return d;
+}
+
+typedef struct PkDecode {
+    VBVersion *ver;
+    VBData *data;
+    uint32_t fvf, stride;
+} PkDecode;
+
+/* Render thread: decodes a buffer's new contents into its new version. */
+static void pk_decode_cmd(const void *p)
+{
+    const PkDecode *k = p;
+    VBData *d = k->data;
+    PROF_RS(PROF_H_DECODE);
+    atomic_store(&d->busy, 1);
+    vb_version_decode(k->ver, k->fvf, (const uint8_t *)atomic_load(&d->base), k->stride);
+    atomic_store(&d->busy, 0);
+    PROF_RS_END;
+}
+
+static void pk_decode_later(VertexBuffer *vb, VBVersion *c)
+{
+    VBData *d = vb_data(vb, 0, vb->count);
+    PkDecode *k = rq_begin(pk_decode_cmd, sizeof(PkDecode));
+    k->ver = c;
+    k->data = d;
+    k->fvf = vb->fvf;
+    k->stride = vb->stride;
+    rq_end();
+    d->last_ref = rq_mark();
 }
 
 enum { PK_RAW, PK_CACHE, PK_VB };
@@ -1371,6 +1409,21 @@ static void pk_draw_vb(VertexBuffer *vb, uint32_t prim, uint32_t start, uint32_t
          * what each draw reads cost less than moving pending draws at each Lock. */
         pk_record_raw_ic(prim, vb->fvf, g_mem + vb->mem + (size_t)start * vb->stride, vb->stride, nv, ic, ni, lo, hi);
         return;
+    }
+    if (!vb->spare_tried) {
+        vb->spare_tried = 1;
+        /* For the discarding Lock that follows (vb_data_detach). Allocated at a
+         * point every run reaches the same way: the guest heap stays the same. */
+        uint32_t bytes = vb->stride * vb->count + 16u;
+        uint32_t a = heap_alloc(bytes), b = heap_alloc(bytes);
+        if (a && b) {
+            vb->spare_mem[0] = a;
+            vb->spare_mem[1] = b;
+            vb->spare_ref[0] = vb->spare_ref[1] = 0;
+        } else {
+            heap_free(a);
+            heap_free(b);
+        }
     }
     /* The terrain path packs all nv vertices at once. */
     VBData *d = vb_data(vb, start, nv);

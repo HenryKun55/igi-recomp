@@ -30,6 +30,7 @@
 
 RenderState g_rs;
 uint32_t g_rs_serial;
+uint32_t g_rs_parts;
 uint32_t g_light_serial;
 uint32_t g_frame_serial;
 static uint32_t perf_gpu_draws;   /* draws actually submitted to GL this frame */
@@ -2627,9 +2628,164 @@ static int stage_textures_dirty(void)
     return 0;
 }
 
+/* Partial snapshots: only the parts of the state that changed (most draws change
+ * the world matrix and little else). */
+#define RS_WORDS 22u   /* DrawCmd zenable .. tfactor */
+_Static_assert(offsetof(DrawCmd, tfactor) - offsetof(DrawCmd, zenable) == (RS_WORDS - 1u) * 4u,
+               "DrawCmd render states must be contiguous");
+
+typedef struct PkRs {
+    uint32_t serial;
+    uint32_t fog, fogtable, fogvertex;   /* LayoutIn */
+    uint32_t v[RS_WORDS];
+} PkRs;
+
+typedef struct PkStages {
+    uint32_t serial;
+    int stages;
+    uint32_t tci[MAX_STAGES];
+    DrawStage st[MAX_STAGES];
+} PkStages;
+
+typedef struct PkXf {
+    uint32_t serial;
+    int32_t vp_x, vp_y, vp_w, vp_h;
+    float vp_minz, vp_maxz;
+    float world[16], view[16], proj[16];
+} PkXf;
+
+typedef struct PkWorld {
+    uint32_t serial;
+    float world[16];
+} PkWorld;
+
+typedef struct Mat4f {
+    float m[16];
+} Mat4f;
+
+static void mat4_copy(float *d, const float *s)
+{
+    *(Mat4f *)(void *)d = *(const Mat4f *)(const void *)s;
+}
+
+/* Render thread: a new state serial (the batch so far is drawn with the old state). */
+static void rs_new_serial(uint32_t serial)
+{
+    flush_local();
+    rs_cur.serial = serial;
+}
+
+static void pk_serial_cmd(const void *p)
+{
+    rs_new_serial(*(const uint32_t *)p);
+}
+
+static void pk_rs_cmd(const void *p)
+{
+    const PkRs *r = p;
+    rs_new_serial(r->serial);
+    rs_cur.li.fog = r->fog;
+    rs_cur.li.fogtable = r->fogtable;
+    rs_cur.li.fogvertex = r->fogvertex;
+    uint32_t *d = &rs_cur.d.zenable;
+    for (uint32_t i = 0; i < RS_WORDS; i++)
+        d[i] = r->v[i];
+}
+
+static void pk_stages_cmd(const void *p)
+{
+    const PkStages *s = p;
+    rs_new_serial(s->serial);
+    if (!rs_cur_used)
+        for (int i = 0; i < MAX_STAGES; i++)
+            if (rs_cur.d.stage[i].tex && rs_cur.d.stage[i].sampler)
+                bk_sampler(&rs_cur.d.stage[i]);
+    rs_cur_used = 0;
+    rs_cur.li.stages = s->stages;
+    for (int i = 0; i < MAX_STAGES; i++) {
+        rs_cur.li.tci[i] = s->tci[i];
+        rs_cur.d.stage[i] = s->st[i];
+    }
+}
+
+static void pk_xf_cmd(const void *p)
+{
+    const PkXf *x = p;
+    rs_new_serial(x->serial);
+    DrawCmd *d = &rs_cur.d;
+    d->vp_x = x->vp_x;
+    d->vp_y = x->vp_y;
+    d->vp_w = x->vp_w;
+    d->vp_h = x->vp_h;
+    d->vp_minz = x->vp_minz;
+    d->vp_maxz = x->vp_maxz;
+    mat4_copy(d->world, x->world);
+    mat4_copy(d->view, x->view);
+    mat4_copy(d->proj, x->proj);
+}
+
+static void pk_world_cmd(const void *p)
+{
+    const PkWorld *w = p;
+    rs_new_serial(w->serial);
+    mat4_copy(rs_cur.d.world, w->world);
+}
+
+/* Game thread: sends the parts of the state that changed since the last snapshot. */
+static void pk_send_parts(uint32_t parts)
+{
+    const uint32_t serial = g_rs_serial;
+    if (parts & RS_PART_STAGE) {
+        PkStages *s = rq_begin(pk_stages_cmd, sizeof(PkStages));
+        s->serial = serial;
+        s->stages = active_stages();
+        for (int i = 0; i < MAX_STAGES; i++)
+            s->tci[i] = g_rs.stage[i].texcoordindex;
+        stages_for_draw(s->st);   /* no uploads: stage_textures_dirty() said so */
+        rq_end();
+    }
+    if (parts & RS_PART_RS) {
+        const uint32_t *rs = g_rs.rs;
+        PkRs *r = rq_begin(pk_rs_cmd, sizeof(PkRs));
+        r->serial = serial;
+        r->fog = rs[28];
+        r->fogtable = rs[35];
+        r->fogvertex = rs[140];
+        static const uint8_t idx[RS_WORDS] = { 7,  8,  9,  14, 15, 19, 20, 22, 23, 24,  25,
+                                               27, 28, 34, 35, 36, 37, 38, 41, 137, 140, 60 };
+        for (uint32_t i = 0; i < RS_WORDS; i++)
+            r->v[i] = rs[idx[i]];
+        rq_end();
+    }
+    if (parts & RS_PART_XF) {
+        PkXf *x = rq_begin(pk_xf_cmd, sizeof(PkXf));
+        x->serial = serial;
+        x->vp_x = g_rs.vp_x;
+        x->vp_y = g_rs.vp_y;
+        x->vp_w = g_rs.vp_w;
+        x->vp_h = g_rs.vp_h;
+        x->vp_minz = g_rs.vp_minz;
+        x->vp_maxz = g_rs.vp_maxz;
+        mat4_copy(x->world, g_rs.world);
+        mat4_copy(x->view, g_rs.view);
+        mat4_copy(x->proj, g_rs.proj);
+        rq_end();
+    } else if (parts & RS_PART_WORLD) {
+        PkWorld *w = rq_begin(pk_world_cmd, sizeof(PkWorld));
+        w->serial = serial;
+        mat4_copy(w->world, g_rs.world);
+        rq_end();
+    }
+    if (!parts) {
+        uint32_t *s = rq_begin(pk_serial_cmd, sizeof(uint32_t));
+        *s = serial;
+        rq_end();
+    }
+}
+
 void render_pk_prepare(int pretransformed, int has_normal)
 {
-    if (!pk_snap_valid || pk_snap_serial != g_rs_serial || stage_textures_dirty()) {
+    if (!pk_snap_valid || stage_textures_dirty()) {
         /* Draws recorded with the previous state are drawn before the uploads. */
         render_flush();
         DrawStage stages[MAX_STAGES];
@@ -2642,13 +2798,17 @@ void render_pk_prepare(int pretransformed, int has_normal)
         rq_end();
         pk_snap_valid = 1;
         pk_snap_serial = g_rs_serial;
+        g_rs_parts = 0;
+    } else if (pk_snap_serial != g_rs_serial) {
+        pk_send_parts(g_rs_parts);
+        pk_snap_serial = g_rs_serial;
+        g_rs_parts = 0;
     }
     if (!pretransformed && has_normal && g_rs.rs[137] && (!light_sent_valid || light_sent_serial != g_light_serial)) {
         render_flush();
         send_lights();
     }
 }
-
 void render_pk_recorded(void)
 {
     pk_pending = 1;

@@ -50,6 +50,10 @@ void render_state_changing(void);
 /* Bumped with g_rs_serial when an input of the fixed-function lighting changes
  * (lights, material, view matrix, ambient/color material/normalize states). */
 extern uint32_t g_light_serial;
+/* Parts of g_rs changed since the pack thread's last state snapshot (set with
+ * every g_rs_serial bump; material and lights are sent on their own). */
+extern uint32_t g_rs_parts;
+enum { RS_PART_WORLD = 1, RS_PART_XF = 2, RS_PART_RS = 4, RS_PART_STAGE = 8 };
 /* Presented frames so far. */
 extern uint32_t g_frame_serial;
 
