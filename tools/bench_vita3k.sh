@@ -20,6 +20,11 @@
 #        VIEWS    views mode (see shim/src/bench.c): k traced views of a full turn at
 #                 the start position, captured like SHOT into $SHOT_DIR; igi.log (with
 #                 the traces) is copied there too
+#        SLOW     slow frame threshold in ms for the summary's slow-frame breakdown
+#                 (default 16); with an IGI_PROFILE build, the profile then keeps only
+#                 the samples of frames at least that slow
+#        FRAMES   where to copy the per-frame breakdown bench_frames.csv (default
+#                 $BUILD/bench_frames.csv)
 #
 # Only the instance started here is killed ("Vita3K -r PIGI00001"); other Vita3K
 # instances and other apps' data are left alone.
@@ -56,7 +61,7 @@ unzip -p "$BUILD/igi.vpk" eboot.bin > "$APP/eboot.bin" || exit 1
 echo "installed $BUILD/igi.vpk eboot.bin"
 rm -f "$DATA/bench_result.txt"
 touch "$DATA/.bench_start"
-echo "$SECS ${SHOT:-0} ${HOLD:-0} ${MISSION:-1} ${VIEWS:-0}" > "$DATA/bench.txt"
+echo "$SECS ${SHOT:-0} ${HOLD:-0} ${MISSION:-1} ${VIEWS:-0} ${SLOW:-0}" > "$DATA/bench.txt"
 
 stop() {
     pkill -9 -f "Vita3K -r PIGI00001" 2>/dev/null
@@ -124,5 +129,8 @@ if [ "${SHOT:-0}" -gt 0 ]; then
 fi
 if [ "${VIEWS:-0}" -gt 0 ]; then
     cp "$DATA/igi.log" "$SHOT_DIR/igi.log"
+fi
+if [ "$DATA/bench_frames.csv" -nt "$DATA/.bench_start" ]; then
+    cp "$DATA/bench_frames.csv" "${FRAMES:-$BUILD/bench_frames.csv}"
 fi
 cat "$DATA/bench_result.txt"

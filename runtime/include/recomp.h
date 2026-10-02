@@ -549,8 +549,12 @@ extern volatile uint32_t rt_prof_stack[RT_PROF_MAX];
 /* A setjmp returning through longjmp: this function is current again. */
 #define PROF_REENTER(a) (rt_prof_depth = prof_pd + 1u, rt_prof_cur = (a))
 void rt_prof_start(void);
-/* Drop the samples taken so far (e.g. boot and menus before a benchmark). */
-void rt_prof_reset(void);
+/* Drop the samples taken so far (e.g. boot and menus before a benchmark). With
+ * per_frame set, samples are then kept per frame until rt_prof_frame_end decides. */
+void rt_prof_reset(int per_frame);
+/* End of a frame (per-frame mode): keep its samples or drop them (e.g. only the
+ * slow frames are kept, so their cost isn't averaged away). */
+void rt_prof_frame_end(int keep);
 /* Stop sampling and write the profile now (for exits that skip atexit). */
 void rt_prof_flush(void);
 /* Host sections inside a thunk (ids 0xFD0000xx, named in profile.c). */

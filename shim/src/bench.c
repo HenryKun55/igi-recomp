@@ -24,7 +24,15 @@
  * bench.txt (IGI_BENCH_MISSION) picks the mission from the list (1 = first), and a
  * fifth (IGI_BENCH_VIEWS=k) replaces the movement pattern: the player stands still
  * and turns a full circle in k steps; each view is traced (per-draw log) and
- * captured as screenshot <view>, then the process exits. The run time is ignored. */
+ * captured as screenshot <view>, then the process exits. The run time is ignored.
+ *
+ * Frame breakdown: every measured frame also records the game's scheduler passes
+ * that led to its present (update steps: count and time; the render step's time,
+ * see bench_step) and the file reads and heap allocations since the previous
+ * present. bench_frames.csv gets one line per frame, and the summary has a line
+ * for the frames whose busy time reaches the slow threshold (a sixth number in
+ * bench.txt, IGI_BENCH_SLOW=<ms>; default 16 ms). With IGI_PROFILE and a threshold
+ * given, the profile keeps only the samples of those slow frames. */
 #include "bench.h"
 #include "igi_fixes.h"
 #include "platform.h"
@@ -41,11 +49,13 @@
 #define BENCH_RESULT "ux0:data/igi/bench_result.txt"
 #define BENCH_RUNNING "ux0:data/igi/bench_running.txt"
 #define BENCH_PHASE "ux0:data/igi/bench_phase.txt"
+#define BENCH_FRAMES "ux0:data/igi/bench_frames.csv"
 #define BENCH_PLATFORM "vita"
 #else
 #define BENCH_RESULT "bench_result.txt"
 #define BENCH_RUNNING "bench_running.txt"
 #define BENCH_PHASE "bench_phase.txt"
+#define BENCH_FRAMES "bench_frames.csv"
 #define BENCH_PLATFORM "desktop"
 #endif
 
@@ -70,7 +80,15 @@ extern uint32_t g_frame_serial;  /* render_gl.c: frames presented */
 typedef struct Sample {
     float frame_ms, draw_ms, swap_ms, wait_ms;
     uint32_t draws, gpu_draws, verts;
+    /* Scheduler passes that led to this frame's present (see bench_step). */
+    float upd_ms, rnd_ms;
+    uint32_t upd_n;
+    /* Events since the previous present (BenchCounters). */
+    float read_ms;
+    uint32_t opens, reads, read_bytes, allocs;
 } Sample;
+
+BenchCounters g_bench_ctr;
 
 typedef enum Phase {
     PH_BOOT,          /* intro videos: Esc until the main menu */
@@ -87,6 +105,8 @@ static int shot_every;          /* screenshot every N measured frames (0: none) 
 static int hold_secs;           /* sleep at the phase boundaries (see the top) */
 static int mission = 1;         /* mission list entry to start (1 = first) */
 static int views;               /* views mode: number of traced views (0: movement pattern) */
+static int slow_ms;             /* slow frame threshold (0: SLOW_DEFAULT_MS, profile keeps every frame) */
+#define SLOW_DEFAULT_MS 16
 static int view, view_frames, view_pending;
 #define VIEW_TURN_FRAMES 10u
 #define VIEW_SETTLE_FRAMES 10u
@@ -120,6 +140,7 @@ int bench_enabled(void)
                 hold_secs = (int)strtol(end, &end, 10);    /* and third */
                 int m = (int)strtol(end, &end, 10);
                 views = (int)strtol(end, &end, 10);
+                slow_ms = (int)strtol(end, &end, 10);
                 if (m > 0)
                     mission = m;
             }
@@ -141,6 +162,9 @@ int bench_enabled(void)
         e = getenv("IGI_BENCH_VIEWS");
         if (e)
             views = atoi(e);
+        e = getenv("IGI_BENCH_SLOW");
+        if (e)
+            slow_ms = atoi(e);
 #endif
         if (bench_secs > 0)
             rt_log("bench: enabled, %d s of gameplay, mission %d, %d views", bench_secs, mission, views);
@@ -254,10 +278,87 @@ static void run_views(void)
     }
 }
 
+/* Update steps since the last render step: they belong to the frame it presents. */
+static uint64_t pend_upd_us;
+static uint32_t pend_upd_n;
+
+void bench_step(uint32_t kind, uint64_t us)
+{
+    if (phase != PH_RUN || !samples) {
+        pend_upd_us = 0;
+        pend_upd_n = 0;
+        return;
+    }
+    if (kind & BENCH_STEP_UPDATE)
+        pend_upd_n++;
+    if (!(kind & BENCH_STEP_RENDER)) {
+        pend_upd_us += us;
+        return;
+    }
+    /* The render step presented the frame recorded last (bench_frame runs at its present). */
+    if (n_samples) {
+        Sample *s = &samples[n_samples - 1u];
+        s->upd_ms += (float)pend_upd_us / 1000.0f;
+        s->upd_n += pend_upd_n;
+        s->rnd_ms += (float)us / 1000.0f;
+    }
+    pend_upd_us = 0;
+    pend_upd_n = 0;
+}
+
 static int cmp_float(const void *a, const void *b)
 {
     float x = *(const float *)a, y = *(const float *)b;
     return x < y ? -1 : x > y;
+}
+
+/* Averages over the frames whose busy time is at least min_ms (all frames: 0). */
+static void breakdown(char *out, size_t size, const char *name, float min_ms)
+{
+    double n = 0, busy = 0, upd = 0, rnd = 0, upd_n = 0, draws = 0, reads = 0, kb = 0, read_ms = 0, allocs = 0,
+           opens = 0;
+    uint32_t hist[4] = { 0 };   /* frames with 0, 1, 2, 3+ update steps */
+    for (uint32_t i = 0; i < n_samples; i++) {
+        const Sample *s = &samples[i];
+        float b = s->frame_ms - s->wait_ms;
+        if (b < min_ms)
+            continue;
+        n++;
+        busy += b;
+        upd += s->upd_ms;
+        rnd += s->rnd_ms;
+        upd_n += s->upd_n;
+        draws += s->draws;
+        reads += s->reads;
+        kb += s->read_bytes / 1024.0;
+        read_ms += s->read_ms;
+        allocs += s->allocs;
+        opens += s->opens;
+        hist[s->upd_n < 3u ? s->upd_n : 3u]++;
+    }
+    double d = n > 0 ? n : 1.0;
+    snprintf(out, size,
+             "%s: %.0f frames | busy %.2f = update %.2f (%.2f steps) + render %.2f + other %.2f ms | "
+             "steps 0/1/2/3+: %u/%u/%u/%u | %.0f draws | %.2f opens %.2f reads %.1f KB %.2f ms | %.2f heap allocs",
+             name, n, busy / d, upd / d, upd_n / d, rnd / d, (busy - upd - rnd) / d, hist[0], hist[1], hist[2],
+             hist[3], draws / d, opens / d, reads / d, kb / d, read_ms / d, allocs / d);
+}
+
+static void write_frames(void)
+{
+    FILE *f = fopen(BENCH_FRAMES, "w");
+    if (!f)
+        return;
+    fprintf(f, "frame,busy_ms,wait_ms,update_ms,update_steps,render_ms,draw_ms,swap_ms,draws,verts,opens,reads,"
+               "read_bytes,read_ms,heap_allocs\n");
+    for (uint32_t i = 0; i < n_samples; i++) {
+        const Sample *s = &samples[i];
+        fprintf(f, "%u,%.2f,%.2f,%.2f,%u,%.2f,%.2f,%.2f,%u,%u,%u,%u,%u,%.2f,%u\n", i,
+                (double)(s->frame_ms - s->wait_ms), (double)s->wait_ms, (double)s->upd_ms, s->upd_n,
+                (double)s->rnd_ms, (double)s->draw_ms, (double)s->swap_ms, s->draws, s->verts, s->opens, s->reads,
+                s->read_bytes, (double)s->read_ms, s->allocs);
+    }
+    fclose(f);
 }
 
 static void finish(uint64_t now)
@@ -290,19 +391,26 @@ static void finish(uint64_t now)
     char line[512];
     snprintf(line, sizeof(line),
              "bench %s: %.1f s, %u frames, %.2f fps | frame ms avg %.2f p50 %.2f p95 %.2f p99 %.2f max %.2f | "
-             "busy ms avg %.2f p50 %.2f p95 %.2f (%.1f fps uncapped) | game %.2f (cap wait %.2f) draw %.2f swap %.2f ms | "
+             "busy ms avg %.2f p50 %.2f p95 %.2f p99 %.2f (%.1f fps uncapped) | game %.2f (cap wait %.2f) draw %.2f swap %.2f ms | "
              "%.0f draws %.0f gpu draws %.0f verts",
              BENCH_PLATFORM, secs, n, n / (secs > 0 ? secs : 1.0), sum_frame / dn, PCT(ft, 0.50), PCT(ft, 0.95),
-             PCT(ft, 0.99), PCT(ft, 1.0), busy, PCT(bt, 0.50), PCT(bt, 0.95), busy > 0 ? 1000.0 / busy : 0.0,
+             PCT(ft, 0.99), PCT(ft, 1.0), busy, PCT(bt, 0.50), PCT(bt, 0.95), PCT(bt, 0.99), busy > 0 ? 1000.0 / busy : 0.0,
              (sum_frame - sum_draw - sum_swap) / dn, sum_wait / dn, sum_draw / dn, sum_swap / dn, sum_draws / dn,
              sum_gpu / dn, sum_verts / dn);
 #undef PCT
     free(ft);
     free(bt);
+    char all[512], slow[512], slow_name[32];
+    breakdown(all, sizeof(all), "all frames", 0.0f);
+    snprintf(slow_name, sizeof(slow_name), "busy >= %d ms", slow_ms > 0 ? slow_ms : SLOW_DEFAULT_MS);
+    breakdown(slow, sizeof(slow), slow_name, (float)(slow_ms > 0 ? slow_ms : SLOW_DEFAULT_MS));
+    write_frames();
     rt_log("%s", line);
+    rt_log("bench %s", all);
+    rt_log("bench %s", slow);
     FILE *f = fopen(BENCH_RESULT, "w");
     if (f) {
-        fprintf(f, "%s\n", line);
+        fprintf(f, "%s\n%s\n%s\n", line, all, slow);
         fclose(f);
     } else {
         rt_log("bench: cannot write %s", BENCH_RESULT);
@@ -410,8 +518,9 @@ void bench_frame(uint64_t now, uint64_t frame_us, uint64_t draw_us, uint64_t swa
             samples = calloc(cap_samples, sizeof(Sample));
             n_samples = 0;
             mouse_acc = 0;
+            memset(&g_bench_ctr, 0, sizeof(g_bench_ctr));
 #ifdef IGI_PROFILE
-            rt_prof_reset();
+            rt_prof_reset(slow_ms > 0);
 #endif
             run_start_us = now;
             set_phase(PH_RUN, now);
@@ -432,7 +541,16 @@ void bench_frame(uint64_t now, uint64_t frame_us, uint64_t draw_us, uint64_t swa
             s->draws = draws;
             s->gpu_draws = gpu_draws;
             s->verts = verts;
+            s->opens = g_bench_ctr.file_opens;
+            s->reads = g_bench_ctr.file_reads;
+            s->read_bytes = g_bench_ctr.read_bytes;
+            s->read_ms = (float)g_bench_ctr.read_us / 1000.0f;
+            s->allocs = g_bench_ctr.heap_allocs;
+#ifdef IGI_PROFILE
+            rt_prof_frame_end(slow_ms <= 0 || s->frame_ms - s->wait_ms >= (float)slow_ms);
+#endif
         }
+        memset(&g_bench_ctr, 0, sizeof(g_bench_ctr));
         last_idle_us = g_idle_us;
         if (views > 0) {
             run_views();

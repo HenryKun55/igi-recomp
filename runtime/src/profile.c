@@ -9,7 +9,10 @@
  *   - inclusive samples per guest function (on the shadow stack),
  *   - caller/callee pairs (which guest function the current code was called from).
  * Results go to ux0:data/igi/profile.txt (Vita) or igi_profile.txt (desktop) every
- * 10 seconds and at exit. */
+ * 10 seconds and at exit.
+ *
+ * Per-frame mode (rt_prof_reset(1)): samples wait in a buffer until the game thread
+ * ends the frame (rt_prof_frame_end) and are counted only if it keeps the frame. */
 #include "runtime.h"
 
 typedef int profile_translation_unit_is_not_empty;
@@ -54,6 +57,20 @@ static Map excl, incl, pairs;
 static uint32_t total;
 static volatile int reset_requested, stopped;
 
+/* Per-frame mode: the game thread writes the frame's verdict to keep_frame[], then
+ * bumps frame_seq; the sampler commits or drops its buffer when the seq changes. */
+#define PEND_MAX 1024u
+#define PEND_DEPTH 64u
+typedef struct Pending {
+    uint32_t cur, depth;
+    uint32_t stack[PEND_DEPTH];
+} Pending;
+static Pending pend[PEND_MAX];
+static uint32_t n_pend, pend_seq, frames_kept, frames_seen;
+static volatile int per_frame, per_frame_requested;
+static volatile uint32_t frame_seq;
+static volatile uint8_t keep_frame[256];
+
 static void map_add(Map *m, uint64_t key)
 {
     uint32_t i = (uint32_t)((key * 0x9E3779B97F4A7C15ull) >> (64 - MAP_BITS));
@@ -76,15 +93,8 @@ static void map_add(Map *m, uint64_t key)
     }
 }
 
-static void sample(void)
+static void count(uint32_t cur, const uint32_t *stack, uint32_t depth)
 {
-    uint32_t cur = rt_prof_cur;
-    uint32_t depth = rt_prof_depth;
-    if (depth > RT_PROF_MAX)
-        depth = RT_PROF_MAX;
-    uint32_t stack[RT_PROF_MAX];
-    for (uint32_t i = 0; i < depth; i++)
-        stack[i] = rt_prof_stack[i];
     total++;
     map_add(&excl, cur);
     /* Each guest function on the stack counts once per sample (recursion). */
@@ -102,6 +112,42 @@ static void sample(void)
     else if (depth >= 2)
         caller = stack[depth - 2];
     map_add(&pairs, ((uint64_t)caller << 32) | cur);
+}
+
+static void sample(void)
+{
+    uint32_t cur = rt_prof_cur;
+    uint32_t depth = rt_prof_depth;
+    if (depth > RT_PROF_MAX)
+        depth = RT_PROF_MAX;
+    if (!per_frame) {
+        uint32_t stack[RT_PROF_MAX];
+        for (uint32_t i = 0; i < depth; i++)
+            stack[i] = rt_prof_stack[i];
+        count(cur, stack, depth);
+        return;
+    }
+    uint32_t seq = frame_seq;
+    __sync_synchronize();
+    while (pend_seq != seq) {
+        /* Frames ended since the last sample: the buffer belongs to the first one. */
+        frames_seen++;
+        if (keep_frame[pend_seq & 255u]) {
+            frames_kept++;
+            for (uint32_t i = 0; i < n_pend; i++)
+                count(pend[i].cur, pend[i].stack, pend[i].depth);
+        }
+        n_pend = 0;
+        pend_seq++;
+    }
+    if (n_pend >= PEND_MAX)
+        return;
+    /* The outermost frames are kept: they name the scheduler step (update or render). */
+    Pending *p = &pend[n_pend++];
+    p->cur = cur;
+    p->depth = depth < PEND_DEPTH ? depth : PEND_DEPTH;
+    for (uint32_t i = 0; i < p->depth; i++)
+        p->stack[i] = rt_prof_stack[i];
 }
 
 static const char *name_of(uint32_t id, char *buf, size_t n)
@@ -174,6 +220,8 @@ static void dump(void)
         return;
     fprintf(f, "IGI profile: %u samples (about %u ms of run time, one sample per %u us)\n", total,
             total * SAMPLE_US / 1000u, SAMPLE_US);
+    if (per_frame)
+        fprintf(f, "Per-frame mode: samples of %u of %u frames kept\n", frames_kept, frames_seen);
     dump_map(f, &excl, "Exclusive (code running when sampled; imports as dll!name, COM/callbacks as thunk):", 0);
     dump_map(f, &incl, "Inclusive (guest functions on the shadow call stack):", 0);
     dump_map(f, &pairs, "Current code <- calling guest function:", 1);
@@ -195,6 +243,10 @@ static void sampler_loop(void)
             memset(&incl, 0, sizeof(incl));
             memset(&pairs, 0, sizeof(pairs));
             total = 0;
+            n_pend = 0;
+            frames_kept = frames_seen = 0;
+            pend_seq = frame_seq;
+            per_frame = per_frame_requested;
             reset_requested = 0;
         }
         sample();
@@ -220,9 +272,18 @@ static void *sampler_thread(void *arg)
 }
 #endif
 
-void rt_prof_reset(void)
+void rt_prof_reset(int per_frame_mode)
 {
+    per_frame_requested = per_frame_mode;
     reset_requested = 1;   /* done by the sampler thread, between samples */
+}
+
+void rt_prof_frame_end(int keep)
+{
+    uint32_t seq = frame_seq;
+    keep_frame[seq & 255u] = (uint8_t)(keep != 0);
+    __sync_synchronize();
+    frame_seq = seq + 1u;
 }
 
 void rt_prof_flush(void)

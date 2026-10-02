@@ -1,5 +1,6 @@
 /* kernel32.dll: process, memory, file, time and locale APIs used by IGI.exe and its CRT. */
 #include "shim.h"
+#include "bench.h"
 
 #include <SDL.h>
 #include <ctype.h>
@@ -324,6 +325,7 @@ SHIM(kernel32, HeapAlloc)
 {
     uint32_t flags = ARG(1), size = ARG(2);
     uint32_t p = heap_alloc(size ? size : 1u);
+    g_bench_ctr.heap_allocs++;
     if (p && (flags & 0x8u))
         memset(gptr(p), 0, size);
     if (!p)
@@ -436,6 +438,7 @@ SHIM(kernel32, CreateFileA)
     }
     if (rw)
         rt_log("CreateFileA(%s, write, disp %u) -> %s", win, disp, path);
+    g_bench_ctr.file_opens++;
     uint32_t h = handle_new(H_FILE);
     handle_get(h, H_FILE)->fd = fd;
     win32_set_last_error(0);
@@ -662,6 +665,9 @@ SHIM(kernel32, ReadFile)
     static uint64_t io_us, io_bytes, io_last;
     static uint32_t io_calls;
     uint64_t t1 = win32_perf_counter();
+    g_bench_ctr.file_reads++;
+    g_bench_ctr.read_bytes += (uint32_t)got;
+    g_bench_ctr.read_us += t1 - t0;
     io_us += t1 - t0;
     io_bytes += (uint64_t)got;
     io_calls++;

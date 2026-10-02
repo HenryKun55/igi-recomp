@@ -1,6 +1,7 @@
 /* Game-specific behaviour fixes applied through entry hooks (rt_probe) that the
  * recompiler inserts into the functions listed in tools/recomp/gen.py GAME_HOOKS. */
 #include "igi_fixes.h"
+#include "bench.h"
 #include "runtime.h"
 #include "tick_rate.h"
 #include "tick_test.h"
@@ -84,14 +85,20 @@ uint64_t win32_perf_counter(void);
 static void scheduler_idle(void)
 {
     static uint64_t last_us;
-    static uint32_t last_steps, last_frame;
+    static uint32_t last_steps, last_renders, last_frame;
     uint64_t now = win32_perf_counter();
     uint32_t g = RD32(0x00567C8Cu);
     uint32_t steps = g ? RD32(g + 0x34u) : 0u;
+    uint32_t renders = g ? RD32(g + 0x38u) : 0u;
     if (last_us && steps == last_steps && g_frame_serial == last_frame)
         g_idle_us += now - last_us;
+    else if (last_us && bench_enabled())
+        /* The previous pass ran an update ([+0x34]), a render ([+0x38]) or both. */
+        bench_step((steps != last_steps ? BENCH_STEP_UPDATE : 0u) |
+                   (renders != last_renders ? BENCH_STEP_RENDER : 0u), now - last_us);
     last_us = now;
     last_steps = steps;
+    last_renders = renders;
     last_frame = g_frame_serial;
 }
 
