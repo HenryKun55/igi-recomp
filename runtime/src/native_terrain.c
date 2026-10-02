@@ -1558,7 +1558,7 @@ static __attribute__((noinline)) void fast_project(const Frame *f, FastWork *w, 
 /* Clipper vertex: sx, sy, 1/depth and the weights of the source vertices times
  * 1/depth (attributes over depth are linear on the screen). */
 typedef struct FCV {
-    float a[6];
+    float a[8];                     /* a[6], a[7]: zero (two NEON vectors) */
     uint32_t code;
 } FCV;
 
@@ -1594,8 +1594,15 @@ static inline int fcount(const FCV *v, uint32_t bit)
 /* o moves towards in: o = in + (o - in) * t. */
 static inline void flerp(FCV *o, const FCV *in, float t)
 {
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+    /* The same per-lane operations (NEON's multiply-accumulate rounds the product). */
+    float32x4_t i0 = vld1q_f32(in->a), i1 = vld1q_f32(in->a + 4);
+    vst1q_f32(o->a, vmlaq_n_f32(i0, vsubq_f32(vld1q_f32(o->a), i0), t));
+    vst1q_f32(o->a + 4, vmlaq_n_f32(i1, vsubq_f32(vld1q_f32(o->a + 4), i1), t));
+#else
     for (int m = 0; m < 6; m++)
         o->a[m] = in->a[m] + (o->a[m] - in->a[m]) * t;
+#endif
 }
 
 static void fclip_emit(FClip *cl, const FCV *v)
@@ -1643,6 +1650,8 @@ static void fnear_vertex(const FClip *cl, FCV *o, int a, int b)
     o->a[2] = r;
     for (int m = 0; m < 3; m++)
         o->a[3 + m] = R[m] * r;
+    o->a[6] = 0.0f;
+    o->a[7] = 0.0f;
     o->code = fcode(f, o->a[0], o->a[1]);
 }
 
@@ -1749,6 +1758,8 @@ static uint32_t fclip_entry(const Frame *f, FastWork *w, uint32_t word)
         v[k].a[3] = k == 0 ? q : 0.0f;
         v[k].a[4] = k == 1 ? q : 0.0f;
         v[k].a[5] = k == 2 ? q : 0.0f;
+        v[k].a[6] = 0.0f;
+        v[k].a[7] = 0.0f;
     }
     fclip_tri(&cl, v);
     return cl.ntri;
