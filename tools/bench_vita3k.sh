@@ -40,6 +40,9 @@ if pgrep -f "Vita3K -r PIGI00001" > /dev/null; then
     exit 1
 fi
 
+# The installed eboot is put back afterwards, so a playtest install isn't replaced.
+SAVED_EBOOT=${TMPDIR:-/tmp}/igi_bench_saved_eboot.$$
+cp "$APP/eboot.bin" "$SAVED_EBOOT" 2>/dev/null
 unzip -p "$BUILD/igi.vpk" eboot.bin > "$APP/eboot.bin" || exit 1
 echo "installed $BUILD/igi.vpk eboot.bin"
 rm -f "$DATA/bench_result.txt"
@@ -49,6 +52,9 @@ echo "$SECS ${SHOT:-0}" > "$DATA/bench.txt"
 stop() {
     pkill -9 -f "Vita3K -r PIGI00001" 2>/dev/null
     rm -f "$DATA/bench.txt"
+    if [ -s "$SAVED_EBOOT" ]; then
+        mv -f "$SAVED_EBOOT" "$APP/eboot.bin"
+    fi
 }
 trap 'stop; exit 1' INT TERM
 
