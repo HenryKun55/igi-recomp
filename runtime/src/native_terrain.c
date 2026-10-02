@@ -1207,9 +1207,60 @@ typedef struct FastWork {
     /* Batches of this call by material and kind (see fast_get_batch). */
     uint32_t bc_material[64], bc_kind[64], bc_batch[64];
     float lod_k[32];                /* level of detail factor by (25 - lod) & 31 */
+    uint32_t fpscr_mode;            /* the program's FPSCR mode (fpscr_enter) */
 } FastWork;
 
 static uint32_t clip_overflow;
+
+/* FPSCR while the fast version computes (32-bit ARM with NEON). NEON float
+ * arithmetic always runs with the "standard" FPSCR (flush-to-zero, default NaN,
+ * round to nearest); the scalar VFP code runs with the program's FPSCR. The fast
+ * version switches the FPSCR's mode to the standard one for its own code, which
+ * changes its scalar results only for denormal operands and NaN payloads (no
+ * terrain data produces either). On the Vita this costs nothing; in Vita3K a
+ * block whose FPSCR mode differs from the standard one writes the host FPCR
+ * twice around every NEON float instruction, which made NEON code there several
+ * times slower than its instruction count. Guest code (batch lookups that create
+ * a batch, the Direct3D calls) runs with the program's FPSCR. */
+#if defined(__arm__) && (defined(__ARM_NEON) || defined(__ARM_NEON__))
+#define FPSCR_MODE 0x07F79F00u      /* AHP, DN, FZ, RMode, Stride, FZ16, Len, trap enables */
+static inline uint32_t fpscr_get(void)
+{
+    uint32_t v;
+    __asm__ volatile("vmrs %0, fpscr" : "=r"(v) : : "memory");
+    return v;
+}
+
+static inline void fpscr_set(uint32_t v)
+{
+    __asm__ volatile("vmsr fpscr, %0" : : "r"(v) : "memory");
+}
+
+/* Switches to the standard mode (AHP and FZ16 kept, as the standard value does);
+ * returns the program's mode bits. */
+static inline uint32_t fpscr_enter(void)
+{
+    uint32_t v = fpscr_get();
+    fpscr_set((v & ~FPSCR_MODE) | (v & 0x04080000u) | 0x03000000u);
+    return v & FPSCR_MODE;
+}
+
+/* Back to the program's mode bits (the cumulative flags are kept). */
+static inline void fpscr_leave(uint32_t mode)
+{
+    fpscr_set((fpscr_get() & ~FPSCR_MODE) | mode);
+}
+#else
+static inline uint32_t fpscr_enter(void)
+{
+    return 0;
+}
+
+static inline void fpscr_leave(uint32_t mode)
+{
+    (void)mode;
+}
+#endif
 
 /* get_batch through a cache: 0x514680 finds the batch of a material and kind
  * in its hash chains or creates it; a batch, once there, stays until
@@ -1221,7 +1272,9 @@ static inline uint32_t fast_get_batch(const Frame *f, FastWork *w, uint32_t mate
     uint32_t h = ((material >> 4) ^ (material >> 10) ^ (kind * 23u)) & 63u;
     if (w->bc_batch[h] && w->bc_material[h] == material && w->bc_kind[h] == kind)
         return w->bc_batch[h];
+    fpscr_leave(w->fpscr_mode);
     uint32_t b = get_batch(f, material, kind);
+    fpscr_enter();
     w->bc_material[h] = material;
     w->bc_kind[h] = kind;
     w->bc_batch[h] = b;
@@ -2313,11 +2366,13 @@ int rt_native_terrain_render(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, u
         memset(fwork.bc_batch, 0, sizeof(fwork.bc_batch));
         for (uint32_t k = 0; k < 32; k++)
             fwork.lod_k[k] = (float)(0.375 / (double)(int32_t)(1u << k));
+        fwork.fpscr_mode = fpscr_enter();
         for (int32_t i = 0; i < npatch; i++) {
             uint32_t patch = RD32(G_PATCH_LIST + 4u * (uint32_t)i);
             if (patch)
                 fast_patch(&f, &fwork, patch);
         }
+        fpscr_leave(fwork.fpscr_mode);
     }
 
     flush_batches(&f);
