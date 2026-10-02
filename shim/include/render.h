@@ -50,6 +50,10 @@ void render_state_changing(void);
 /* Bumped with g_rs_serial when an input of the fixed-function lighting changes
  * (lights, material, view matrix, ambient/color material/normalize states). */
 extern uint32_t g_light_serial;
+/* Parts of g_rs changed since the pack thread's last state snapshot (set with
+ * every g_rs_serial bump; material and lights are sent on their own). */
+extern uint32_t g_rs_parts;
+enum { RS_PART_WORLD = 1, RS_PART_XF = 2, RS_PART_RS = 4, RS_PART_STAGE = 8 };
 /* Presented frames so far. */
 extern uint32_t g_frame_serial;
 
@@ -94,5 +98,34 @@ int render_draw_vb(void **slot, uint32_t gen, const RVertex *all, uint32_t count
                    int ntex);
 void render_vb_release(void **slot);
 void render_clear(uint32_t nrects, const Rect *rects, uint32_t flags, uint32_t color, float z);
+
+/* ---- pack thread ------------------------------------------------------------
+ * With the render thread on, the game thread only records each draw: copies of
+ * the game's vertex and index bytes the draw reads (or a reference to an
+ * immutable decoded copy of an unchanged vertex buffer) and, when the state
+ * changed, a snapshot of it. The render thread then runs the whole draw front end
+ * (index scan and rebasing, decoding, rhw and near-plane tests, clipping, batching
+ * and packing into GPU memory) before the GL calls. pack_thread=0 in igi.cfg or
+ * IGI_PACK_THREAD=0 keeps that work on the game thread. */
+extern int g_pack_thread;   /* decided by render_init; never changes afterwards */
+/* Game thread, before recording a draw: sends the state snapshot (and texture
+ * uploads, lighting) the draw needs unless the render thread has it already. */
+void render_pk_prepare(int pretransformed, int has_normal);
+/* Game thread: a draw was recorded (statistics, and render_flush has work to end). */
+void render_pk_recorded(void);
+/* Render thread, at the start of a recorded draw: the diagnostic mode and trace
+ * flag the game thread had when recording it. */
+void render_pk_draw_begin(int diag, int trace);
+int render_diag_mode(void);
+/* From render_queue.h (which needs the GL headers). */
+void rq_exec(void (*fn)(const void *args), const void *args, size_t size);
+void *rq_begin(void (*fn)(const void *args), size_t size);
+void rq_end(void);
+void *rq_data(size_t n);
+uint64_t rq_mark(void);
+int rq_passed(uint64_t mark);
+void rq_sync(void);
+/* Game thread: the diagnostic mode that decodes whole index ranges is on. */
+int render_pk_no_compact(void);
 
 #endif

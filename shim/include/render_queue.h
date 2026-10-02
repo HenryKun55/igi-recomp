@@ -35,6 +35,10 @@ void rq_start(void);
 uint64_t rq_swap_end_frame(void);
 /* Waits until the render thread has executed everything recorded so far. */
 void rq_sync(void);
+/* The commands recorded so far; rq_passed(mark): all of them have been executed
+ * (and memory they read may be reused). */
+uint64_t rq_mark(void);
+int rq_passed(uint64_t mark);
 /* Drains the stream and stops the render thread (GL calls are direct afterwards). */
 void rq_shutdown(void);
 /* Render thread busy time since the last call, in microseconds. */

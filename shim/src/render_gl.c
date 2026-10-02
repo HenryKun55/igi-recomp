@@ -7,6 +7,7 @@
 #include "igi_fixes.h"
 #include "render.h"
 
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,6 +30,7 @@
 
 RenderState g_rs;
 uint32_t g_rs_serial;
+uint32_t g_rs_parts;
 uint32_t g_light_serial;
 uint32_t g_frame_serial;
 static uint32_t perf_gpu_draws;   /* draws actually submitted to GL this frame */
@@ -61,6 +63,13 @@ static uint64_t fine_now(void)
     return fine_timing ? win32_perf_counter() : 0u;
 }
 
+/* Same for the draw front end: never on the render thread (the pack thread), whose
+ * clock queries would change the game's (IGI_FAKE_CLOCK advances per query). */
+static uint64_t fine_now_fe(void)
+{
+    return g_pack_thread ? 0u : fine_now();
+}
+
 /* Per-frame render counters, averaged over one second and shown by the overlay
  * (see perf_overlay_draw for the on-screen labels). */
 enum {
@@ -82,6 +91,90 @@ enum {
 static uint64_t pc_frame[PC_COUNT];
 
 static int diag_mode;
+
+/* ---- pack thread (render.h) -------------------------------------------------
+ * The draw front end below (batching, packing, near-plane clipping) runs on the
+ * game thread, or with g_pack_thread on the render thread only. There it never
+ * reads g_rs: the game thread sends a snapshot of the state (PkState) whenever
+ * a draw needs a different one, and the front end reads it through the cur_*
+ * accessors. */
+int g_pack_thread;
+
+/* What the vertex layout of a draw depends on besides its vertex format. */
+typedef struct LayoutIn {
+    int stages;                       /* active_stages() */
+    uint32_t tci[MAX_STAGES];         /* texture coordinate index of each stage */
+    uint32_t fog, fogtable, fogvertex;
+} LayoutIn;
+
+typedef struct PkState {
+    uint32_t serial;                  /* g_rs_serial when taken */
+    LayoutIn li;
+    DrawCmd d;                        /* the render state part (from zenable on) */
+} PkState;
+
+/* Render thread (pack thread on). */
+static PkState rs_cur;                /* state of the draws being executed */
+static int rs_cur_used;               /* a draw went to GL with rs_cur */
+static int rs_diag, rs_trace;         /* of the draw being executed */
+static uint32_t rs_frame;             /* frames ended so far */
+static uint64_t rs_pc[PC_COUNT];      /* counters of the frame being executed */
+static uint32_t rs_gpu_draws;
+/* Published at the end of each executed frame, collected by the game thread. */
+static _Atomic uint32_t rs_pub_gpu_draws, rs_pub_verts, rs_pub_indices, rs_pub_pack_us;
+
+static int batch_enabled = -1;      /* IGI_BATCH=0: no draw batching */
+
+/* Game thread (pack thread on). */
+static int pk_pending;                /* draws recorded since the last flush command */
+static int pk_snap_valid;             /* the render thread has the state for g_rs_serial */
+static uint32_t pk_snap_serial;
+
+static int cur_diag(void)
+{
+    return g_pack_thread ? rs_diag : diag_mode;
+}
+
+static int cur_trace(void)
+{
+    return g_pack_thread ? rs_trace : g_trace_next_frame == 2;
+}
+
+static uint32_t cur_serial(void)
+{
+    return g_pack_thread ? rs_cur.serial : g_rs_serial;
+}
+
+/* Per-frame counters the front end adds to (the render thread has its own). */
+#define PCR (g_pack_thread ? rs_pc : pc_frame)
+
+/* The sampling profiler's section markers belong to the game thread: the front
+ * end only sets them when it runs there. */
+#if defined(IGI_PROFILE)
+#define PROF_RS(id)                          \
+    const uint32_t prof_hprev = rt_prof_cur; \
+    if (!g_pack_thread)                      \
+    rt_prof_cur = (id)
+#define PROF_RS_END                  \
+    do {                             \
+        if (!g_pack_thread)          \
+            rt_prof_cur = prof_hprev; \
+    } while (0)
+#else
+#define PROF_RS(id) ((void)0)
+#define PROF_RS_END ((void)0)
+#endif
+
+int render_diag_mode(void)
+{
+    return diag_mode;
+}
+
+void render_pk_draw_begin(int diag, int trace)
+{
+    rs_diag = diag;
+    rs_trace = trace;
+}
 
 /* 4x4 matrix product (as the backend computes it), for the near-plane tests and traces. */
 static void mat_mul(const float *a, const float *b, float *out)
@@ -116,6 +209,11 @@ int render_diag_no_vb_cache(void)
 }
 
 int render_diag_no_compact(void)
+{
+    return cur_diag() == DIAG_NO_COMPACT;
+}
+
+int render_pk_no_compact(void)
 {
     return diag_mode == DIAG_NO_COMPACT;
 }
@@ -247,9 +345,50 @@ extern uint32_t vgl_prof_base __attribute__((weak));
 static volatile uint32_t render_thread_prof;
 #endif
 
+/* The pack thread is on with the render thread unless pack_thread=0 (igi.cfg) or
+ * IGI_PACK_THREAD=0. */
+static int want_pack_thread(void)
+{
+    int on = 1;
+    const char *e = getenv("IGI_PACK_THREAD");
+    if (e)
+        on = e[0] != '0';
+#if defined(__vita__)
+    FILE *f = fopen("ux0:data/igi/igi.cfg", "r");
+    if (f) {
+        char buf[128];
+        while (fgets(buf, sizeof(buf), f))
+            if (strncmp(buf, "pack_thread=", 12) == 0)
+                on = buf[12] != '0';
+        fclose(f);
+    }
+#endif
+    return on;
+}
+
+#if defined(__vita__)
+static int arena_ready(void);
+#endif
+
 void render_init(int w, int h)
 {
+    render_flush();
     rq_start();
+    static int pack_decided;
+    if (!pack_decided) {
+        pack_decided = 1;
+        g_pack_thread = rq_on && want_pack_thread();
+        rt_log("pack thread: %s", g_pack_thread ? "on" : "off");
+        const char *e = getenv("IGI_BATCH");
+        batch_enabled = !(e && e[0] == '0');
+#if defined(__vita__)
+        /* The render thread only rotates the arena: its GPU memory and buffer
+         * names come from here. */
+        if (g_pack_thread)
+            arena_ready();
+#endif
+    }
+    pk_snap_valid = 0;
 #if defined(__vita__) && defined(IGI_PROFILE)
     if (&vgl_prof_slot && &vgl_prof_base) {
         vgl_prof_base = PROF_H_VGL;
@@ -378,9 +517,13 @@ static void maybe_screenshot(void)
     free(px);
 }
 
+static void pk_frame_cmd(const void *unused);
+
 void render_present(void)
 {
     render_flush();
+    if (g_pack_thread)
+        rq_exec(pk_frame_cmd, NULL, 0);
     g_frame_serial++;
     /* IGI_TRACE_EVERY=N: trace (log every draw + save the image of) every Nth frame. */
     static int trace_every = -1;
@@ -629,6 +772,11 @@ static void hash_store(Surface *m, uint64_t h)
 
 void render_texture_release(Surface *s)
 {
+    if (g_pack_thread && s->gl_tex) {
+        /* Recorded draws still to be drawn may use it. */
+        render_flush();
+        pk_snap_valid = 0;
+    }
     if (s->gl_tex) {
         GLuint t = s->gl_tex;
         glDeleteTextures(1, &t);
@@ -695,6 +843,12 @@ static uint32_t texture_get(Surface *s)
         return s->gl_tex;
     }
 
+    if (g_pack_thread) {
+        /* Recorded draws still to be drawn may use the old pixels, and the
+         * state snapshot holds the sampler state this upload resets. */
+        render_flush();
+        pk_snap_valid = 0;
+    }
     if (!s->gl_tex) {
         GLuint t;
         glGenTextures(1, &t);
@@ -899,6 +1053,7 @@ static void stages_for_draw(DrawStage *out)
         /* A stage without a texture passes the previous result through, as in D3D. */
         if (st->colorop == 1u || (i > 0 && active < i) || !st->texture) {
             ds->tex = 0;
+            ds->sampler = 0;
             continue;
         }
         active++;
@@ -956,8 +1111,24 @@ static int active_stages(void)
     return active;
 }
 
+static void layout_in_current(LayoutIn *li)
+{
+    li->stages = active_stages();
+    for (int s = 0; s < MAX_STAGES; s++)
+        li->tci[s] = g_rs.stage[s].texcoordindex;
+    li->fog = g_rs.rs[28];
+    li->fogtable = g_rs.rs[35];
+    li->fogvertex = g_rs.rs[140];
+}
+
 static void layout_init(Layout *L, int pretransformed, int has_normal, int has_color, int has_spec, int ntex)
 {
+    LayoutIn cur;
+    const LayoutIn *li = &rs_cur.li;
+    if (!g_pack_thread) {
+        layout_in_current(&cur);
+        li = &cur;
+    }
     L->pretransformed = pretransformed;
     L->has_normal = has_normal;
     L->has_color = has_color;
@@ -966,11 +1137,11 @@ static void layout_init(Layout *L, int pretransformed, int has_normal, int has_c
     L->pos_size = pretransformed ? 4 : 3;
     L->use_color = has_color || pretransformed;
 #if !defined(__vita__)
-    L->use_fog = g_rs.rs[28] && (pretransformed || (!g_rs.rs[35] && !g_rs.rs[140])) && has_spec;
+    L->use_fog = li->fog && (pretransformed || (!li->fogtable && !li->fogvertex)) && has_spec;
 #else
     L->use_fog = 0;
 #endif
-    L->stages = active_stages();
+    L->stages = li->stages;
     uint32_t o = (uint32_t)L->pos_size * 4u;
     L->off_col = o;
     o += L->use_color ? 4u : 0u;
@@ -980,7 +1151,7 @@ static void layout_init(Layout *L, int pretransformed, int has_normal, int has_c
     o += L->use_fog ? 4u : 0u;
     for (int s = 0; s < MAX_STAGES; s++) {
         L->uv_src[s] = -1;
-        uint32_t ci = g_rs.stage[s].texcoordindex & 0xFFFFu;
+        uint32_t ci = li->tci[s] & 0xFFFFu;
         if (s < L->stages && (int)ci < ntex)
             L->uv_src[s] = ci < MAX_STAGES ? (int)ci : 0;
         L->off_uv[s] = o;
@@ -1002,6 +1173,13 @@ static int vtx_gpu;           /* vtx and idx_out are in the GPU arena */
 static uint8_t *heap_vtx;
 static uint16_t *heap_idx;
 static size_t heap_vtx_bytes, heap_idx_count;
+
+/* Client arrays must outlive the draw call: the front end records for the render
+ * thread (not with the pack thread, which runs the front end there). */
+static int streams_recorded(void)
+{
+    return rq_on && !g_pack_thread;
+}
 
 #if defined(__vita__)
 /* GPU-mapped arena, one segment per frame in flight rotated with vitaGL's frame
@@ -1025,6 +1203,8 @@ static uint32_t arena_segs(void)
 
 static uint32_t arena_frame_number(void)
 {
+    if (g_pack_thread)
+        return rs_frame;   /* the render thread writes the arena while it draws */
     return rq_on ? g_frame_serial : vglGetFrameNumber();
 }
 
@@ -1085,7 +1265,7 @@ static void stream_begin(const Layout *L, uint32_t nv, uint32_t ni)
 #endif
     uint32_t vn = nv > BATCH_MAX_V ? nv : BATCH_MAX_V;
     uint32_t in = ni > BATCH_MAX_I ? ni : BATCH_MAX_I;
-    if (rq_on) {
+    if (streams_recorded()) {
         /* Client arrays are read when the render thread draws: frame memory. */
         vtx = rq_vtx_reserve((size_t)vn * L->stride);
     } else if ((size_t)vn * L->stride > heap_vtx_bytes) {
@@ -1093,7 +1273,7 @@ static void stream_begin(const Layout *L, uint32_t nv, uint32_t ni)
         free(heap_vtx);
         heap_vtx = malloc(heap_vtx_bytes);
     }
-    if (!rq_on)
+    if (!streams_recorded())
         vtx = heap_vtx;
     if (in > heap_idx_count) {
         heap_idx_count = in;
@@ -1117,7 +1297,7 @@ static void stream_end(const Layout *L, uint32_t nv, uint32_t ni)
 #else
     (void)ni;
 #endif
-    if (!vtx_gpu && rq_on)
+    if (!vtx_gpu && streams_recorded())
         rq_vtx_commit((size_t)nv * L->stride);
     vtx_gpu = 0;
 }
@@ -1125,8 +1305,8 @@ static void stream_end(const Layout *L, uint32_t nv, uint32_t ni)
 /* Writes nv vertices at array position `base`. */
 static void pack_vertices(const Layout *L, const RVertex *v, uint32_t nv, uint32_t base)
 {
-    PROF_SECTION(PROF_H_PACK);
-    uint64_t t0 = fine_now();
+    PROF_RS(PROF_H_PACK);
+    uint64_t t0 = g_pack_thread ? 0u : fine_now();
     const uint32_t st = L->stride;
     uint8_t *d0 = vtx + (size_t)base * st;
     uint8_t *d = d0;
@@ -1177,8 +1357,9 @@ static void pack_vertices(const Layout *L, const RVertex *v, uint32_t nv, uint32
             uv[1] = v[i].uv[k][1];
         }
     }
-    pc_frame[PC_PACK_US] += fine_now() - t0;
-    PROF_SECTION_END;
+    if (!g_pack_thread)
+        pc_frame[PC_PACK_US] += fine_now() - t0;
+    PROF_RS_END;
 }
 
 static void submit_arrays(int prim, const Layout *L, uint32_t nv, const uint16_t *idx, uint32_t ni,
@@ -1213,10 +1394,77 @@ static void submit(int prim, const Layout *L, uint32_t nv, const uint16_t *idx, 
     stream_end(L, nv, idx == idx_out ? ni : 0u);
 }
 
+/* The render state part of a draw command (transforms too unless pre-transformed). */
+static void fill_state(DrawCmd *d, const DrawStage *stages, int with_transforms)
+{
+    const uint32_t *rs = g_rs.rs;
+    d->zenable = rs[7];
+    d->fillmode = rs[8];
+    d->shademode = rs[9];
+    d->zwrite = rs[14];
+    d->alphatest = rs[15];
+    d->srcblend = rs[19];
+    d->destblend = rs[20];
+    d->cullmode = rs[22];
+    d->zfunc = rs[23];
+    d->alpharef = rs[24];
+    d->alphafunc = rs[25];
+    d->blend = rs[27];
+    d->fog = rs[28];
+    d->fogcolor = rs[34];
+    d->fogtablemode = rs[35];
+    d->fogstart = rs[36];
+    d->fogend = rs[37];
+    d->fogdensity = rs[38];
+    d->colorkey = rs[41];
+    d->tfactor = rs[60];
+    d->lighting = rs[137];
+    d->fogvertexmode = rs[140];
+    d->stage[0] = stages[0];
+    d->stage[1] = stages[1];
+    if (with_transforms) {
+        d->vp_x = g_rs.vp_x;
+        d->vp_y = g_rs.vp_y;
+        d->vp_w = g_rs.vp_w;
+        d->vp_h = g_rs.vp_h;
+        d->vp_minz = g_rs.vp_minz;
+        d->vp_maxz = g_rs.vp_maxz;
+        memcpy(d->world, g_rs.world, sizeof(d->world));
+        memcpy(d->view, g_rs.view, sizeof(d->view));
+        memcpy(d->proj, g_rs.proj, sizeof(d->proj));
+    }
+}
+
+/* Render thread: one draw with the snapshot's state, straight to the backend. */
+static void submit_arrays_rs(int prim, const Layout *L, uint32_t nv, const uint16_t *idx, uint32_t ni,
+                             const DrawArrays *A)
+{
+    rs_gpu_draws++;
+    PROF_RS(PROF_H_STATE);
+    DrawCmd *d = &rs_cur.d;
+    d->prim = prim;
+    d->nv = nv;
+    d->ni = ni;
+    d->idx = idx;   /* client indices are read during the call */
+    d->L = *L;
+    d->A = *A;
+    bk_draw(d);
+    /* Sampler state goes with the first draw after the texture's settings changed. */
+    d->stage[0].sampler = d->stage[1].sampler = 0;
+    rs_cur_used = 1;
+    rs_pc[PC_VERTS] += nv;
+    rs_pc[PC_INDICES] += idx || A->ibo ? ni : 0u;
+    PROF_RS_END;
+}
+
 /* Sends one draw to the backend with the state it needs. */
 static void submit_arrays(int prim, const Layout *L, uint32_t nv, const uint16_t *idx, uint32_t ni,
                           const DrawArrays *A)
 {
+    if (g_pack_thread) {
+        submit_arrays_rs(prim, L, nv, idx, ni, A);
+        return;
+    }
     perf_gpu_draws++;
     PROF_SECTION(PROF_H_STATE);
     uint64_t t0 = fine_now();
@@ -1242,41 +1490,7 @@ static void submit_arrays(int prim, const Layout *L, uint32_t nv, const uint16_t
     d->idx = idx;
     d->L = *L;
     d->A = *A;
-    d->zenable = rs[7];
-    d->fillmode = rs[8];
-    d->shademode = rs[9];
-    d->zwrite = rs[14];
-    d->alphatest = rs[15];
-    d->srcblend = rs[19];
-    d->destblend = rs[20];
-    d->cullmode = rs[22];
-    d->zfunc = rs[23];
-    d->alpharef = rs[24];
-    d->alphafunc = rs[25];
-    d->blend = rs[27];
-    d->fog = rs[28];
-    d->fogcolor = rs[34];
-    d->fogtablemode = rs[35];
-    d->fogstart = rs[36];
-    d->fogend = rs[37];
-    d->fogdensity = rs[38];
-    d->colorkey = rs[41];
-    d->tfactor = rs[60];
-    d->lighting = rs[137];
-    d->fogvertexmode = rs[140];
-    d->stage[0] = stages[0];
-    d->stage[1] = stages[1];
-    if (!pretransformed) {
-        d->vp_x = g_rs.vp_x;
-        d->vp_y = g_rs.vp_y;
-        d->vp_w = g_rs.vp_w;
-        d->vp_h = g_rs.vp_h;
-        d->vp_minz = g_rs.vp_minz;
-        d->vp_maxz = g_rs.vp_maxz;
-        memcpy(d->world, g_rs.world, sizeof(d->world));
-        memcpy(d->view, g_rs.view, sizeof(d->view));
-        memcpy(d->proj, g_rs.proj, sizeof(d->proj));
-    }
+    fill_state(d, stages, !pretransformed);
     uint64_t t1 = fine_now();
     pc_frame[PC_STATE_US] += (t1 - t0) - (pc_frame[PC_TEX_US] - tex_before);
     rq_end();
@@ -1295,6 +1509,21 @@ static void trace_draw(int prim, const RVertex *v, uint32_t nv, uint32_t ni, int
         y0 = v[i].y < y0 ? v[i].y : y0;
         x1 = v[i].x > x1 ? v[i].x : x1;
         y1 = v[i].y > y1 ? v[i].y : y1;
+    }
+    if (g_pack_thread) {
+        /* On the render thread: the state snapshot (texture names, not surfaces). */
+        const DrawCmd *d = &rs_cur.d;
+        rt_log("draw prim %d nv %u ni %u tl %d n %d c %d s %d t %d box %.1f,%.1f-%.1f,%.1f col0 %08X | z %u/%u "
+               "blend %u %u/%u atest %u %u/%u ck %u fog %u light %u cull %u | s0 c%u(%X,%X) a%u(%X,%X) tex %u "
+               "| s1 c%u a%u tex %u tf %08X | vp %d,%d %dx%d world %.1f %.1f %.1f",
+               prim, nv, ni, pretransformed, has_normal, has_color, has_spec, ntex, (double)x0, (double)y0,
+               (double)x1, (double)y1, v[0].color, d->zenable, d->zwrite, d->blend, d->srcblend, d->destblend,
+               d->alphatest, d->alphafunc, d->alpharef, d->colorkey, d->fog, d->lighting, d->cullmode,
+               d->stage[0].colorop, d->stage[0].colorarg1, d->stage[0].colorarg2, d->stage[0].alphaop,
+               d->stage[0].alphaarg1, d->stage[0].alphaarg2, d->stage[0].tex, d->stage[1].colorop,
+               d->stage[1].alphaop, d->stage[1].tex, d->tfactor, d->vp_x, d->vp_y, d->vp_w, d->vp_h,
+               (double)d->world[12], (double)d->world[13], (double)d->world[14]);
+        return;
     }
     const StageState *s0 = &g_rs.stage[0], *s1 = &g_rs.stage[1];
     rt_log("draw prim %d nv %u ni %u tl %d n %d c %d s %d t %d box %.1f,%.1f-%.1f,%.1f col0 %08X | z %u/%u "
@@ -1351,7 +1580,7 @@ static void draw_now(int prim, const RVertex *v, uint32_t nv, const uint16_t *id
 {
     if (!nv)
         return;
-    if (g_trace_next_frame == 2)
+    if (cur_trace())
         trace_draw(prim, v, nv, ni, pretransformed, has_normal, has_color, has_spec, ntex);
     Layout L;
     layout_init(&L, pretransformed, has_normal, has_color, has_spec, ntex);
@@ -1395,7 +1624,6 @@ static uint32_t batch_nv, batch_ni;
 static uint32_t batch_serial;
 static Layout batch_layout;
 static int batch_active;
-static int batch_enabled = -1;
 
 /* ---- on-screen performance overlay ----------------------------------------
  * Per-frame averages over one second: total frame time, time spent submitting
@@ -1431,15 +1659,19 @@ static void flush_batch(void)
 
 void render_state_changing(void)
 {
-    render_flush();
+    /* With the pack thread, recorded draws carry their state: the render thread
+     * ends its batch when a draw comes with a new state snapshot. */
+    if (!g_pack_thread)
+        render_flush();
     g_rs_serial++;
 }
 
-void render_flush(void)
+/* Draws the batch of the front end (on the thread running it). */
+static void flush_local(void)
 {
     if (!batch_active)
         return;
-    if (in_render_draw) {
+    if (in_render_draw || g_pack_thread) {
         flush_batch();
         return;
     }
@@ -1447,6 +1679,25 @@ void render_flush(void)
     uint64_t t0 = fine_now();
     flush_batch();
     perf.draw_us += fine_now() - t0;
+}
+
+static void pk_flush_cmd(const void *unused)
+{
+    (void)unused;
+    flush_local();
+}
+
+void render_flush(void)
+{
+    if (!g_pack_thread) {
+        flush_local();
+        return;
+    }
+    /* Whatever is recorded next goes after the draws recorded so far. */
+    if (pk_pending) {
+        pk_pending = 0;
+        rq_exec(pk_flush_cmd, NULL, 0);
+    }
 }
 
 /* ---- near-plane clipping ---------------------------------------------------
@@ -1467,8 +1718,13 @@ static const float *clip_z_column(void)
     static float c[4];
     static uint32_t serial;
     static int valid;
-    if (!valid || serial != g_rs_serial) {
+    if (!valid || serial != cur_serial()) {
         const float *w = g_rs.world, *v = g_rs.view, *p = g_rs.proj;
+        if (g_pack_thread) {
+            w = rs_cur.d.world;
+            v = rs_cur.d.view;
+            p = rs_cur.d.proj;
+        }
         for (int i = 0; i < 4; i++) {
             float wv[4];
             for (int j = 0; j < 4; j++)
@@ -1476,7 +1732,7 @@ static const float *clip_z_column(void)
                         w[i * 4 + 3] * v[3 * 4 + j];
             c[i] = wv[0] * p[0 * 4 + 2] + wv[1] * p[1 * 4 + 2] + wv[2] * p[2 * 4 + 2] + wv[3] * p[3 * 4 + 2];
         }
-        serial = g_rs_serial;
+        serial = cur_serial();
         valid = 1;
     }
     return c;
@@ -1514,9 +1770,9 @@ static int near_clip_impl(int prim, const RVertex *v, uint32_t nv, const uint16_
 static int near_clip(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, uint32_t ni, RVertex **out_v,
                      uint32_t *nnew, const uint32_t **out_idx, uint32_t *nidx)
 {
-    PROF_SECTION(PROF_H_NEARCLIP);
+    PROF_RS(PROF_H_NEARCLIP);
     int r = near_clip_impl(prim, v, nv, idx, ni, out_v, nnew, out_idx, nidx);
-    PROF_SECTION_END;
+    PROF_RS_END;
     return r;
 }
 
@@ -1672,9 +1928,9 @@ static void append_indices(int prim, const uint16_t *idx, uint32_t tris, uint32_
 static void batch_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, uint32_t ni,
                        int pretransformed, int has_normal, int has_color, int has_spec, int ntex)
 {
-    PROF_SECTION(PROF_H_BATCH);
+    PROF_RS(PROF_H_BATCH);
     batch_draw_impl(prim, v, nv, idx, ni, pretransformed, has_normal, has_color, has_spec, ntex);
-    PROF_SECTION_END;
+    PROF_RS_END;
 }
 
 static void batch_draw_impl(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, uint32_t ni,
@@ -1684,7 +1940,7 @@ static void batch_draw_impl(int prim, const RVertex *v, uint32_t nv, const uint1
         return;
     if (pretransformed && rhw_invisible(prim, v, nv))
         return;
-    if ((diag_mode == DIAG_NO_SCREEN && pretransformed) || (diag_mode == DIAG_NO_3D && !pretransformed))
+    if ((cur_diag() == DIAG_NO_SCREEN && pretransformed) || (cur_diag() == DIAG_NO_3D && !pretransformed))
         return;
     if (batch_enabled < 0) {
         const char *e = getenv("IGI_BATCH");
@@ -1694,7 +1950,7 @@ static void batch_draw_impl(int prim, const RVertex *v, uint32_t nv, const uint1
     const RVertex *ex = NULL;
     uint32_t nex = 0;
 #if defined(__vita__)
-    if (!pretransformed && diag_mode != DIAG_NO_NEARCLIP && !bounds_in_front() &&
+    if (!pretransformed && cur_diag() != DIAG_NO_NEARCLIP && !bounds_in_front() &&
         (prim == PRIM_TRIANGLES || prim == PRIM_TRIANGLE_STRIP || prim == PRIM_TRIANGLE_FAN)) {
         RVertex *cv;
         const uint32_t *ci;
@@ -1702,8 +1958,8 @@ static void batch_draw_impl(int prim, const RVertex *v, uint32_t nv, const uint1
         if (near_clip(prim, v, nv, idx, ni, &cv, &cn, &ci, &cni)) {
             if (!cni)
                 return;
-            if (batch_enabled && diag_mode != DIAG_NO_BATCH && nv + cn <= BATCH_MAX_V && cni <= BATCH_MAX_I &&
-                g_trace_next_frame != 2) {
+            if (batch_enabled && cur_diag() != DIAG_NO_BATCH && nv + cn <= BATCH_MAX_V && cni <= BATCH_MAX_I &&
+                !cur_trace()) {
                 /* Indexed: the draw's vertices plus the new ones. */
                 static uint16_t *ci16;
                 static uint32_t ci16_cap;
@@ -1737,11 +1993,11 @@ static void batch_draw_impl(int prim, const RVertex *v, uint32_t nv, const uint1
     }
 #endif
     uint32_t n = idx ? ni : nv;
-    int batchable = batch_enabled && diag_mode != DIAG_NO_BATCH &&
+    int batchable = batch_enabled && cur_diag() != DIAG_NO_BATCH &&
                     (prim == PRIM_TRIANGLES || prim == PRIM_TRIANGLE_STRIP || prim == PRIM_TRIANGLE_FAN);
     uint32_t tris = prim == PRIM_TRIANGLES ? n / 3u : (n >= 3u ? n - 2u : 0u);
-    if (!nex && (!batchable || nv > BATCH_MAX_V || tris * 3u > BATCH_MAX_I || g_trace_next_frame == 2)) {
-        render_flush();
+    if (!nex && (!batchable || nv > BATCH_MAX_V || tris * 3u > BATCH_MAX_I || cur_trace())) {
+        flush_local();
         draw_now(prim, v, nv, idx, ni, pretransformed, has_normal, has_color, has_spec, ntex);
         return;
     }
@@ -1751,11 +2007,11 @@ static void batch_draw_impl(int prim, const RVertex *v, uint32_t nv, const uint1
     if (batch_active &&
         (batch_nv + nv + nex > vtx_cap || batch_ni + tris * 3u > idx_cap || bl->pretransformed != pretransformed ||
          bl->has_normal != has_normal || bl->has_color != has_color || bl->has_spec != has_spec || bl->ntex != ntex ||
-         g_rs_serial != batch_serial))
-        render_flush();
+         cur_serial() != batch_serial))
+        flush_local();
     if (!batch_active) {
         batch_active = 1;
-        batch_serial = g_rs_serial;
+        batch_serial = cur_serial();
         layout_init(&batch_layout, pretransformed, has_normal, has_color, has_spec, ntex);
         stream_begin(&batch_layout, nv + nex, tris * 3u);
         batch_nv = batch_ni = 0;
@@ -1854,7 +2110,7 @@ static VBGL *vb_upload(void **slot, uint32_t gen, const RVertex *v, uint32_t cou
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)o, data, GL_STATIC_DRAW);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     free(data);
-    pc_frame[PC_TEX_BYTES] += o;
+    PCR[PC_TEX_BYTES] += o;
     return g;
 }
 
@@ -1877,23 +2133,24 @@ int render_draw_vb(void **slot, uint32_t gen, const RVertex *all, uint32_t count
                    int ntex)
 {
     /* Off by default: unbatched buffer-object draws raised the GPU draw count
-     * and cost more in vitaGL than the packing they saved (diagnostic mode 13). */
-    if (diag_mode != DIAG_VBO || diag_mode == DIAG_ZERO_UV || diag_mode == DIAG_NO_3D ||
-        diag_mode == DIAG_NO_COMPACT || g_trace_next_frame == 2 || !nv || start + nv > count)
+     * and cost more in vitaGL than the packing they saved (diagnostic mode 13).
+     * Not with the pack thread (the game thread would draw past its batches). */
+    if (g_pack_thread || cur_diag() != DIAG_VBO || cur_diag() == DIAG_ZERO_UV || cur_diag() == DIAG_NO_3D ||
+        cur_diag() == DIAG_NO_COMPACT || cur_trace() || !nv || start + nv > count)
         return 0;
     if (prim != PRIM_TRIANGLES && prim != PRIM_TRIANGLE_STRIP && prim != PRIM_TRIANGLE_FAN)
         return 0;
     if (in_render_draw)
         return 0;
-    PROF_SECTION(PROF_H_TEXTURE);
+    PROF_RS(PROF_H_TEXTURE);
     VBGL *g = vb_upload(slot, gen, all, count, has_normal, has_color, has_spec, ntex);
-    PROF_SECTION_END;
+    PROF_RS_END;
 #if defined(__vita__)
-    if (diag_mode != DIAG_NO_NEARCLIP && !vb_in_front(g))
+    if (cur_diag() != DIAG_NO_NEARCLIP && !vb_in_front(g))
         return 0;
 #endif
-    render_flush();
-    uint64_t t0 = fine_now();
+    flush_local();
+    uint64_t t0 = fine_now_fe();
     perf.draws++;
     Layout L;
     layout_init(&L, 0, has_normal, has_color, has_spec, ntex);
@@ -1921,7 +2178,7 @@ int render_draw_vb(void **slot, uint32_t gen, const RVertex *all, uint32_t count
         ip = ib;
     }
     submit_arrays(prim, &L, nv, ip, ni, &A);
-    perf.draw_us += fine_now() - t0;
+    perf.draw_us += fine_now_fe() - t0;
     return 1;
 }
 
@@ -1935,7 +2192,7 @@ static uint32_t d3dcolor_rgba(uint32_t argb)
 /* Same as pack_vertices, reading the game's vertex layout directly, into d0. */
 static void pack_guest_to(uint8_t *d0, const Layout *L, const GuestVerts *g, uint32_t nv)
 {
-    PROF_SECTION(PROF_H_PACK);
+    PROF_RS(PROF_H_PACK);
     const uint8_t *vb = g->base;
     const uint32_t stride = g->stride;
     const uint32_t *src = g->src;
@@ -1972,7 +2229,7 @@ static void pack_guest_to(uint8_t *d0, const Layout *L, const GuestVerts *g, uin
             p[5 + fog] = t[0];
             p[6 + fog] = t[1];
         }
-        PROF_SECTION_END;
+        PROF_RS_END;
         return;
     }
     if (L->pretransformed) {
@@ -2035,7 +2292,7 @@ static void pack_guest_to(uint8_t *d0, const Layout *L, const GuestVerts *g, uin
             }
         }
     }
-    PROF_SECTION_END;
+    PROF_RS_END;
 }
 
 static void pack_guest(const Layout *L, const GuestVerts *g, uint32_t nv, uint32_t base)
@@ -2045,8 +2302,8 @@ static void pack_guest(const Layout *L, const GuestVerts *g, uint32_t nv, uint32
 
 int render_draw_guest(int prim, const GuestVerts *g, uint32_t nv, const uint16_t *idx, uint32_t ni)
 {
-    if (!nv || g_trace_next_frame == 2 || diag_mode == DIAG_NO_3D || diag_mode == DIAG_NO_BATCH ||
-        diag_mode == DIAG_ZERO_UV)
+    if (!nv || cur_trace() || cur_diag() == DIAG_NO_3D || cur_diag() == DIAG_NO_BATCH ||
+        cur_diag() == DIAG_ZERO_UV)
         return 0;
     if (prim != PRIM_TRIANGLES && prim != PRIM_TRIANGLE_STRIP && prim != PRIM_TRIANGLE_FAN)
         return 0;
@@ -2061,7 +2318,7 @@ int render_draw_guest(int prim, const GuestVerts *g, uint32_t nv, const uint16_t
     if (!batch_enabled)
         return 0;
     if (g->pretransformed) {
-        if (diag_mode == DIAG_NO_SCREEN)
+        if (cur_diag() == DIAG_NO_SCREEN)
             return 1;
         /* rhw_invisible: all rhw ~0 means the primitive is fully transparent. */
         float max_rhw = 0.0f;
@@ -2074,9 +2331,9 @@ int render_draw_guest(int prim, const GuestVerts *g, uint32_t nv, const uint16_t
             return 1;
     }
 #if defined(__vita__)
-    if (!g->pretransformed && diag_mode != DIAG_NO_NEARCLIP) {
+    if (!g->pretransformed && cur_diag() != DIAG_NO_NEARCLIP) {
         /* Any vertex behind the near plane: the general path clips on the CPU. */
-        PROF_SECTION(PROF_H_NEARCLIP);
+        PROF_RS(PROF_H_NEARCLIP);
         const float *m = clip_z_column();
         int behind = 0;
         for (uint32_t i = 0; i < nv; i++) {
@@ -2084,24 +2341,24 @@ int render_draw_guest(int prim, const GuestVerts *g, uint32_t nv, const uint16_t
             memcpy(x, g->base + (size_t)(g->src ? g->src[i] : i) * g->stride, 12);
             behind |= x[0] * m[0] + x[1] * m[1] + x[2] * m[2] + m[3] < 0.0f;
         }
-        PROF_SECTION_END;
+        PROF_RS_END;
         if (behind)
             return 0;
     }
 #endif
-    uint64_t t0 = fine_now();
-    PROF_SECTION(PROF_H_BATCH);
+    uint64_t t0 = fine_now_fe();
+    PROF_RS(PROF_H_BATCH);
     if (tris) {
         const Layout *bl = &batch_layout;
         if (batch_active &&
             (batch_nv + nv > vtx_cap || batch_ni + tris * 3u > idx_cap ||
              bl->pretransformed != g->pretransformed ||
              bl->has_normal != g->has_normal || bl->has_color != g->has_color || bl->has_spec != g->has_spec ||
-             bl->ntex != g->ntex || g_rs_serial != batch_serial))
-            render_flush();
+             bl->ntex != g->ntex || cur_serial() != batch_serial))
+            flush_local();
         if (!batch_active) {
             batch_active = 1;
-            batch_serial = g_rs_serial;
+            batch_serial = cur_serial();
             layout_init(&batch_layout, g->pretransformed, g->has_normal, g->has_color, g->has_spec, g->ntex);
             stream_begin(&batch_layout, nv, tris * 3u);
             batch_nv = batch_ni = 0;
@@ -2111,9 +2368,11 @@ int render_draw_guest(int prim, const GuestVerts *g, uint32_t nv, const uint16_t
         batch_nv += nv;
         append_indices(prim, idx, tris, base);
     }
-    PROF_SECTION_END;
-    perf.draw_us += fine_now() - t0;
-    perf.draws++;
+    PROF_RS_END;
+    if (!g_pack_thread) {   /* the game thread counts recorded draws */
+        perf.draw_us += fine_now() - t0;
+        perf.draws++;
+    }
     return 1;
 }
 
@@ -2172,7 +2431,7 @@ static uint32_t copy_indices_max(uint16_t *d, const uint16_t *s, uint32_t n)
  * when there is no room. Vertices no draw references may hold anything. */
 static int dyn_prepare(uint32_t lock_id, uint32_t start, const GuestVerts *g, uint32_t nv, const Layout *L)
 {
-    uint32_t frame = g_frame_serial;
+    uint32_t frame = g_pack_thread ? rs_frame : g_frame_serial;
 #if defined(__vita__)
     if (!arena_ready())
         return 0;
@@ -2189,7 +2448,7 @@ static int dyn_prepare(uint32_t lock_id, uint32_t start, const GuestVerts *g, ui
     dyn.data = arena_vtx[arena_seg] + vpos;
     arena_vpos = vpos + nv * L->stride;
 #else
-    if (rq_on) {
+    if (streams_recorded()) {
         dyn.data = rq_data((size_t)nv * L->stride);
     } else {
         if ((size_t)nv * L->stride > dyn_heap_bytes) {
@@ -2201,7 +2460,7 @@ static int dyn_prepare(uint32_t lock_id, uint32_t start, const GuestVerts *g, ui
     }
 #endif
     pack_guest_to(dyn.data, L, g, nv);
-    pc_frame[PC_VERTS] += nv;
+    PCR[PC_VERTS] += nv;
     dyn.lock_id = lock_id;
     dyn.start = start;
     dyn.nv = nv;
@@ -2215,7 +2474,7 @@ int render_draw_dynvb(uint32_t lock_id, uint32_t start, const GuestVerts *g, uin
                       const uint16_t *idx, uint32_t ni)
 {
     if (!nv || !ni || nv > 65536u || prim != PRIM_TRIANGLES || !g->pretransformed || g->src ||
-        ((uintptr_t)idx & 1u) || g_trace_next_frame == 2 || diag_mode != DIAG_NONE)
+        ((uintptr_t)idx & 1u) || cur_trace() || cur_diag() != DIAG_NONE)
         return 0;
     if (batch_enabled < 0) {
         const char *e = getenv("IGI_BATCH");
@@ -2238,20 +2497,20 @@ int render_draw_dynvb(uint32_t lock_id, uint32_t start, const GuestVerts *g, uin
         return 0;
     /* Whatever is batched comes first, and its storage must be closed before
      * the arena is used here. */
-    render_flush();
-    uint64_t t0 = fine_now();
-    PROF_SECTION(PROF_H_BATCH);
+    flush_local();
+    uint64_t t0 = fine_now_fe();
+    PROF_RS(PROF_H_BATCH);
     Layout L;
     layout_init(&L, 1, g->has_normal, g->has_color, g->has_spec, g->ntex);
     if (!dyn_prepare(lock_id, start, g, nv, &L)) {
-        PROF_SECTION_END;
+        PROF_RS_END;
         return 0;
     }
     uint16_t *ip;
 #if defined(__vita__)
     uint32_t ibytes = (ni * 2u + 3u) & ~3u;
     if (ibytes > ARENA_IDX_BYTES - arena_ipos) {
-        PROF_SECTION_END;
+        PROF_RS_END;
         return 0;
     }
     ip = arena_idx[arena_seg] + arena_ipos / 2u;
@@ -2265,7 +2524,7 @@ int render_draw_dynvb(uint32_t lock_id, uint32_t start, const GuestVerts *g, uin
 #endif
     uint32_t tris = ni / 3u;
     if (!tris || copy_indices_max(ip, idx, tris * 3u) >= nv) {
-        PROF_SECTION_END;
+        PROF_RS_END;
         return 0;   /* the general path clamps out-of-range indices */
     }
     DrawArrays A;
@@ -2287,22 +2546,272 @@ int render_draw_dynvb(uint32_t lock_id, uint32_t start, const GuestVerts *g, uin
     for (int s = 0; s < MAX_STAGES; s++)
         A.uv[s] = (const void *)(b + L.off_uv[s]);
     submit_arrays(PRIM_TRIANGLES, &L, nv, ip, tris * 3u, &A);
-    pc_frame[PC_VERTS] -= nv;   /* counted once, when packed */
-    PROF_SECTION_END;
-    perf.draw_us += fine_now() - t0;
-    perf.draws++;
+    PCR[PC_VERTS] -= nv;   /* counted once, when packed */
+    PROF_RS_END;
+    if (!g_pack_thread) {   /* the game thread counts recorded draws */
+        perf.draw_us += fine_now() - t0;
+        perf.draws++;
+    }
     return 1;
 }
 
 void render_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, uint32_t ni,
                  int pretransformed, int has_normal, int has_color, int has_spec, int ntex)
 {
-    uint64_t t0 = fine_now();
+    uint64_t t0 = fine_now_fe();
     in_render_draw = 1;
     batch_draw(prim, v, nv, idx, ni, pretransformed, has_normal, has_color, has_spec, ntex);
     in_render_draw = 0;
     bounds_valid = 0;
-    perf.draw_us += fine_now() - t0;
+    if (!g_pack_thread) {   /* the game thread counts recorded draws */
+        perf.draw_us += fine_now() - t0;
+        perf.draws++;
+    }
+}
+
+/* ---- pack thread: state snapshots and frame ends -------------------------- */
+
+/* Render thread: the state for the draws recorded next. */
+static void pk_state_cmd(const void *p)
+{
+    flush_local();
+    /* A texture's new sampler settings go with the first draw of the snapshot
+     * that found them changed: if none of its draws reached GL, send them now. */
+    if (!rs_cur_used)
+        for (int i = 0; i < MAX_STAGES; i++)
+            if (rs_cur.d.stage[i].tex && rs_cur.d.stage[i].sampler)
+                bk_sampler(&rs_cur.d.stage[i]);
+    memcpy(&rs_cur, p, sizeof(rs_cur));
+    rs_cur_used = 0;
+}
+
+/* Render thread: the frame's draws are done (the arena moves on to the next
+ * segment); its counters go to the game thread. */
+static void pk_frame_cmd(const void *unused)
+{
+    (void)unused;
+    flush_local();
+    rs_frame++;
+    atomic_fetch_add(&rs_pub_gpu_draws, rs_gpu_draws);
+    atomic_fetch_add(&rs_pub_verts, (uint32_t)rs_pc[PC_VERTS]);
+    atomic_fetch_add(&rs_pub_indices, (uint32_t)rs_pc[PC_INDICES]);
+    atomic_fetch_add(&rs_pub_pack_us, (uint32_t)rs_pc[PC_PACK_US]);
+    rs_gpu_draws = 0;
+    memset(rs_pc, 0, sizeof(rs_pc));
+}
+
+/* Game thread: the counters of the frames the render thread finished. */
+static void pk_collect(void)
+{
+    perf_gpu_draws += atomic_exchange(&rs_pub_gpu_draws, 0);
+    pc_frame[PC_VERTS] += atomic_exchange(&rs_pub_verts, 0);
+    pc_frame[PC_INDICES] += atomic_exchange(&rs_pub_indices, 0);
+    pc_frame[PC_PACK_US] += atomic_exchange(&rs_pub_pack_us, 0);
+}
+
+/* A texture of the current stages needs an upload (texture_get would convert it). */
+static int stage_textures_dirty(void)
+{
+    int active = 0;
+    for (int i = 0; i < MAX_STAGES; i++) {
+        const StageState *st = &g_rs.stage[i];
+        if (st->colorop == 1u || (i > 0 && active < i) || !st->texture)
+            continue;
+        active++;
+        const Surface *s = st->texture;
+        if (!s->gl_tex || (diag_mode != DIAG_LEVEL0 && s->priv[0] == 0 && next_mip(s)))
+            return 1;
+        for (const Surface *m = s; m; m = next_mip(m))
+            if (m->dirty)
+                return 1;
+    }
+    return 0;
+}
+
+/* Partial snapshots: only the parts of the state that changed (most draws change
+ * the world matrix and little else). */
+#define RS_WORDS 22u   /* DrawCmd zenable .. tfactor */
+_Static_assert(offsetof(DrawCmd, tfactor) - offsetof(DrawCmd, zenable) == (RS_WORDS - 1u) * 4u,
+               "DrawCmd render states must be contiguous");
+
+typedef struct PkRs {
+    uint32_t serial;
+    uint32_t fog, fogtable, fogvertex;   /* LayoutIn */
+    uint32_t v[RS_WORDS];
+} PkRs;
+
+typedef struct PkStages {
+    uint32_t serial;
+    int stages;
+    uint32_t tci[MAX_STAGES];
+    DrawStage st[MAX_STAGES];
+} PkStages;
+
+typedef struct PkXf {
+    uint32_t serial;
+    int32_t vp_x, vp_y, vp_w, vp_h;
+    float vp_minz, vp_maxz;
+    float world[16], view[16], proj[16];
+} PkXf;
+
+typedef struct PkWorld {
+    uint32_t serial;
+    float world[16];
+} PkWorld;
+
+typedef struct Mat4f {
+    float m[16];
+} Mat4f;
+
+static void mat4_copy(float *d, const float *s)
+{
+    *(Mat4f *)(void *)d = *(const Mat4f *)(const void *)s;
+}
+
+/* Render thread: a new state serial (the batch so far is drawn with the old state). */
+static void rs_new_serial(uint32_t serial)
+{
+    flush_local();
+    rs_cur.serial = serial;
+}
+
+static void pk_serial_cmd(const void *p)
+{
+    rs_new_serial(*(const uint32_t *)p);
+}
+
+static void pk_rs_cmd(const void *p)
+{
+    const PkRs *r = p;
+    rs_new_serial(r->serial);
+    rs_cur.li.fog = r->fog;
+    rs_cur.li.fogtable = r->fogtable;
+    rs_cur.li.fogvertex = r->fogvertex;
+    uint32_t *d = &rs_cur.d.zenable;
+    for (uint32_t i = 0; i < RS_WORDS; i++)
+        d[i] = r->v[i];
+}
+
+static void pk_stages_cmd(const void *p)
+{
+    const PkStages *s = p;
+    rs_new_serial(s->serial);
+    if (!rs_cur_used)
+        for (int i = 0; i < MAX_STAGES; i++)
+            if (rs_cur.d.stage[i].tex && rs_cur.d.stage[i].sampler)
+                bk_sampler(&rs_cur.d.stage[i]);
+    rs_cur_used = 0;
+    rs_cur.li.stages = s->stages;
+    for (int i = 0; i < MAX_STAGES; i++) {
+        rs_cur.li.tci[i] = s->tci[i];
+        rs_cur.d.stage[i] = s->st[i];
+    }
+}
+
+static void pk_xf_cmd(const void *p)
+{
+    const PkXf *x = p;
+    rs_new_serial(x->serial);
+    DrawCmd *d = &rs_cur.d;
+    d->vp_x = x->vp_x;
+    d->vp_y = x->vp_y;
+    d->vp_w = x->vp_w;
+    d->vp_h = x->vp_h;
+    d->vp_minz = x->vp_minz;
+    d->vp_maxz = x->vp_maxz;
+    mat4_copy(d->world, x->world);
+    mat4_copy(d->view, x->view);
+    mat4_copy(d->proj, x->proj);
+}
+
+static void pk_world_cmd(const void *p)
+{
+    const PkWorld *w = p;
+    rs_new_serial(w->serial);
+    mat4_copy(rs_cur.d.world, w->world);
+}
+
+/* Game thread: sends the parts of the state that changed since the last snapshot. */
+static void pk_send_parts(uint32_t parts)
+{
+    const uint32_t serial = g_rs_serial;
+    if (parts & RS_PART_STAGE) {
+        PkStages *s = rq_begin(pk_stages_cmd, sizeof(PkStages));
+        s->serial = serial;
+        s->stages = active_stages();
+        for (int i = 0; i < MAX_STAGES; i++)
+            s->tci[i] = g_rs.stage[i].texcoordindex;
+        stages_for_draw(s->st);   /* no uploads: stage_textures_dirty() said so */
+        rq_end();
+    }
+    if (parts & RS_PART_RS) {
+        const uint32_t *rs = g_rs.rs;
+        PkRs *r = rq_begin(pk_rs_cmd, sizeof(PkRs));
+        r->serial = serial;
+        r->fog = rs[28];
+        r->fogtable = rs[35];
+        r->fogvertex = rs[140];
+        static const uint8_t idx[RS_WORDS] = { 7,  8,  9,  14, 15, 19, 20, 22, 23, 24,  25,
+                                               27, 28, 34, 35, 36, 37, 38, 41, 137, 140, 60 };
+        for (uint32_t i = 0; i < RS_WORDS; i++)
+            r->v[i] = rs[idx[i]];
+        rq_end();
+    }
+    if (parts & RS_PART_XF) {
+        PkXf *x = rq_begin(pk_xf_cmd, sizeof(PkXf));
+        x->serial = serial;
+        x->vp_x = g_rs.vp_x;
+        x->vp_y = g_rs.vp_y;
+        x->vp_w = g_rs.vp_w;
+        x->vp_h = g_rs.vp_h;
+        x->vp_minz = g_rs.vp_minz;
+        x->vp_maxz = g_rs.vp_maxz;
+        mat4_copy(x->world, g_rs.world);
+        mat4_copy(x->view, g_rs.view);
+        mat4_copy(x->proj, g_rs.proj);
+        rq_end();
+    } else if (parts & RS_PART_WORLD) {
+        PkWorld *w = rq_begin(pk_world_cmd, sizeof(PkWorld));
+        w->serial = serial;
+        mat4_copy(w->world, g_rs.world);
+        rq_end();
+    }
+    if (!parts) {
+        uint32_t *s = rq_begin(pk_serial_cmd, sizeof(uint32_t));
+        *s = serial;
+        rq_end();
+    }
+}
+
+void render_pk_prepare(int pretransformed, int has_normal)
+{
+    if (!pk_snap_valid || stage_textures_dirty()) {
+        /* Draws recorded with the previous state are drawn before the uploads. */
+        render_flush();
+        DrawStage stages[MAX_STAGES];
+        stages_for_draw(stages);
+        send_params();
+        PkState *s = rq_begin(pk_state_cmd, sizeof(PkState));
+        s->serial = g_rs_serial;
+        layout_in_current(&s->li);
+        fill_state(&s->d, stages, 1);
+        rq_end();
+        pk_snap_valid = 1;
+        pk_snap_serial = g_rs_serial;
+        g_rs_parts = 0;
+    } else if (pk_snap_serial != g_rs_serial) {
+        pk_send_parts(g_rs_parts);
+        pk_snap_serial = g_rs_serial;
+        g_rs_parts = 0;
+    }
+    if (!pretransformed && has_normal && g_rs.rs[137] && (!light_sent_valid || light_sent_serial != g_light_serial)) {
+        render_flush();
+        send_lights();
+    }
+}
+void render_pk_recorded(void)
+{
+    pk_pending = 1;
     perf.draws++;
 }
 
@@ -2373,6 +2882,8 @@ static void perf_frame_begin_swap(void)
         perf.frame_start = now;
         perf.window_start = now;
     }
+    if (g_pack_thread)
+        pk_collect();
     if (fine_timing > 0 && !rq_on) {
         uint64_t st, gl;
         bk_take_timing(&st, &gl);
