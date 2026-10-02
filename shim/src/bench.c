@@ -12,7 +12,13 @@
  *                   movement pattern runs for the requested time while every
  *                   frame's timings are recorded.
  * The summary goes to bench_result.txt (ux0:data/igi/ on the Vita) and the log,
- * then the process exits. With IGI_PROFILE the profile covers the measured part only. */
+ * then the process exits. With IGI_PROFILE the profile covers the measured part only.
+ *
+ * The current phase's name is kept in bench_phase.txt for external tools. With a
+ * hold time (IGI_BENCH_HOLD=<seconds>, or a third number in bench.txt) the game
+ * thread also sleeps that long, with "hold: <where>" in bench_phase.txt, when the main
+ * menu shows, before the mission is started and when gameplay begins: the boot and the
+ * mission load then stand apart in an external profiler (tools/profile_vita3k.sh). */
 #include "bench.h"
 #include "igi_fixes.h"
 #include "platform.h"
@@ -22,15 +28,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #if defined(__vita__)
 #define BENCH_CFG "ux0:data/igi/bench.txt"
 #define BENCH_RESULT "ux0:data/igi/bench_result.txt"
 #define BENCH_RUNNING "ux0:data/igi/bench_running.txt"
+#define BENCH_PHASE "ux0:data/igi/bench_phase.txt"
 #define BENCH_PLATFORM "vita"
 #else
 #define BENCH_RESULT "bench_result.txt"
 #define BENCH_RUNNING "bench_running.txt"
+#define BENCH_PHASE "bench_phase.txt"
 #define BENCH_PLATFORM "desktop"
 #endif
 
@@ -68,6 +77,7 @@ typedef enum Phase {
 
 static int bench_secs = -1;
 static int shot_every;          /* screenshot every N measured frames (0: none) */
+static int hold_secs;           /* sleep at the phase boundaries (see the top) */
 static Phase phase;
 static uint64_t phase_start_us, start_us, run_start_us, last_us;
 static uint32_t phase_frames, state_frames, last_state = IGI_UI_NONE, steps;
@@ -94,7 +104,8 @@ int bench_enabled(void)
             if (fgets(buf, sizeof(buf), f)) {
                 char *end;
                 bench_secs = (int)strtol(buf, &end, 10);
-                shot_every = atoi(end);   /* optional second number */
+                shot_every = (int)strtol(end, &end, 10);   /* optional second number */
+                hold_secs = atoi(end);                     /* and third */
             }
             fclose(f);
         }
@@ -105,6 +116,9 @@ int bench_enabled(void)
         e = getenv("IGI_BENCH_SHOT");
         if (e)
             shot_every = atoi(e);
+        e = getenv("IGI_BENCH_HOLD");
+        if (e)
+            hold_secs = atoi(e);
 #endif
         if (bench_secs > 0)
             rt_log("bench: enabled, %d s of gameplay", bench_secs);
@@ -114,11 +128,35 @@ int bench_enabled(void)
     return bench_secs > 0;
 }
 
+static void write_phase(const char *name)
+{
+    FILE *f = fopen(BENCH_PHASE, "w");
+    if (f) {
+        fprintf(f, "%s\n", name);
+        fclose(f);
+    }
+}
+
+/* Sleeps hold_secs on the game thread (no guest work for a profiler to see). */
+static void hold(const char *name)
+{
+    if (hold_secs <= 0)
+        return;
+    char line[64];
+    snprintf(line, sizeof(line), "hold: %s", name);
+    rt_log("bench: %s, %d s", line, hold_secs);
+    write_phase(line);
+    usleep((useconds_t)hold_secs * 1000000u);
+}
+
 static void set_phase(Phase p, uint64_t now)
 {
     static const char *const names[] = { "boot", "main menu", "wait missions", "missions", "loading", "settle", "run" };
     rt_log("bench: phase %s (ui state %d, %.1f s, frame %u)", names[p], (int)igi_ui_state(),
            (double)(now - start_us) / 1e6, g_frame_serial);
+    if (p == PH_MAIN_MENU || p == PH_SETTLE)
+        hold(names[p]);
+    write_phase(names[p]);
     phase = p;
     phase_start_us = now;
     phase_frames = 0;
@@ -299,6 +337,7 @@ void bench_frame(uint64_t now, uint64_t frame_us, uint64_t draw_us, uint64_t swa
         if (steps && state != UI_MENU_IDLE)
             set_phase(PH_LOADING, now);
         else if (!steps && !held_key && phase_frames >= SETTLE_FRAMES) {
+            hold("mission start");
             tap(DIK_RETURN, now);
             steps++;
         }

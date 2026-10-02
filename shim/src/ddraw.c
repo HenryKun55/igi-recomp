@@ -422,6 +422,24 @@ static void soft_fill(Surface *dst, const Rect *r, uint32_t v)
     dst->dirty = 1;
 }
 
+/* The primary surface of a flip chain is the visible front buffer. The loading
+ * screen (guest 0x48A440 / 0x48A620) Blts its picture and then each progress bar
+ * step straight to it between long blocking loads, and never flips: on the
+ * original hardware those writes show up at once. Here they go to the primary's
+ * memory, which is then presented as a whole frame (the GL back buffer holds
+ * the game's next frame in the making and is not touched otherwise). */
+static int is_front_buffer(const Surface *s)
+{
+    return s->is_primary && s->attached;
+}
+
+static void front_buffer_show(Surface *s)
+{
+    Rect all = { 0, 0, (int32_t)s->w, (int32_t)s->h };
+    render_blit(s, &all, &all, 0);
+    render_present();
+}
+
 #define DDBLT_COLORFILL 0x400u
 #define DDBLT_KEYSRC 0x8000u
 #define DDBLT_KEYSRCOVERRIDE 0x10000u
@@ -454,9 +472,13 @@ static void surf_Blt(Ctx *c)
         stdcall_ret(c, DD_OK, 6);
         return;
     }
+    const int front = is_front_buffer(dst);
     if (flags & DDBLT_COLORFILL) {
         uint32_t color = fx ? RD32(fx + 80u) : 0u;   /* DDBLTFX.dwFillColor */
-        if (is_render_target(dst)) {
+        if (front) {
+            soft_fill(dst, &dr, color);
+            front_buffer_show(dst);
+        } else if (is_render_target(dst)) {
             PROF_SECTION(PROF_H_FILL);
             render_fill(&dr, pixel_to_rgba(&dst->pf, (const uint8_t *)&color));
             PROF_SECTION_END;
@@ -474,7 +496,10 @@ static void surf_Blt(Ctx *c)
     }
     rect_read(ARG(3), &sr, src);
     int ck = (flags & (DDBLT_KEYSRC | DDBLT_KEYSRCOVERRIDE)) != 0;
-    if (is_render_target(dst)) {
+    if (front) {
+        soft_blit(dst, &dr, src, &sr, ck);
+        front_buffer_show(dst);
+    } else if (is_render_target(dst)) {
         PROF_SECTION(PROF_H_BLIT);
         render_blit(src, &sr, &dr, ck);
         PROF_SECTION_END;
@@ -504,7 +529,10 @@ static void surf_BltFast(Ctx *c)
     dr.r = x + (sr.r - sr.l);
     dr.b = y + (sr.b - sr.t);
     int ck = (trans & 1u) != 0;     /* DDBLTFAST_SRCCOLORKEY */
-    if (is_render_target(dst))
+    if (is_front_buffer(dst)) {
+        soft_blit(dst, &dr, src, &sr, ck);
+        front_buffer_show(dst);
+    } else if (is_render_target(dst))
         render_blit(src, &sr, &dr, ck);
     else
         soft_blit(dst, &dr, src, &sr, ck);

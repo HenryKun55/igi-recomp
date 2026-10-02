@@ -14,6 +14,8 @@
 #                 few seconds) from the Vita3K window into $SHOT_DIR/bench_shot_<frame>.png;
 #                 for visual checks only, the timings are off
 #        SHOT_DIR where the captures go (default $BUILD/shots)
+#        HOLD     seconds the game sleeps at the main menu, before the mission starts
+#                 and when gameplay begins (see shim/src/bench.c; for profiles)
 #
 # Only the instance started here is killed ("Vita3K -r PIGI00001"); other Vita3K
 # instances and other apps' data are left alone.
@@ -47,7 +49,7 @@ unzip -p "$BUILD/igi.vpk" eboot.bin > "$APP/eboot.bin" || exit 1
 echo "installed $BUILD/igi.vpk eboot.bin"
 rm -f "$DATA/bench_result.txt"
 touch "$DATA/.bench_start"
-echo "$SECS ${SHOT:-0}" > "$DATA/bench.txt"
+echo "$SECS ${SHOT:-0} ${HOLD:-0}" > "$DATA/bench.txt"
 
 stop() {
     pkill -9 -f "Vita3K -r PIGI00001" 2>/dev/null

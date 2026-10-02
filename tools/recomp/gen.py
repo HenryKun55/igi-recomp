@@ -54,6 +54,9 @@ GAME_HOOKS = [
     0x00497860,   # 2D render queue: per-node state setup
     0x00402820,   # game clock: set the update/render rate (Hz)
     0x00402260,   # game clock: scheduler (one update or render per call)
+    0x0048A440,   # loading screen: create (background picture, progress bar)
+    0x0048A620,   # loading screen: advance the progress bar
+    0x0048A5D0,   # loading screen: destroy
 ]
 
 # MSVC CRT setjmp/longjmp: setjmp call sites become host setjmp, and the
@@ -126,6 +129,30 @@ NATIVE = {
     # IMA ADPCM decoder (runtime/src/native_adpcm.c).
     0x00496280: ('rt_native_adpcm_decode', [
         (0x00496280, 409, 'a4e5b69d2e3cf1c83797f92ee34bd5b9512949ae'),
+    ]),
+    # Texture loading: mip level, 1555 and palette expansion (runtime/src/native_texture.c).
+    0x00517B00: ('rt_native_mip_halve', [
+        (0x00517B00, 399, '828082f7efcc87f648c8d22568953da4b029cefc'),
+    ]),
+    0x00517C90: ('rt_native_expand_1555', [
+        (0x00517C90, 306, '52b9e55396d733715837964b772f6e9c63ba4033'),
+    ]),
+    0x00517FD0: ('rt_native_expand_pal8', [
+        (0x00517FD0, 338, '90365f5dc941d9d7bb8a742b7cf4ab7f403b2a8d'),
+    ]),
+}
+
+# Native versions of a part of a function (runtime/src/native_*.c): hook address ->
+# (host function, continuation address, [(address, size, SHA-1)] of the guest code
+# it relies on). Before the instruction at the hook address, the generated code
+# stores every register to the context and calls the host function; when it
+# returns 1 it has done the guest code's work up to the continuation address and
+# left the registers there in the context. Only in functions without x87 code.
+# Same matching and IGI_NATIVE=0 rules as NATIVE.
+BLOCK_HOOKS = {
+    # Texture upload's conversion loops (runtime/src/native_texture.c).
+    0x0050B6FB: ('rt_block_tex_convert', 0x0050BAC4, [
+        (0x0050B4F0, 0x681, 'bd2215f7420b88c65ca98a9649f3def0940cbadc'),
     ]),
 }
 
@@ -812,6 +839,11 @@ class FuncGen:
             if a in tick_rate.TICK_ONLY:
                 # Update-rate fix: a per-step counter advances on 30 Hz ticks only.
                 code = ['if (rt_tick_now()) {'] + code + ['}']
+            hook = self.g.block_hooks.get(a)
+            if hook:
+                # Native version of the code from here to hook[1] (BLOCK_HOOKS).
+                assert not self.has_x87() and hook[1] in fn.insns, 'block hook %08X' % a
+                code = ['SPILL; if (%s(c)) { RELOAD; goto L_%08X; } RELOAD;' % hook] + code
             nxt = a + ins.size
             falls = self.falls_through(ins)
             if a in self.fused_pairs:
@@ -1868,6 +1900,12 @@ class Generator:
         for a, (name, pieces) in (NATIVE.items() if os.environ.get('IGI_NATIVE') != '0' else ()):
             if a in self.funcs and all(hashlib.sha1(self.an.pe.read(p, n)).hexdigest() == d for p, n, d in pieces):
                 self.hle[a] = name
+            else:
+                print('warning: %08X does not match %s; running the guest code' % (a, name))
+        self.block_hooks = {}
+        for a, (name, cont, pieces) in (BLOCK_HOOKS.items() if os.environ.get('IGI_NATIVE') != '0' else ()):
+            if all(hashlib.sha1(self.an.pe.read(p, n)).hexdigest() == d for p, n, d in pieces):
+                self.block_hooks[a] = (name, cont)
             else:
                 print('warning: %08X does not match %s; running the guest code' % (a, name))
 

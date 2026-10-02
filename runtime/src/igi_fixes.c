@@ -95,6 +95,32 @@ static void scheduler_idle(void)
     last_frame = g_frame_serial;
 }
 
+/* ---- loading screen -------------------------------------------------------
+ * 0x48A440(steps) puts the loading screen up, 0x48A620(screen, n) advances its
+ * progress bar by n steps and 0x48A5D0(screen) takes it down. Only logged here
+ * (load times); the pictures reach the screen through the front buffer Blts
+ * (shim/src/ddraw.c). */
+static void loading_screen(uint32_t func, uint32_t sp)
+{
+    static uint64_t start_us, last_us;
+    static uint32_t done;
+    uint64_t now = win32_perf_counter();
+    if (func == 0x0048A440u) {
+        start_us = last_us = now;
+        done = 0;
+        rt_log("loading screen: up, %u steps", RD32(sp + 4u));
+    } else if (func == 0x0048A620u) {
+        done += RD32(sp + 8u);
+        if (done > 0u)
+            rt_log("loading screen: step %u after %.2f s (+%.2f s)", done, (double)(now - start_us) / 1e6,
+                   (double)(now - last_us) / 1e6);
+        last_us = now;
+    } else if (start_us) {
+        rt_log("loading screen: down after %.2f s", (double)(now - start_us) / 1e6);
+        start_us = 0;
+    }
+}
+
 void rt_probe(Ctx *c, uint32_t func)
 {
     uint32_t sp = c->r[4];
@@ -135,6 +161,11 @@ void rt_probe(Ctx *c, uint32_t func)
     case 0x00497860u:
         /* Called from the queue flush (0x49773D) with the node state of each entry. */
         flushing_state = RD32(sp) == 0x0049773Du ? RD32(sp + 4u) : flushing_state;
+        break;
+    case 0x0048A440u:
+    case 0x0048A620u:
+    case 0x0048A5D0u:
+        loading_screen(func, sp);
         break;
     default:
         break;

@@ -7,10 +7,13 @@
 
 #include <SDL.h>
 #include <psp2/ctrl.h>
+#include <psp2/display.h>
 #include <psp2/kernel/processmgr.h>
+#include <psp2/kernel/sysmem.h>
 #include <psp2/power.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <vitaGL.h>
 
 #define SCREEN_W 960
@@ -19,6 +22,141 @@
 static int mode_w = 640, mode_h = 480;
 static int gl_ready;
 
+/* ---- boot picture --------------------------------------------------------
+ * The game loads for a few seconds before its first frame (the intro video), and
+ * vitaGL only starts with the display mode. Meanwhile the loading screen picture
+ * (LOCAL:menusystem/loading.pic in menusystem/loadingscreen.res, the art of
+ * sce_sys/pic0.png and in the same place) is shown from a plain display buffer,
+ * released once vitaGL has presented two frames. */
+#define BOOT_FB_SIZE 0x200000u   /* 960 x 544 x 4 rounded up to the CDRAM granularity */
+#define PIC_W 640
+#define PIC_H 480
+
+static SceUID boot_fb_block = -1;
+static int boot_fb_swaps;
+
+static uint32_t le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+/* The loading picture as 640x480 BGRA (malloc'd), or NULL. A .res archive is a
+ * chain of (tag, size, alignment, offset of the next) chunks after a 20-byte
+ * header, a NAME chunk before each BODY; a .pic body is a table of 64x32 BGRA
+ * tiles (offset, format 3, flags, width, height, pitch), 10 per row here. */
+static uint8_t *boot_picture_load(void)
+{
+    char path[1100];
+    snprintf(path, sizeof(path), "%s/menusystem/loadingscreen.res", g_game_dir);
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return NULL;
+    size_t cap = 0x140000u;   /* the first picture is the first entry: 1.2 MB in */
+    uint8_t *res = malloc(cap);
+    size_t n = res ? fread(res, 1, cap, f) : 0;
+    fclose(f);
+    uint8_t *out = NULL;
+    if (n < 20u || memcmp(res, "ILFF", 4) || memcmp(res + 16, "IRES", 4))
+        goto done;
+    const char *name = "";
+    for (size_t pos = 20; pos + 16u <= n;) {
+        uint32_t size = le32(res + pos + 4), next = le32(res + pos + 12);
+        const uint8_t *body = res + pos + 16;
+        if (pos + 16u + size > n)
+            break;
+        if (!memcmp(res + pos, "NAME", 4)) {
+            name = (const char *)body;
+        } else if (!memcmp(res + pos, "BODY", 4) && !strcmp(name, "LOCAL:menusystem/loading.pic") &&
+                   size >= 0x34u && !memcmp(body, "LOOP", 4)) {
+            uint32_t tiles = le32(body + 0x20);
+            if (tiles != (PIC_W / 64) * (PIC_H / 32) || 0x34u + tiles * 0x20u > size)
+                break;
+            out = malloc(PIC_W * PIC_H * 4);
+            for (uint32_t i = 0; out && i < tiles; i++) {
+                const uint8_t *e = body + 0x34u + i * 0x20u;
+                uint32_t off = le32(e), w = (uint32_t)e[10] | (uint32_t)e[11] << 8,
+                         h = (uint32_t)e[12] | (uint32_t)e[13] << 8;
+                if (le32(e + 4) != 3u || w != 64u || h != 32u || off + 64u * 32u * 4u > size) {
+                    free(out);
+                    out = NULL;
+                    break;
+                }
+                uint32_t x0 = (i % (PIC_W / 64)) * 64u, y0 = (i / (PIC_W / 64)) * 32u;
+                for (uint32_t y = 0; y < 32u; y++)
+                    memcpy(out + ((y0 + y) * PIC_W + x0) * 4u, body + off + y * 64u * 4u, 64u * 4u);
+            }
+            break;
+        }
+        if (!next)
+            break;
+        pos += next;
+    }
+done:
+    free(res);
+    return out;
+}
+
+static void boot_picture_show(void)
+{
+    uint8_t *pic = boot_picture_load();
+    if (!pic) {
+        rt_log("boot picture: menusystem/loadingscreen.res not usable");
+        return;
+    }
+    SceUID block = sceKernelAllocMemBlock("igi_boot_fb", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, BOOT_FB_SIZE, NULL);
+    void *base = NULL;
+    if (block < 0 || sceKernelGetMemBlockBase(block, &base) < 0) {
+        free(pic);
+        return;
+    }
+    /* Height fitted (725x544, aspect kept) and centered, bilinear, like pic0.png;
+     * the picture's edges are black already. 16.16 fixed point, no divisions per pixel. */
+    const int dw = PIC_W * SCREEN_H / PIC_H, dx0 = (SCREEN_W - dw) / 2;
+    const uint32_t step_x = (uint32_t)(((uint64_t)PIC_W << 16) / (uint32_t)dw);
+    const uint32_t step_y = (uint32_t)(((uint64_t)PIC_H << 16) / SCREEN_H);
+    uint32_t *fb = base;
+    memset(fb, 0, BOOT_FB_SIZE);
+    for (int y = 0; y < SCREEN_H; y++) {
+        uint32_t fy = (uint32_t)y * step_y + step_y / 2u - 0x8000u;
+        uint32_t sy = fy >> 16, wy = (fy >> 8) & 0xFFu;
+        if ((int32_t)fy < 0)
+            sy = 0, wy = 0;
+        uint32_t sy1 = sy + 1u < PIC_H ? sy + 1u : sy;
+        uint32_t *row = fb + (size_t)y * SCREEN_W + dx0;
+        for (int x = 0; x < dw; x++) {
+            uint32_t fx = (uint32_t)x * step_x + step_x / 2u - 0x8000u;
+            uint32_t sx = fx >> 16, wx = (fx >> 8) & 0xFFu;
+            if ((int32_t)fx < 0)
+                sx = 0, wx = 0;
+            uint32_t sx1 = sx + 1u < PIC_W ? sx + 1u : sx;
+            const uint8_t *p00 = pic + (sy * PIC_W + sx) * 4u, *p01 = pic + (sy * PIC_W + sx1) * 4u;
+            const uint8_t *p10 = pic + (sy1 * PIC_W + sx) * 4u, *p11 = pic + (sy1 * PIC_W + sx1) * 4u;
+            uint32_t rgba = 0xFF000000u;
+            for (int ch = 0; ch < 3; ch++) {   /* BGRA in, ABGR (R first in memory) out */
+                uint32_t top = p00[ch] * (256u - wx) + p01[ch] * wx;
+                uint32_t bot = p10[ch] * (256u - wx) + p11[ch] * wx;
+                uint32_t v = (top * (256u - wy) + bot * wy) >> 16;
+                rgba |= v << (8 * (2 - ch));
+            }
+            row[x] = rgba;
+        }
+    }
+    free(pic);
+    SceDisplayFrameBuf dfb;
+    memset(&dfb, 0, sizeof(dfb));
+    dfb.size = sizeof(dfb);
+    dfb.base = base;
+    dfb.pitch = SCREEN_W;
+    dfb.pixelformat = SCE_DISPLAY_PIXELFORMAT_A8B8G8R8;
+    dfb.width = SCREEN_W;
+    dfb.height = SCREEN_H;
+    if (sceDisplaySetFrameBuf(&dfb, SCE_DISPLAY_SETBUF_NEXTFRAME) < 0) {
+        sceKernelFreeMemBlock(block);
+        return;
+    }
+    boot_fb_block = block;
+}
+
 void platform_init(void)
 {
     scePowerSetArmClockFrequency(444);
@@ -26,6 +164,7 @@ void platform_init(void)
     scePowerSetGpuClockFrequency(222);
     scePowerSetGpuXbarClockFrequency(166);
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG_WIDE);
+    boot_picture_show();
     if (SDL_Init(SDL_INIT_AUDIO | SDL_INIT_TIMER) != 0)
         rt_fatal(NULL, "SDL_Init: %s", SDL_GetError());
 }
@@ -84,6 +223,12 @@ void platform_get_drawable_size(int *w, int *h)
 void platform_swap(void)
 {
     vglSwapBuffers(GL_FALSE);
+    /* vitaGL's buffers are on screen: the boot picture's can go. */
+    if (boot_fb_block >= 0 && ++boot_fb_swaps >= 2) {
+        sceDisplayWaitVblankStart();
+        sceKernelFreeMemBlock(boot_fb_block);
+        boot_fb_block = -1;
+    }
 }
 
 /* ---- controls ----------------------------------------------------------- */

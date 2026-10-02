@@ -459,6 +459,13 @@ int rt_native_terrain_collect(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, 
 int rt_native_deform_mesh(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
 int rt_native_sphere_cull(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
 int rt_native_adpcm_decode(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
+int rt_native_mip_halve(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
+int rt_native_expand_1555(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
+int rt_native_expand_pal8(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
+/* Block hooks (tools/recomp/gen.py BLOCK_HOOKS), called inside a generated function
+ * with every register in c: 1 = it did the guest code's work up to the hook's
+ * continuation address (registers in c as they are there), 0 = run the guest code. */
+int rt_block_tex_convert(Ctx *c);
 int rt_native_bend_draw(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
 int rt_native_mesh_raycast(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
 int rt_native_patch_build(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
