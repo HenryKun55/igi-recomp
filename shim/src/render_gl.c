@@ -2316,6 +2316,11 @@ void render_draw(int prim, const RVertex *v, uint32_t nv, const uint16_t *idx, u
  *   2D blits  ms  KB converted (inside G)  R render target read backs
  */
 
+extern uint64_t g_idle_us;   /* kernel32: waiting for the game's 30 fps cap */
+static float overlay_wait_ms;
+
+/* Overlay line 1: T = time per frame (33.3 at the game's 30 fps), B = busy
+ * (T minus the game's wait for its next 30 Hz step), W = that wait. */
 static void perf_overlay_draw(void)
 {
     const float *a = perf.avg_pc;
@@ -2326,7 +2331,8 @@ static void perf_overlay_draw(void)
     memset(&o, 0, sizeof(o));
     char (*lines)[40] = o.lines;
     snprintf(lines[0], sizeof(lines[0]), "F %.1f", (double)perf.fps);
-    snprintf(lines[1], sizeof(lines[1]), "T %.1f", (double)perf.ms_frame);
+    snprintf(lines[1], sizeof(lines[1]), "T %.1f B %.1f W %.1f", (double)perf.ms_frame,
+             (double)(perf.ms_frame - overlay_wait_ms), (double)overlay_wait_ms);
     snprintf(lines[2], sizeof(lines[2]), "G %.1f", (double)perf.ms_game);
     snprintf(lines[3], sizeof(lines[3]), "D %.1f", (double)perf.ms_draw);
     snprintf(lines[4], sizeof(lines[4]), "S %.1f", (double)perf.ms_swap);
@@ -2395,6 +2401,10 @@ static void perf_frame_begin_swap(void)
         perf.ms_draw = (float)perf.acc_draw / n / 1000.0f;
         perf.ms_swap = (float)perf.acc_swap / n / 1000.0f;
         perf.ms_game = perf.ms_frame - perf.ms_draw - perf.ms_swap;
+        /* Time the game spent waiting for its own 30 fps step (kernel32 g_idle_us). */
+        static uint64_t idle_at_window;
+        overlay_wait_ms = (float)(g_idle_us - idle_at_window) / n / 1000.0f;
+        idle_at_window = g_idle_us;
         perf.draws_per_frame = perf.acc_draws / perf.frames;
         perf.gpu_draws_per_frame = perf.acc_gpu_draws / perf.frames;
         for (int i = 0; i < PC_COUNT; i++) {
