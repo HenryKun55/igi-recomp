@@ -115,7 +115,12 @@ void render_pk_draw_begin(int diag, int trace);
 int render_diag_mode(void);
 /* From render_queue.h (which needs the GL headers). */
 void rq_exec(void (*fn)(const void *args), const void *args, size_t size);
+void *rq_begin(void (*fn)(const void *args), size_t size);
+void rq_end(void);
 void *rq_data(size_t n);
+uint64_t rq_mark(void);
+int rq_passed(uint64_t mark);
+void rq_sync(void);
 /* Game thread: the diagnostic mode that decodes whole index ranges is on. */
 int render_pk_no_compact(void);
 

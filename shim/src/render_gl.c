@@ -1052,6 +1052,7 @@ static void stages_for_draw(DrawStage *out)
         /* A stage without a texture passes the previous result through, as in D3D. */
         if (st->colorop == 1u || (i > 0 && active < i) || !st->texture) {
             ds->tex = 0;
+            ds->sampler = 0;
             continue;
         }
         active++;
@@ -2632,7 +2633,6 @@ void render_pk_prepare(int pretransformed, int has_normal)
         /* Draws recorded with the previous state are drawn before the uploads. */
         render_flush();
         DrawStage stages[MAX_STAGES];
-        memset(stages, 0, sizeof(stages));
         stages_for_draw(stages);
         send_params();
         PkState *s = rq_begin(pk_state_cmd, sizeof(PkState));

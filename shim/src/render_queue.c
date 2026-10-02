@@ -240,6 +240,16 @@ static void notify_game(void)
         sema_signal(&game_sema);
 }
 
+uint64_t rq_mark(void)
+{
+    return rec_cmds;
+}
+
+int rq_passed(uint64_t mark)
+{
+    return !rq_on || atomic_load_explicit(&done_cmds, memory_order_acquire) >= mark;
+}
+
 void rq_sync(void)
 {
     if (!rq_on)
@@ -317,6 +327,8 @@ static void render_loop(void)
                 return;
             }
             h->fn(h + 1);
+            /* rq_passed: the game thread may reuse memory this command read. */
+            atomic_store_explicit(&done_cmds, done, memory_order_release);
         }
         atomic_fetch_add(&busy_us, thread_clock_us() - t0);
     }
