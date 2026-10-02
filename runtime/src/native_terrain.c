@@ -1148,7 +1148,16 @@ static void flush_batches(const Frame *f)
  *     linear in the attributes), and each pass only evaluates the colour and
  *     texture coordinates of the output vertices from them;
  *   - the index stream of a pass (strip triangles and clipped ones) is built once
- *     per patch and written with the pass's vertex base added, eight at a time.
+ *     per patch, while culling, and written with the pass's vertex base added,
+ *     eight at a time;
+ *   - a pass writes only the vertices a drawn triangle uses (a list made once per
+ *     patch), position and tail as two NEON stores; clipper output colours are
+ *     evaluated with the source triangle's colours unpacked once per pass;
+ *   - morph vertices are moved four at a time; repeated batch lookups of a call
+ *     come from a cache (fast_get_batch).
+ * Speed is measured in ARM instructions (terrainbench.py run with two ELFs and
+ * --exact 0 also checks that two builds of the fast version write the same
+ * guest memory): Vita3K's speed emulation bills guest instructions.
  *
  * The guest's detail pass reads triangle flags it has overwritten itself (see
  * overlay_detail_flags). That is reproduced with the fast version's values, so
@@ -1182,17 +1191,95 @@ typedef struct FastWork {
     uint32_t code[256];
     float morph[256];
     uint8_t unused[256];
+    uint8_t used[256];              /* vertices the passes write (unused[i] == 0) */
+    uint32_t nused, nused_base;     /* entries of used, those below nbase */
     uint32_t blend[MAX_VERTS + 4][8];   /* rows from MAX_VERTS: scratch of the last vector */
     VTail tl[256];                  /* colour and texture coordinates of the current pass */
     uint8_t tri[MAX_STRIP];
-    uint8_t cdone[MAX_STRIP];       /* the clipper output of the strip entry is in cv */
+    uint8_t cdone[MAX_STRIP];       /* fast_emit_detail: the entry's clipper output is in cv */
     uint16_t cstart[MAX_STRIP], ccount[MAX_STRIP];
+    uint8_t clist[MAX_STRIP];       /* strip entries fast_prepare clipped, in order */
+    uint32_t nclist;
     uint16_t rel[3 * MAX_STRIP + FAST_MAX_CLIPV];   /* index stream of a pass, from its vertex base */
     uint32_t nrel, ncv, ncv_main, ntri_main;
+    int32_t first_clip;             /* fast_cull: first strip entry clipped (-1: none) */
     FClipV cv[FAST_MAX_CLIPV];
+    /* Batches of this call by material and kind (see fast_get_batch). */
+    uint32_t bc_material[64], bc_kind[64], bc_batch[64];
+    float lod_k[32];                /* level of detail factor by (25 - lod) & 31 */
+    uint32_t fpscr_mode;            /* the program's FPSCR mode (fpscr_enter) */
 } FastWork;
 
 static uint32_t clip_overflow;
+
+/* FPSCR while the fast version computes (32-bit ARM with NEON). NEON float
+ * arithmetic always runs with the "standard" FPSCR (flush-to-zero, default NaN,
+ * round to nearest); the scalar VFP code runs with the program's FPSCR. The fast
+ * version switches the FPSCR's mode to the standard one for its own code, which
+ * changes its scalar results only for denormal operands and NaN payloads (no
+ * terrain data produces either). On the Vita this costs nothing; in Vita3K a
+ * block whose FPSCR mode differs from the standard one writes the host FPCR
+ * twice around every NEON float instruction, which made NEON code there several
+ * times slower than its instruction count. Guest code (batch lookups that create
+ * a batch, the Direct3D calls) runs with the program's FPSCR. */
+#if defined(__arm__) && (defined(__ARM_NEON) || defined(__ARM_NEON__))
+#define FPSCR_MODE 0x07F79F00u      /* AHP, DN, FZ, RMode, Stride, FZ16, Len, trap enables */
+static inline uint32_t fpscr_get(void)
+{
+    uint32_t v;
+    __asm__ volatile("vmrs %0, fpscr" : "=r"(v) : : "memory");
+    return v;
+}
+
+static inline void fpscr_set(uint32_t v)
+{
+    __asm__ volatile("vmsr fpscr, %0" : : "r"(v) : "memory");
+}
+
+/* Switches to the standard mode (AHP and FZ16 kept, as the standard value does);
+ * returns the program's mode bits. */
+static inline uint32_t fpscr_enter(void)
+{
+    uint32_t v = fpscr_get();
+    fpscr_set((v & ~FPSCR_MODE) | (v & 0x04080000u) | 0x03000000u);
+    return v & FPSCR_MODE;
+}
+
+/* Back to the program's mode bits (the cumulative flags are kept). */
+static inline void fpscr_leave(uint32_t mode)
+{
+    fpscr_set((fpscr_get() & ~FPSCR_MODE) | mode);
+}
+#else
+static inline uint32_t fpscr_enter(void)
+{
+    return 0;
+}
+
+static inline void fpscr_leave(uint32_t mode)
+{
+    (void)mode;
+}
+#endif
+
+/* get_batch through a cache: 0x514680 finds the batch of a material and kind
+ * in its hash chains or creates it; a batch, once there, stays until
+ * flush_batches. A found batch has no other effect (the guest's lookup only
+ * writes its dead stack), so a repeated lookup in the same call is answered
+ * here. The cache is cleared at the start of every call. */
+static inline uint32_t fast_get_batch(const Frame *f, FastWork *w, uint32_t material, uint32_t kind)
+{
+    uint32_t h = ((material >> 4) ^ (material >> 10) ^ (kind * 23u)) & 63u;
+    if (w->bc_batch[h] && w->bc_material[h] == material && w->bc_kind[h] == kind)
+        return w->bc_batch[h];
+    fpscr_leave(w->fpscr_mode);
+    uint32_t b = get_batch(f, material, kind);
+    fpscr_enter();
+    w->bc_material[h] = material;
+    w->bc_kind[h] = kind;
+    w->bc_batch[h] = b;
+    return b;
+}
 
 /* fist of a non-negative value in the frame's rounding mode (nearest or truncate). */
 static inline int32_t ffist(const Frame *f, float v)
@@ -1338,6 +1425,74 @@ static __attribute__((noinline)) uint32_t fast_base_vertices(const Frame *f, Fas
 }
 
 
+/* Morph vertex i: {x, y, z, parent}; it moves towards its parent base vertex. */
+static inline void fast_morph_one(const Frame *f, FastWork *w, const uint8_t *base, int32_t nbase, int32_t i)
+{
+    const uint8_t *vp = base + 16 * i;
+    float x = rdf(vp), y = rdf(vp + 4), z = rdf(vp + 8);
+    int32_t parent = (int32_t)rd32(vp + 12);
+    if (parent >= 0 && parent < 256) {
+        float t = fast_morph_of(w, parent, nbase);
+        const uint8_t *pv = base + 16 * parent;
+        x += (rdf(pv) - x) * t;
+        y += (rdf(pv + 4) - y) * t;
+        z += (rdf(pv + 8) - z) * t;
+    } else {
+        note_stale();
+    }
+    w->x[i] = x + f->ncam[0];
+    w->y[i] = y + f->ncam[1];
+    w->z[i] = z + f->ncam[2];
+}
+
+/* Morph vertices [nbase, ntotal): camera-relative positions into x, y, z. */
+static __attribute__((noinline)) void fast_morph_vertices(const Frame *f, FastWork *w, const uint8_t *base,
+                                                          int32_t nbase, int32_t ntotal)
+{
+    int32_t i = nbase;
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+    /* Four at a time when their parents are base vertices of the patch (the
+     * same operations per lane); lanes past ntotal take vertex 0 as parent and
+     * write the scratch entries past the patch. */
+    const float32x4_t c0 = vdupq_n_f32(f->ncam[0]), c1 = vdupq_n_f32(f->ncam[1]), c2 = vdupq_n_f32(f->ncam[2]);
+    const uint32x4_t lane = { 0, 1, 2, 3 }, vbase = vdupq_n_u32((uint32_t)nbase);
+    const uint32x4_t vtotal = vdupq_n_u32((uint32_t)ntotal);
+    for (; i < ntotal; i += 4) {
+        const uint8_t *vp = base + 16 * i;
+        float32x4x4_t r = vld4q_f32((const float *)(const void *)vp);
+        uint32x4_t active = vcltq_u32(vaddq_u32(lane, vdupq_n_u32((uint32_t)i)), vtotal);
+        uint32x4_t pv = vandq_u32(vreinterpretq_u32_f32(r.val[3]), active);
+        uint32x4_t badv = vcgeq_u32(pv, vbase);
+        uint32x2_t b2 = vorr_u32(vget_low_u32(badv), vget_high_u32(badv));
+        if (vget_lane_u32(vpmax_u32(b2, b2), 0)) {
+            for (int32_t e = i + 4 < ntotal ? i + 4 : ntotal; i < e; i++)
+                fast_morph_one(f, w, base, nbase, i);
+            i -= 4;
+            continue;
+        }
+        uint32_t p[4];
+        vst1q_u32(p, pv);
+        float32x4_t t = vdupq_n_f32(0.0f), px = t, py = t, pz = t;
+#define MORPH_LANE(k)                                                              \
+        t = vld1q_lane_f32(&w->morph[p[k]], t, k);                                 \
+        px = vld1q_lane_f32((const float *)(const void *)(base + 16 * p[k]), px, k);     \
+        py = vld1q_lane_f32((const float *)(const void *)(base + 16 * p[k] + 4), py, k); \
+        pz = vld1q_lane_f32((const float *)(const void *)(base + 16 * p[k] + 8), pz, k);
+        MORPH_LANE(0)
+        MORPH_LANE(1)
+        MORPH_LANE(2)
+        MORPH_LANE(3)
+#undef MORPH_LANE
+        vst1q_f32(w->x + i, vaddq_f32(vmlaq_f32(r.val[0], vsubq_f32(px, r.val[0]), t), c0));
+        vst1q_f32(w->y + i, vaddq_f32(vmlaq_f32(r.val[1], vsubq_f32(py, r.val[1]), t), c1));
+        vst1q_f32(w->z + i, vaddq_f32(vmlaq_f32(r.val[2], vsubq_f32(pz, r.val[2]), t), c2));
+    }
+#else
+    for (; i < ntotal; i++)
+        fast_morph_one(f, w, base, nbase, i);
+#endif
+}
+
 /* View-space transform, projection, fog and outcodes of vertices [0, n), the
  * view-space position back into x, y, z. Up to three entries past n are
  * computed too (unused). */
@@ -1465,7 +1620,7 @@ static __attribute__((noinline)) void fast_project(const Frame *f, FastWork *w, 
 /* Clipper vertex: sx, sy, 1/depth and the weights of the source vertices times
  * 1/depth (attributes over depth are linear on the screen). */
 typedef struct FCV {
-    float a[6];
+    float a[8];                     /* a[6], a[7]: zero (two NEON vectors) */
     uint32_t code;
 } FCV;
 
@@ -1501,8 +1656,15 @@ static inline int fcount(const FCV *v, uint32_t bit)
 /* o moves towards in: o = in + (o - in) * t. */
 static inline void flerp(FCV *o, const FCV *in, float t)
 {
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+    /* The same per-lane operations (NEON's multiply-accumulate rounds the product). */
+    float32x4_t i0 = vld1q_f32(in->a), i1 = vld1q_f32(in->a + 4);
+    vst1q_f32(o->a, vmlaq_n_f32(i0, vsubq_f32(vld1q_f32(o->a), i0), t));
+    vst1q_f32(o->a + 4, vmlaq_n_f32(i1, vsubq_f32(vld1q_f32(o->a + 4), i1), t));
+#else
     for (int m = 0; m < 6; m++)
         o->a[m] = in->a[m] + (o->a[m] - in->a[m]) * t;
+#endif
 }
 
 static void fclip_emit(FClip *cl, const FCV *v)
@@ -1550,6 +1712,8 @@ static void fnear_vertex(const FClip *cl, FCV *o, int a, int b)
     o->a[2] = r;
     for (int m = 0; m < 3; m++)
         o->a[3 + m] = R[m] * r;
+    o->a[6] = 0.0f;
+    o->a[7] = 0.0f;
     o->code = fcode(f, o->a[0], o->a[1]);
 }
 
@@ -1656,6 +1820,8 @@ static uint32_t fclip_entry(const Frame *f, FastWork *w, uint32_t word)
         v[k].a[3] = k == 0 ? q : 0.0f;
         v[k].a[4] = k == 1 ? q : 0.0f;
         v[k].a[5] = k == 2 ? q : 0.0f;
+        v[k].a[6] = 0.0f;
+        v[k].a[7] = 0.0f;
     }
     fclip_tri(&cl, v);
     return cl.ntri;
@@ -1668,10 +1834,10 @@ static __attribute__((noinline)) int32_t fast_prepare(const Frame *f, FastWork *
     int32_t first = -1;
     uint32_t nrel = 0, ntri = 0;
     w->ncv = 0;
+    w->nclist = 0;
     for (int32_t j = 0; j < nwords; j++) {
         uint32_t fl = w->tri[j];
         uint32_t word = rd32(strip + 4 * j);
-        w->cdone[j] = 0;
         if (fl == 0) {
             w->rel[nrel] = (uint16_t)(word & 0xFFu);
             w->rel[nrel + 1] = (uint16_t)((word >> 16) & 0xFFu);
@@ -1682,9 +1848,9 @@ static __attribute__((noinline)) int32_t fast_prepare(const Frame *f, FastWork *
                 first = j;
             uint32_t start = w->ncv;
             uint32_t n = fclip_entry(f, w, word);
-            w->cdone[j] = 1;
             w->cstart[j] = (uint16_t)start;
             w->ccount[j] = (uint16_t)n;
+            w->clist[w->nclist++] = (uint8_t)j;
             for (uint32_t k = start; k < w->ncv; k++)
                 w->rel[nrel++] = (uint16_t)((uint32_t)ntotal + k);
             ntri += n;
@@ -1696,57 +1862,114 @@ static __attribute__((noinline)) int32_t fast_prepare(const Frame *f, FastWork *
     return first;
 }
 
+#if !defined(__ARM_NEON) && !defined(__ARM_NEON__)
 static inline void copy32(uint8_t *d, const float *pos, const VTail *t)
 {
-#if defined(__ARM_NEON) || defined(__ARM_NEON__)
-    vst1q_u8(d, vreinterpretq_u8_f32(vld1q_f32(pos)));
-    vst1q_u8(d + 16, vreinterpretq_u8_u32(vld1q_u32((const uint32_t *)(const void *)t)));
-#else
     memcpy(d, pos, 16);
     memcpy(d + 16, t, 16);
-#endif
 }
+#endif
+
+/* Colour of a blend table offset (fast_blend_of without its checks when the
+ * offset is inside the patch's rows). */
+static inline uint32_t fast_blend_at(const FastWork *w, uint32_t off, int32_t nbase)
+{
+    if (__builtin_expect(off + 4u > (uint32_t)nbase * 32u, 0))
+        return fast_blend_of(w, off, nbase);
+    uint32_t v;
+    memcpy(&v, (const uint8_t *)w->blend + off, 4);
+    return v;
+}
+
+/* Writes vertex i of a pass: position and the tail {col, spec, tu, tv} (also
+ * kept in w->tl for the clipper output and the detail overlay). */
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+static inline void fast_put_vertex(FastWork *w, uint8_t *dst, uint32_t i, uint32_t col, float32x2_t uv)
+{
+    uint32x2_t cs = vset_lane_u32(w->spec[i], vdup_n_u32(col), 1);
+    uint32x4_t tail = vcombine_u32(cs, vreinterpret_u32_f32(uv));
+    vst1q_u32((uint32_t *)(void *)&w->tl[i], tail);
+    uint8_t *d = dst + 32u * i;
+    vst1q_u8(d, vreinterpretq_u8_f32(vld1q_f32(w->pos[i])));
+    vst1q_u8(d + 16, vreinterpretq_u8_u32(tail));
+}
+#endif
 
 /* Vertices of a pass: colour and texture coordinates from the records, written
- * to the vertex buffer at vb for every vertex a drawn triangle uses. */
-static const uint8_t *fast_pass_vertices(FastWork *w, const uint8_t *rec, int32_t nbase, int32_t ntotal,
-                                         uint32_t vb, int detail)
+ * to the vertex buffer at vb for every vertex a drawn triangle uses (w->used:
+ * w->nused_base base vertices, then morph vertices). */
+static inline const uint8_t *fast_pass_vertices_k(FastWork *w, const uint8_t *rec, int32_t nbase, int32_t ntotal,
+                                                  uint32_t vb, const int detail)
 {
     uint8_t *dst = g_mem + vb;
-    int32_t i = 0;
-    for (; i < nbase; i++, rec += 12) {
-        if (w->unused[i])
-            continue;
+    const uint8_t *mrec = rec + 12 * nbase;
+    uint32_t k = 0, nb = w->nused_base, n = w->nused;
+    for (; k < nb; k++) {
+        uint32_t i = w->used[k];
+        const uint8_t *r = rec + 12u * i;
+        uint32_t col = detail ? 0xFFFFFFu : fast_blend_at(w, rd32(r) & 0xFFFFu, nbase);
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+        fast_put_vertex(w, dst, i, col, vreinterpret_f32_u8(vld1_u8(r + 4)));
+#else
         VTail *t = &w->tl[i];
-        t->col = detail ? 0xFFFFFFu : fast_blend_of(w, rd32(rec) & 0xFFFFu, nbase);
+        t->col = col;
         t->spec = w->spec[i];
-        memcpy(&t->tu, rec + 4, 8);
-        copy32(dst + 32u * (uint32_t)i, w->pos[i], t);
+        memcpy(&t->tu, r + 4, 8);
+        copy32(dst + 32u * i, w->pos[i], t);
+#endif
     }
-    for (; i < ntotal; i++, rec += 20) {
-        if (w->unused[i])
-            continue;
-        uint32_t word = rd32(rec);
-        float m = fast_morph_of(w, (int32_t)word >> 16, nbase);
+    for (; k < n; k++) {
+        uint32_t i = w->used[k];
+        const uint8_t *r = mrec + 20u * (i - (uint32_t)nbase);
+        uint32_t word = rd32(r);
+        int32_t parent = (int32_t)word >> 16;
+        float m = (uint32_t)parent < (uint32_t)nbase ? w->morph[parent] : fast_morph_of(w, parent, nbase);
+        uint32_t col = detail ? 0xFFFFFFu : fast_blend_at(w, word & 0xFFFFu, nbase);
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+        float32x2_t uv = vmla_n_f32(vreinterpret_f32_u8(vld1_u8(r + 4)), vreinterpret_f32_u8(vld1_u8(r + 12)), m);
+        fast_put_vertex(w, dst, i, col, uv);
+#else
         VTail *t = &w->tl[i];
-        t->col = detail ? 0xFFFFFFu : fast_blend_of(w, word & 0xFFFFu, nbase);
+        t->col = col;
         t->spec = w->spec[i];
-        t->tu = rdf(rec + 12) * m + rdf(rec + 4);
-        t->tv = rdf(rec + 16) * m + rdf(rec + 8);
-        copy32(dst + 32u * (uint32_t)i, w->pos[i], t);
+        t->tu = rdf(r + 12) * m + rdf(r + 4);
+        t->tv = rdf(r + 16) * m + rdf(r + 8);
+        copy32(dst + 32u * i, w->pos[i], t);
+#endif
     }
-    return rec;
+    return mrec + 20 * (ntotal - nbase);
 }
 
+#if !defined(__ARM_NEON) && !defined(__ARM_NEON__)
 /* A clipper output vertex with the current pass's colour and texture coordinates. */
 static inline void fast_clip_vertex(const Frame *f, const FastWork *w, uint8_t *d, const FClipV *o)
 {
     const VTail *t0 = &w->tl[o->s[0]], *t1 = &w->tl[o->s[1]], *t2 = &w->tl[o->s[2]];
     float u0 = o->u[0], u1 = o->u[1], u2 = o->u[2];
     VTail t;
+    uint32_t col = 0;
+    for (int k = 16; k >= 0; k -= 8)
+        col |= fbyte(f, u0 * (float)((t0->col >> k) & 0xFFu) + u1 * (float)((t1->col >> k) & 0xFFu) +
+                            u2 * (float)((t2->col >> k) & 0xFFu)) << k;
+    t.col = col;
+    t.tu = u0 * t0->tu + u1 * t1->tu + u2 * t2->tu;
+    t.spec = o->spec;
+    t.tv = u0 * t0->tv + u1 * t1->tv + u2 * t2->tv;
+    copy32(d, o->p, &t);
+}
+#endif
+
+/* The n clipper output vertices at o (all from the same source triangle) with
+ * the current pass's colour and texture coordinates, written from d on. */
+static void fast_clip_group(const Frame *f, const FastWork *w, uint8_t *d, const FClipV *o, uint32_t n)
+{
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
-    /* Lanes: red, green, blue, tu. */
-    const int32x4_t sh = { -16, -8, 0, 0 };
+    /* As fast_clip_vertex, with the source vertices' colours unpacked once:
+     * lanes blue, green, red, tu (the same per-lane arithmetic), and tv in a pair. */
+    if (!n)
+        return;
+    const VTail *t0 = &w->tl[o->s[0]], *t1 = &w->tl[o->s[1]], *t2 = &w->tl[o->s[2]];
+    const int32x4_t sh = { 0, -8, -16, 0 };
     const uint32x4_t mask = { 0xFFu, 0xFFu, 0xFFu, 0u };
     float32x4_t a0 = vcvtq_f32_u32(vandq_u32(vshlq_u32(vdupq_n_u32(t0->col), sh), mask));
     float32x4_t a1 = vcvtq_f32_u32(vandq_u32(vshlq_u32(vdupq_n_u32(t1->col), sh), mask));
@@ -1754,28 +1977,31 @@ static inline void fast_clip_vertex(const Frame *f, const FastWork *w, uint8_t *
     a0 = vsetq_lane_f32(t0->tu, a0, 3);
     a1 = vsetq_lane_f32(t1->tu, a1, 3);
     a2 = vsetq_lane_f32(t2->tu, a2, 3);
-    float32x4_t s = vmlaq_n_f32(vmlaq_n_f32(vmulq_n_f32(a0, u0), a1, u1), a2, u2);
-    uint32x4_t c = vminq_u32(vcvtq_u32_f32(vaddq_f32(s, vdupq_n_f32(f->chop ? 0.0f : 0.5f))), vdupq_n_u32(255));
-    const int32x4_t up = { 16, 8, 0, 0 };
-    c = vshlq_u32(vandq_u32(c, mask), up);    /* lane 3 (tu) cleared */
-    uint32x2_t c2 = vadd_u32(vget_low_u32(c), vget_high_u32(c));
-    t.col = vget_lane_u32(c2, 0) | vget_lane_u32(c2, 1);
-    t.tu = vgetq_lane_f32(s, 3);
+    const float32x2_t b0 = vdup_n_f32(t0->tv), b1 = vdup_n_f32(t1->tv), b2 = vdup_n_f32(t2->tv);
+    const float32x4_t half = vdupq_n_f32(f->chop ? 0.0f : 0.5f);
+    const uint32x4_t lim = { 255u, 255u, 255u, 0u };
+    const uint32x2_t lo_col = { 0xFFFFFFFFu, 0u };
+    for (uint32_t k = 0; k < n; k++, o++, d += 32) {
+        float32x4_t u = vld1q_f32(o->u);            /* u0, u1, u2, spec */
+        float32x2_t ul = vget_low_f32(u), uh = vget_high_f32(u);
+        float32x4_t s = vmlaq_lane_f32(vmlaq_lane_f32(vmulq_lane_f32(a0, ul, 0), a1, ul, 1), a2, uh, 0);
+        float32x2_t tv = vmla_lane_f32(vmla_lane_f32(vmul_lane_f32(b0, ul, 0), b1, ul, 1), b2, uh, 0);
+        uint32x4_t c = vminq_u32(vcvtq_u32_f32(vaddq_f32(s, half)), lim);
+        uint16x4_t c16 = vmovn_u32(c);
+        uint32x2_t col = vreinterpret_u32_u8(vmovn_u16(vcombine_u16(c16, c16)));
+        uint32x2_t cs = vbsl_u32(lo_col, col, vreinterpret_u32_f32(uh));
+        float32x2_t uv = vext_f32(vget_high_f32(s), tv, 1);
+        vst1q_u8(d, vreinterpretq_u8_f32(vld1q_f32(o->p)));
+        vst1q_u8(d + 16, vreinterpretq_u8_u32(vcombine_u32(cs, vreinterpret_u32_f32(uv))));
+    }
 #else
-    uint32_t col = 0;
-    for (int k = 16; k >= 0; k -= 8)
-        col |= fbyte(f, u0 * (float)((t0->col >> k) & 0xFFu) + u1 * (float)((t1->col >> k) & 0xFFu) +
-                            u2 * (float)((t2->col >> k) & 0xFFu)) << k;
-    t.col = col;
-    t.tu = u0 * t0->tu + u1 * t1->tu + u2 * t2->tu;
+    for (uint32_t k = 0; k < n; k++)
+        fast_clip_vertex(f, w, d + 32u * k, &o[k]);
 #endif
-    t.spec = o->spec;
-    t.tv = u0 * t0->tv + u1 * t1->tv + u2 * t2->tv;
-    copy32(d, o->p, &t);
 }
 
 /* Bookkeeping at the end of a pass (as emit_strips). */
-static void fast_pass_end(uint32_t batch, uint32_t ntris, uint32_t nclip, uint32_t nverts)
+static inline void fast_pass_end(uint32_t batch, uint32_t ntris, uint32_t nclip, uint32_t nverts)
 {
     WR32(batch + BATCH_TRIS, RD32(batch + BATCH_TRIS) + ntris);
     WR32(G_CLIP_DEPTH, RD32(G_CLIP_DEPTH) + nclip);   /* one per clipper output triangle */
@@ -1785,11 +2011,15 @@ static void fast_pass_end(uint32_t batch, uint32_t ntris, uint32_t nclip, uint32
 
 /* Draws a pass from the prepared stream: clipper output vertices after the
  * patch's own, then the indices. */
-static void fast_emit(const Frame *f, FastWork *w, int32_t ntotal, uint32_t batch, uint32_t vbase)
+static inline __attribute__((always_inline)) void fast_emit(const Frame *f, FastWork *w, int32_t ntotal,
+                                                            uint32_t batch, uint32_t vbase)
 {
     uint8_t *d = g_mem + RD32(G_VBUF_PTR) + 32u * (uint32_t)ntotal;
-    for (uint32_t n = 0; n < w->ncv_main; n++, d += 32)
-        fast_clip_vertex(f, w, d, &w->cv[n]);
+    for (uint32_t e = 0; e < w->nclist; e++) {
+        uint32_t j = w->clist[e], n = 3u * w->ccount[j];
+        fast_clip_group(f, w, d, &w->cv[w->cstart[j]], n);
+        d += 32u * n;
+    }
     uint8_t *ip = g_mem + batch + BATCH_INDICES + RD32(batch + BATCH_TRIS) * 6u;
     const uint16_t *rel = w->rel;
     uint32_t i = 0, n = w->nrel;
@@ -1797,12 +2027,56 @@ static void fast_emit(const Frame *f, FastWork *w, int32_t ntotal, uint32_t batc
     uint16x8_t vb = vdupq_n_u16((uint16_t)vbase);
     for (; i + 8u <= n; i += 8u)
         vst1q_u8(ip + 2u * i, vreinterpretq_u8_u16(vaddq_u16(vld1q_u16(rel + i), vb)));
+    if (i + 4u <= n) {
+        vst1_u8(ip + 2u * i, vreinterpret_u8_u16(vadd_u16(vld1_u16(rel + i), vget_low_u16(vb))));
+        i += 4u;
+    }
 #endif
     for (; i < n; i++) {
         uint16_t x = (uint16_t)(rel[i] + vbase);
         memcpy(ip + 2u * i, &x, 2);
     }
     fast_pass_end(batch, n / 3u, w->ntri_main, (uint32_t)ntotal + w->ncv_main);
+}
+
+static void fast_emit_detail(const Frame *f, FastWork *w, const uint8_t *strip, int32_t nwords, int32_t ntotal,
+                             uint32_t batch, uint32_t vbase);
+
+/* The passes of a patch: its groups' texture passes (two each, those the patch
+ * needs), then the detail pass when it has one: vertices, batch and indices. */
+static __attribute__((noinline)) void fast_passes(const Frame *f, FastWork *w, const uint8_t *rec, int32_t nbase,
+                                                  int32_t ntotal, int32_t ngroups, uint32_t passes,
+                                                  const uint8_t *strip, int32_t nwords, int32_t first_clip)
+{
+    int first_batch = 1;
+    int32_t g = 0;
+    do {
+        for (uint32_t pass = 1; pass < 3; pass++) {
+            if (!(passes & pass)) {
+                rec += 4 + 20 * ntotal - 8 * nbase;
+                continue;
+            }
+            uint32_t material = rd32(rec);
+            uint32_t vbase = RD32(G_VBUF_COUNT);
+            rec = fast_pass_vertices_k(w, rec + 4, nbase, ntotal, RD32(G_VBUF_PTR), 0);
+            uint32_t batch = fast_get_batch(f, w, material, first_batch ? 0u : 1u);
+            first_batch = 0;
+            fast_emit(f, w, ntotal, batch, vbase);
+        }
+    } while (++g < ngroups);
+
+    uint32_t detail = rd32(rec);
+    if (!detail)
+        return;
+    uint32_t vbase = RD32(G_VBUF_COUNT);
+    fast_pass_vertices_k(w, rec + 4, nbase, ntotal, RD32(G_VBUF_PTR), 1);
+    uint32_t batch = fast_get_batch(f, w, detail, 2);
+    /* Clipped triangles overwrite the flags of entries 64 and up (the guest's
+     * overlay): entry by entry when a later one is affected. */
+    if (first_clip >= 0 && (first_clip + 1 > 64 ? first_clip + 1 : 64) < nwords)
+        fast_emit_detail(f, w, strip, nwords, ntotal, batch, vbase);
+    else
+        fast_emit(f, w, ntotal, batch, vbase);
 }
 
 /* The guest's flag overlay of a detail pass triangle (see overlay_detail_flags):
@@ -1838,12 +2112,15 @@ static void fast_overlay(FastWork *w, const uint8_t *s)
 
 /* Detail pass of a patch whose flag overlay changes later strip entries: entry
  * by entry as emit_strips, clipping entries not clipped before on demand. */
-static void fast_emit_detail(const Frame *f, FastWork *w, const uint8_t *strip, int32_t nwords, int32_t ntotal,
-                             uint32_t batch, uint32_t vbase)
+static __attribute__((noinline)) void fast_emit_detail(const Frame *f, FastWork *w, const uint8_t *strip,
+                                                       int32_t nwords, int32_t ntotal, uint32_t batch, uint32_t vbase)
 {
     uint32_t vb = RD32(G_VBUF_PTR);
     uint8_t *ip = g_mem + batch + BATCH_INDICES + RD32(batch + BATCH_TRIS) * 6u;
     uint32_t m = 0, ntris = 0, nclip = 0;
+    memset(w->cdone, 0, (size_t)nwords);
+    for (uint32_t e = 0; e < w->nclist; e++)
+        w->cdone[w->clist[e]] = 1;
     for (int32_t j = 0; j < nwords; j++) {
         uint32_t fl = w->tri[j];
         uint32_t word = rd32(strip + 4 * j);
@@ -1861,9 +2138,9 @@ static void fast_emit_detail(const Frame *f, FastWork *w, const uint8_t *strip, 
                 w->ccount[j] = (uint16_t)fclip_entry(f, w, word);
                 w->cdone[j] = 1;
             }
-            const FClipV *o = &w->cv[w->cstart[j]];
+            fast_clip_group(f, w, g_mem + vb + 32u * ((uint32_t)ntotal + m), &w->cv[w->cstart[j]],
+                            3u * w->ccount[j]);
             for (uint32_t k = 0; k < 3u * w->ccount[j]; k++, m++) {
-                fast_clip_vertex(f, w, g_mem + vb + 32u * ((uint32_t)ntotal + m), &o[k]);
                 uint16_t x = (uint16_t)((uint32_t)ntotal + m + vbase);
                 memcpy(ip, &x, 2);
                 ip += 2;
@@ -1876,9 +2153,15 @@ static void fast_emit_detail(const Frame *f, FastWork *w, const uint8_t *strip, 
 }
 
 /* Culls the strip entries as the exact version (flags into w->tri, used
- * vertices); returns 1 when every triangle is culled. */
-static __attribute__((noinline)) uint32_t fast_cull(FastWork *w, const uint8_t *strip, int32_t nwords, uint32_t sflags)
+ * vertices); returns 1 when every triangle is culled. Otherwise also does what
+ * fast_prepare does (index stream and clipper output, w->first_clip). */
+static __attribute__((noinline)) uint32_t fast_cull(const Frame *f, FastWork *w, const uint8_t *strip, int32_t nwords,
+                                                    uint32_t sflags, int32_t ntotal)
 {
+    int32_t first = -1;
+    uint32_t nrel = 0, ntri = 0;
+    w->ncv = 0;
+    w->nclist = 0;
     float wind0 = (sflags >> 2) & 1u ? -1.0f : 1.0f, wind = wind0;
     float x0 = 0, y0 = 0, x1 = 0, y1 = 0, x2 = 0, y2 = 0;
     uint32_t c0 = 0, c1 = 0, c2 = 0, i0 = 0, i1 = 0, i2 = 0;
@@ -1917,6 +2200,23 @@ static __attribute__((noinline)) uint32_t fast_cull(FastWork *w, const uint8_t *
                 w->unused[i0] = 0;
                 fl ^= TRI_CULLED;
                 allculled = 0;
+                if (fl == 0) {
+                    w->rel[nrel] = (uint16_t)(word & 0xFFu);
+                    w->rel[nrel + 1] = (uint16_t)((word >> 16) & 0xFFu);
+                    w->rel[nrel + 2] = (uint16_t)((word >> 8) & 0xFFu);
+                    nrel += 3;
+                } else {
+                    if (first < 0)
+                        first = j;
+                    uint32_t start = w->ncv;
+                    uint32_t n = fclip_entry(f, w, word);
+                    w->cstart[j] = (uint16_t)start;
+                    w->ccount[j] = (uint16_t)n;
+                    w->clist[w->nclist++] = (uint8_t)j;
+                    for (uint32_t q = start; q < w->ncv; q++)
+                        w->rel[nrel++] = (uint16_t)((uint32_t)ntotal + q);
+                    ntri += n;
+                }
             }
         }
         w->tri[j] = (uint8_t)fl;
@@ -1927,6 +2227,10 @@ static __attribute__((noinline)) uint32_t fast_cull(FastWork *w, const uint8_t *
             wind = wind0;
         }
     }
+    w->nrel = nrel;
+    w->ncv_main = w->ncv;
+    w->ntri_main = ntri;
+    w->first_clip = first;
     return allculled;
 }
 
@@ -1939,7 +2243,7 @@ static void fast_patch(const Frame *f, FastWork *w, uint32_t patch)
     int32_t nbase = (int32_t)hdr >> 16;
     int32_t ntotal = (int32_t)(hdr & 0xFFFFu);
     uint32_t lod = rd32(pp + 0x1C);
-    float lod_k = (float)(0.375 / (double)(int32_t)(1u << ((25u - lod) & 31u)));
+    float lod_k = w->lod_k[(25u - lod) & 31u];
     int32_t radius = 0x40000000 >> (lod & 31u);
 
     /* The patch range test is the exact version's (once per patch). */
@@ -1950,31 +2254,19 @@ static void fast_patch(const Frame *f, FastWork *w, uint32_t patch)
 
     const uint8_t *base = pp + 0x20;
     uint32_t passes = fast_base_vertices(f, w, base, nbase, lod_k);
-    /* Morph vertices: {x, y, z, parent}; they move towards their parent base vertex. */
-    const uint8_t *vp = base + 16 * nbase;
-    for (int32_t i = nbase; i < ntotal; i++, vp += 16) {
-        float x = rdf(vp), y = rdf(vp + 4), z = rdf(vp + 8);
-        int32_t parent = (int32_t)rd32(vp + 12);
-        if (parent >= 0 && parent < 256) {
-            float t = fast_morph_of(w, parent, nbase);
-            const uint8_t *pv = base + 16 * parent;
-            x += (rdf(pv) - x) * t;
-            y += (rdf(pv + 4) - y) * t;
-            z += (rdf(pv + 8) - z) * t;
-        } else {
-            note_stale();
-        }
-        w->x[i] = x + f->ncam[0];
-        w->y[i] = y + f->ncam[1];
-        w->z[i] = z + f->ncam[2];
-    }
+    fast_morph_vertices(f, w, base, nbase, ntotal);
+    const uint8_t *vp = base + 16 * ntotal;
     fast_project(f, w, ntotal);
     int behind = 0;
-    for (int32_t i = 0; i < ntotal; i++) {
+    for (int32_t i = 0; i < ntotal; i++)
         behind |= (int)w->code[i];
-        w->unused[i] = 1;
-    }
     behind &= OUT_NEAR;
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+    for (int32_t i = 0; i < ntotal; i += 16)    /* ntotal <= MAX_VERTS: inside the array */
+        vst1q_u8(w->unused + i, vdupq_n_u8(1));
+#else
+    memset(w->unused, 1, (size_t)ntotal);
+#endif
 
     uint32_t sflags = rd32(vp);
     WR32(G_STRIP_FLIP, (sflags >> 2) & 1u);
@@ -1983,47 +2275,33 @@ static void fast_patch(const Frame *f, FastWork *w, uint32_t patch)
     int32_t nwords = (int32_t)rd32(vp + 12);
     const uint8_t *rec = vp + 16;
 
+    int32_t first_clip;
     if (!behind) {
-        if (fast_cull(w, strip, nwords, sflags))
+        if (fast_cull(f, w, strip, nwords, sflags, ntotal))
             return;
+        first_clip = w->first_clip;
     } else {
         if (nwords > 0)
             memset(w->tri, OUT_NEAR, (size_t)nwords);
         if (ntotal > 0)
             memset(w->unused, 0, (size_t)ntotal);
+        first_clip = fast_prepare(f, w, strip, nwords, ntotal);
     }
+    /* The vertices the passes write. */
+    uint32_t nused = 0;
+    int32_t i = 0;
+    for (; i < nbase; i++) {
+        w->used[nused] = (uint8_t)i;
+        nused += w->unused[i] ^ 1u;
+    }
+    w->nused_base = nused;
+    for (; i < ntotal; i++) {
+        w->used[nused] = (uint8_t)i;
+        nused += w->unused[i] ^ 1u;
+    }
+    w->nused = nused;
 
-    int32_t first_clip = fast_prepare(f, w, strip, nwords, ntotal);
-
-    int first_batch = 1;
-    int32_t g = 0;
-    do {
-        for (uint32_t pass = 1; pass < 3; pass++) {
-            if (!(passes & pass)) {
-                rec += 4 + 20 * ntotal - 8 * nbase;
-                continue;
-            }
-            uint32_t material = rd32(rec);
-            uint32_t vbase = RD32(G_VBUF_COUNT);
-            rec = fast_pass_vertices(w, rec + 4, nbase, ntotal, RD32(G_VBUF_PTR), 0);
-            uint32_t batch = get_batch(f, material, first_batch ? 0u : 1u);
-            first_batch = 0;
-            fast_emit(f, w, ntotal, batch, vbase);
-        }
-    } while (++g < ngroups);
-
-    uint32_t detail = rd32(rec);
-    if (!detail)
-        return;
-    uint32_t vbase = RD32(G_VBUF_COUNT);
-    fast_pass_vertices(w, rec + 4, nbase, ntotal, RD32(G_VBUF_PTR), 1);
-    uint32_t batch = get_batch(f, detail, 2);
-    /* Clipped triangles overwrite the flags of entries 64 and up (the guest's
-     * overlay): entry by entry when a later one is affected. */
-    if (first_clip >= 0 && (first_clip + 1 > 64 ? first_clip + 1 : 64) < nwords)
-        fast_emit_detail(f, w, strip, nwords, ntotal, batch, vbase);
-    else
-        fast_emit(f, w, ntotal, batch, vbase);
+    fast_passes(f, w, rec, nbase, ntotal, ngroups, passes, strip, nwords, first_clip);
 }
 
 int rt_native_terrain_render(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret)
@@ -2085,11 +2363,16 @@ int rt_native_terrain_render(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, u
     } else {
         static FastWork fwork;
         memset(fwork.blend, 0, sizeof(fwork.blend));
+        memset(fwork.bc_batch, 0, sizeof(fwork.bc_batch));
+        for (uint32_t k = 0; k < 32; k++)
+            fwork.lod_k[k] = (float)(0.375 / (double)(int32_t)(1u << k));
+        fwork.fpscr_mode = fpscr_enter();
         for (int32_t i = 0; i < npatch; i++) {
             uint32_t patch = RD32(G_PATCH_LIST + 4u * (uint32_t)i);
             if (patch)
                 fast_patch(&f, &fwork, patch);
         }
+        fpscr_leave(fwork.fpscr_mode);
     }
 
     flush_batches(&f);
