@@ -1032,7 +1032,9 @@ static void send_lights(void)
     cur->normalize = rs[143] != 0;
     memcpy(cur->mat, g_rs.mat_diffuse, 16);
     memcpy(cur->mat + 4, g_rs.mat_ambient, 16);
-    memcpy(cur->mat + 8, g_rs.mat_specular, 16);
+    /* D3D adds specular lighting only with SPECULARENABLE; GL always does. */
+    if (rs[29])
+        memcpy(cur->mat + 8, g_rs.mat_specular, 16);
     memcpy(cur->mat + 12, g_rs.mat_emissive, 16);
     cur->mat[16] = g_rs.mat_power;
     memcpy(cur->view, g_rs.view, sizeof(cur->view));

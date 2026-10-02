@@ -1,0 +1,125 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: HenryKun55 <henriqueflavio55@gmail.com>
+Date: Fri, 2 Oct 2026 11:30:00 -0300
+Subject: [PATCH] Vertex lighting without inout light functions
+
+The per-vertex lighting summed each light through point_light/
+directional_light functions with inout accumulators, picked by a branch
+on the light's w. The diffuse sum came out as garbage: with one enabled
+black light (diffuse, ambient and specular all zero) it was about
+-(0.25, 0.2, 0.16), which darkened every lit draw and tinted it blue.
+Each light is now added in main through a macro, unrolled for the
+shader's light count, with no functions or branches: positional lights
+(w = 1) are attenuated, directional ones (w = 0) are not, and the half
+vector is the infinite viewer one, L + (0, 0, 1), for both (the
+directional path used L - position). A step instead of a branch skips
+the specular term for normals facing away from the light.
+
+The shader cache magic goes up so programs cached from the old source
+are not reused.
+
+---
+diff --git a/source/shaders/ffp_v.h b/source/shaders/ffp_v.h
+--- a/source/shaders/ffp_v.h
++++ b/source/shaders/ffp_v.h
+@@ -43,40 +43,23 @@
+ uniform float4 Flight_global_ambient;
+ uniform float Gshininess;
+ 
+-void point_light(short i, float3 normal, float3 position, float4 inout Ambient, float4 inout Diffuse, float4 inout Specular) {
+-	float3 VP = Dlights_positions[i].xyz - position;
+-	float d = length(VP);
+-	VP = normalize(VP);
+-	float attenuation = 1.0f / (Elights_attenuations[i].x +
+-		Elights_attenuations[i].y * d +
+-		Elights_attenuations[i].z * d * d);
+-	float nDotVP = max(0.0f, dot(normal, VP));
+-
+-	Ambient += Alights_ambients[i] * attenuation;
+-	Diffuse += Blights_diffuses[i] * nDotVP * attenuation;
+-	if (nDotVP != 0.0f) {
+-		float nDotHV = max(0.0f, dot(normal, normalize(VP + float3(0.0f, 0.0f, 1.0f))));
+-		Specular += Clights_speculars[i] * pow(nDotHV, Gshininess) * attenuation;
+-	}
++// One light's contribution, written out in main for each light: no inout
++// functions or branches (their accumulators came out wrong). Positional
++// lights (w = 1) are attenuated; directional ones (w = 0) are not. The
++// half vector uses the infinite viewer (0, 0, 1) for both.
++#define ADD_LIGHT(i) { \
++	float4 lp = Dlights_positions[i]; \
++	float3 VP = lp.xyz - ecPosition * lp.w; \
++	float d = length(VP); \
++	VP = VP / d; \
++	float3 la = Elights_attenuations[i]; \
++	float att = lerp(1.0f, 1.0f / (la.x + la.y * d + la.z * d * d), lp.w); \
++	float nDotVP = max(0.0f, dot(normal, VP)); \
++	float nDotHV = max(0.000001f, dot(normal, normalize(VP + float3(0.0f, 0.0f, 1.0f)))); \
++	Ambient += Alights_ambients[i] * att; \
++	Diffuse += Blights_diffuses[i] * (nDotVP * att); \
++	Specular += Clights_speculars[i] * (pow(nDotHV, Gshininess) * att * step(0.000001f, nDotVP)); \
+ }
+-
+-void directional_light(short i, float3 normal, float3 position, float4 inout Ambient, float4 inout Diffuse, float4 inout Specular) {
+-	float nDotVP = max(0.0f, dot(normal, normalize(Dlights_positions[i].xyz)));
+-		
+-	Ambient += Alights_ambients[i];
+-	Diffuse += Blights_diffuses[i] * nDotVP;
+-	if (nDotVP != 0.0f) {
+-		float nDotHV = max(0.0f, dot(normal, normalize(Dlights_positions[i].xyz - position)));
+-		Specular += Clights_speculars[i] * pow(nDotHV, Gshininess);
+-	}
+-}
+-
+-void calculate_light(short i, float3 ecPosition, float3 N, float4 inout Ambient, float4 inout Diffuse, float4 inout Specular) {
+-	if (Dlights_positions[i].w == 1.0f)
+-		point_light(i, N, ecPosition, Ambient, Diffuse, Specular);
+-	else
+-		directional_light(i, N, ecPosition, Ambient, Diffuse, Specular);
+-}
+ #endif
+ 
+ void main(
+@@ -173,9 +156,28 @@
+ 	float4 Ambient = float4(0.0f, 0.0f, 0.0f, 0.0f);
+ 	float4 Diffuse = float4(0.0f, 0.0f, 0.0f, 0.0f);
+ 	float4 Specular = float4(0.0f, 0.0f, 0.0f, 0.0f);
+-	for (short i = 0; i < lights_num; i++) {
+-		calculate_light(i, ecPosition, normal, Ambient, Diffuse, Specular);
+-	}
++	ADD_LIGHT(0)
++#if lights_num > 1
++	ADD_LIGHT(1)
++#endif
++#if lights_num > 2
++	ADD_LIGHT(2)
++#endif
++#if lights_num > 3
++	ADD_LIGHT(3)
++#endif
++#if lights_num > 4
++	ADD_LIGHT(4)
++#endif
++#if lights_num > 5
++	ADD_LIGHT(5)
++#endif
++#if lights_num > 6
++	ADD_LIGHT(6)
++#endif
++#if lights_num > 7
++	ADD_LIGHT(7)
++#endif
+ #endif
+ #endif
+ 
+diff --git a/source/shared.h b/source/shared.h
+--- a/source/shared.h
++++ b/source/shared.h
+@@ -298,7 +298,7 @@
+ 
+ // Fixed-function pipeline shader cache settings
+ #ifndef DISABLE_FS_SHADER_CACHE
+-#define SHADER_CACHE_MAGIC 28 // This must be increased whenever ffp shader sources or shader mask/combiner mask changes
++#define SHADER_CACHE_MAGIC 29 // This must be increased whenever ffp shader sources or shader mask/combiner mask changes
+ //#define DUMP_SHADER_SOURCES // Enable this flag to dump shader sources inside shader cache
+ #endif
+ 
