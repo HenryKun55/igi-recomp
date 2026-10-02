@@ -120,6 +120,26 @@ CONSTS = {
     # Cutscene clock and mission clock
     0x00489492: (1, G),     # LevelFlow clock: tick / (GetRate * 3600) -> ticks stay 30 Hz
     0x00486CDA: (1, G),     # StatusScreen (HUD) blink phase += 1/15 per step
+    # Moving world objects (updated every step: smooth motion)
+    0x00446F05: (-1, G),    # Door: swing step = angle / (time * 30)
+    0x00446F68: (-1, G),
+    0x0044701A: (-1, G),    # Door: slide step = distance / (time * 30)
+    0x0044706C: (-1, G),
+    0x0043910F: (1, G),     # RotatingObject: acceleration and angle per second / 30
+    0x00439155: (1, G),
+    0x004391B0: (1, G),
+    0x004391F6: (1, G),
+    0x00439251: (1, G),
+    0x00439297: (1, G),
+    0x004392C8: (1, G),
+    0x004392E4: (1, G),
+    0x004392FC: (1, G),
+    0x00448ECD: (1, G),     # RadarDish: same
+    0x00448F16: (1, G),
+    0x00448F47: (1, G),
+    0x00439BA1: (1, G),     # AlarmLightReflector: 6 degrees per step
+    0x0044427E: (1, G),     # Drawer: open speed per step
+    0x004442B5: (1, G),     # Drawer: close speed per step
     # Player physics config (loaded once; read only by the player's body)
     0x00410099: (1, G),     # jump forward speed km/h -> units per step
     0x004100B3: (1, G),     # jump up speed km/h -> units per step
