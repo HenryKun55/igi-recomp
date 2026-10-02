@@ -1234,8 +1234,7 @@ static inline uint32x4_t fge_mask(float32x4_t a, float32x4_t b)
 {
     return vreinterpretq_u32_s32(vmvnq_s32(vshrq_n_s32(vreinterpretq_s32_f32(vsubq_f32(a, b)), 31)));
 }
-#endif
-
+#else
 /* Blend colours of a base vertex from its grey levels (as draw_patch). */
 static inline void fast_blend_row(uint32_t *bl, uint32_t g1, uint32_t g2)
 {
@@ -1251,6 +1250,7 @@ static inline void fast_blend_row(uint32_t *bl, uint32_t g1, uint32_t g2)
     bl[6] = g1;
     bl[7] = inv1;
 }
+#endif
 
 /* Base vertices: morph factor, morphed height and the blend colours; the
  * camera-relative position into x, y, z. Returns the texture passes the patch
