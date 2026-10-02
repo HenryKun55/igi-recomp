@@ -438,61 +438,92 @@ SHIM(kernel32, CreateFileA)
 }
 
 /* ---- buffered reads ----------------------------------------------------
- * The game streams sound in small ReadFile calls; each one was a system call
- * (slow on the Vita). Reads go through a per-handle read-ahead buffer. While
- * the buffer is valid the descriptor sits at base + len and the file position
- * the game sees is base + pos.
+ * The game reads through its C runtime's small stream buffer: sound is streamed
+ * in small ReadFile calls, and the AI graphs (graphs/graph*.dat) are parsed with
+ * a seek, a size query (seek to the end and back) and a 512-byte read per item,
+ * thousands of times per mission load. Each was a system call or more, slow on
+ * the Vita. Reads go through a per-handle read-ahead buffer that stays valid
+ * across seeks: while it is active the file position the game sees is b->cur
+ * (the descriptor's own position is only set again for a refill or a write),
+ * and the file size for seeks from the end is asked once.
  */
 #define READ_AHEAD (64u * 1024u)
 
 typedef struct ReadBuf {
-    off_t base;
-    uint32_t len, pos;
+    int active;      /* cur is the file position (else the descriptor's) */
+    int size_ok;     /* size is known */
+    off_t cur, size;
+    off_t fd_at;     /* the descriptor's position while active */
+    off_t base;      /* file offset of data[0] */
+    uint32_t len;    /* valid bytes in data */
     uint8_t data[READ_AHEAD];
 } ReadBuf;
 
-/* Puts the descriptor back at the game's position and drops the buffer. */
+/* Puts the descriptor back at the game's position and drops the buffer (before
+ * writes and anything else that uses the descriptor's position). */
 static void rb_drop(HandleObj *o)
 {
     ReadBuf *b = o->ptr;
-    if (b && b->len) {
-        lseek(o->fd, b->base + (off_t)b->pos, SEEK_SET);
-        b->len = b->pos = 0;
+    if (b && b->active) {
+        lseek(o->fd, b->cur, SEEK_SET);
+        b->active = 0;
+    }
+    if (b) {
+        b->len = 0;
+        b->size_ok = 0;
     }
 }
 
-static ssize_t rb_read(HandleObj *o, uint8_t *dst, uint32_t n)
+static ReadBuf *rb_activate(HandleObj *o)
 {
     ReadBuf *b = o->ptr;
     if (!b) {
         b = calloc(1, sizeof(*b));
         o->ptr = b;
     }
+    if (!b->active) {
+        b->cur = b->fd_at = lseek(o->fd, 0, SEEK_CUR);
+        b->active = 1;
+    }
+    return b;
+}
+
+static ssize_t rb_read(HandleObj *o, uint8_t *dst, uint32_t n)
+{
+    ReadBuf *b = rb_activate(o);
     ssize_t total = 0;
     while (n) {
-        if (b->pos < b->len) {
-            uint32_t k = b->len - b->pos < n ? b->len - b->pos : n;
-            memcpy(dst, b->data + b->pos, k);
-            b->pos += k;
+        if (b->cur >= b->base && b->cur < b->base + (off_t)b->len) {
+            uint32_t at = (uint32_t)(b->cur - b->base);
+            uint32_t k = b->len - at < n ? b->len - at : n;
+            memcpy(dst, b->data + at, k);
+            b->cur += k;
             dst += k;
             n -= k;
             total += k;
             continue;
         }
+        if (b->fd_at != b->cur)
+            b->fd_at = lseek(o->fd, b->cur, SEEK_SET);
         if (n >= READ_AHEAD) {   /* big reads go straight through */
-            rb_drop(o);
             ssize_t got = read(o->fd, dst, n);
-            return got < 0 ? (total ? total : got) : total + got;
+            if (got < 0) {
+                b->fd_at = -1;
+                return total ? total : got;
+            }
+            b->cur += got;
+            b->fd_at = b->cur;
+            return total + got;
         }
-        off_t at = b->len ? b->base + (off_t)b->len : lseek(o->fd, 0, SEEK_CUR);
         ssize_t got = read(o->fd, b->data, READ_AHEAD);
         if (got <= 0) {
-            b->len = b->pos = 0;
+            b->len = 0;
+            b->fd_at = -1;
             break;
         }
-        b->base = at;
+        b->base = b->cur;
+        b->fd_at = b->cur + got;
         b->len = (uint32_t)got;
-        b->pos = 0;
     }
     return total;
 }
@@ -564,17 +595,27 @@ SHIM(kernel32, SetFilePointer)
     int whence = method == 1 ? SEEK_CUR : method == 2 ? SEEK_END : SEEK_SET;
     ReadBuf *b = o->ptr;
     off_t r;
-    if (b && b->len && whence != SEEK_END) {
-        off_t target = whence == SEEK_CUR ? b->base + (off_t)b->pos + (off_t)off : (off_t)off;
-        if (target >= b->base && target <= b->base + (off_t)b->len) {
-            b->pos = (uint32_t)(target - b->base);   /* inside the buffer: no system call */
-            r = target;
+    if (b && b->active) {
+        /* No system call, except a size query once per file. */
+        off_t from = 0;
+        if (whence == SEEK_CUR) {
+            from = b->cur;
+        } else if (whence == SEEK_END) {
+            if (!b->size_ok) {
+                struct stat st;
+                b->size = fstat(o->fd, &st) == 0 ? st.st_size : 0;
+                b->size_ok = 1;
+            }
+            from = b->size;
+        }
+        r = from + (off_t)off;
+        if (r < 0) {
+            win32_set_last_error(131u);   /* ERROR_NEGATIVE_SEEK */
+            r = -1;
         } else {
-            b->len = b->pos = 0;
-            r = lseek(o->fd, target, SEEK_SET);
+            b->cur = r;
         }
     } else {
-        rb_drop(o);
         r = lseek(o->fd, (off_t)off, whence);
     }
     if (high)
