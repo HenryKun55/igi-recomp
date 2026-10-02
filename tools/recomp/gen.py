@@ -54,6 +54,9 @@ GAME_HOOKS = [
     0x00497860,   # 2D render queue: per-node state setup
     0x00402820,   # game clock: set the update/render rate (Hz)
     0x00402260,   # game clock: scheduler (one update or render per call)
+    0x0048A440,   # loading screen: create (background picture, progress bar)
+    0x0048A620,   # loading screen: advance the progress bar
+    0x0048A5D0,   # loading screen: destroy
 ]
 
 # MSVC CRT setjmp/longjmp: setjmp call sites become host setjmp, and the
