@@ -401,6 +401,15 @@ static inline __attribute__((always_inline)) void rt_move_small(uint8_t *d, cons
 #endif
 }
 
+/* Copy between non-overlapping objects of a small constant size (a multiple of 4,
+ * at most 128): structures GCC would otherwise copy with a memcpy call. */
+static inline __attribute__((always_inline)) void rt_copy_small(void *d, const void *s, uint32_t b)
+{
+    rt_move_small((uint8_t *)d, (const uint8_t *)s, b > 64u ? 64u : b);
+    if (b > 64u)
+        rt_move_small((uint8_t *)d + 64, (const uint8_t *)s + 64, b - 64u);
+}
+
 /* Store of a small constant number of copies of a 32-bit value (b as above). */
 static inline __attribute__((always_inline)) void rt_fill_small(uint8_t *d, uint32_t v, uint32_t b)
 {

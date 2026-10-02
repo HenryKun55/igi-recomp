@@ -277,7 +277,7 @@ static RVertex *decode(uint32_t fvf, const uint8_t *vb, uint32_t stride, const u
 static void guest_verts(uint32_t fvf, const uint8_t *base, uint32_t stride, const uint32_t *src, GuestVerts *g)
 {
     uint32_t pos = fvf & 0x0Eu;
-    memset(g, 0, sizeof(*g));
+    rt_fill_small((uint8_t *)g, 0, sizeof(*g));   /* per draw: no SceLibc memset */
     g->base = base;
     g->stride = stride;
     g->src = src;

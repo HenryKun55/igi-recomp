@@ -151,9 +151,9 @@ static void triangles(Call *k, uint32_t blk, uint32_t verts, int type3)
             uint32_t sp = S - 0x60u;
             WR32(S - 4u, RD32(S + F_NEAR));
             WR32(S - 8u, zmin);
-            memmove(g_mem + S - 0x24u, g_mem + v2, VERT_SIZE);
-            memmove(g_mem + S - 0x40u, g_mem + v1, VERT_SIZE);
-            memmove(g_mem + S - 0x5Cu, g_mem + v0, VERT_SIZE);
+            rt_move_small(g_mem + S - 0x24u, g_mem + v2, VERT_SIZE);
+            rt_move_small(g_mem + S - 0x40u, g_mem + v1, VERT_SIZE);
+            rt_move_small(g_mem + S - 0x5Cu, g_mem + v0, VERT_SIZE);
             WR32(sp, type3 ? RET_CLIP3 : RET_CLIP0);
             c->r[2] = v0;
             c->r[3] = k->obj;

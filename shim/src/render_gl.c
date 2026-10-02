@@ -1040,7 +1040,7 @@ static void send_lights(void)
     memcpy(cur->view, g_rs.view, sizeof(cur->view));
     for (int i = 0; i < MAX_LIGHTS; i++)
         if (g_rs.lights[i].enabled)
-            cur->lights[i] = g_rs.lights[i];
+            rt_copy_small(&cur->lights[i], &g_rs.lights[i], sizeof(Light));
     if (g_trace_next_frame == 2) {
         rt_log("lights: ambient %08X colorvertex %u diffsrc %u ambsrc %u specsrc %u emissrc %u specular %u normalize %u",
                rs[139], rs[141], rs[145], rs[147], rs[146], rs[148], rs[29], rs[143]);
@@ -1401,11 +1401,17 @@ static void pack_vertices(const Layout *L, const RVertex *v, uint32_t nv, uint32
 static void submit_arrays(int prim, const Layout *L, uint32_t nv, const uint16_t *idx, uint32_t ni,
                           const DrawArrays *A);
 
+/* Per-draw structures are cleared and copied inline (rt_fill_small, rt_copy_small):
+ * GCC would call memset and memcpy, which on the Vita are SceLibc imports. */
+_Static_assert(sizeof(DrawArrays) % 4u == 0 && sizeof(DrawArrays) <= 128u, "DrawArrays size");
+_Static_assert(sizeof(Layout) % 4u == 0 && sizeof(Layout) <= 128u, "Layout size");
+_Static_assert(sizeof(Light) % 4u == 0 && sizeof(Light) <= 128u, "Light size");
+
 /* Draws the open storage (vtx) with indices idx (idx_out for batches). */
 static void submit(int prim, const Layout *L, uint32_t nv, const uint16_t *idx, uint32_t ni)
 {
     DrawArrays A;
-    memset(&A, 0, sizeof(A));
+    rt_fill_small((uint8_t *)&A, 0, sizeof(A));
     A.stride = (int)L->stride;
     uintptr_t b = (uintptr_t)vtx;
 #if defined(__vita__)
@@ -1482,8 +1488,8 @@ static void submit_arrays_rs(int prim, const Layout *L, uint32_t nv, const uint1
     d->nv = nv;
     d->ni = ni;
     d->idx = idx;   /* client indices are read during the call */
-    d->L = *L;
-    d->A = *A;
+    rt_copy_small(&d->L, L, sizeof(*L));
+    rt_copy_small(&d->A, A, sizeof(*A));
     bk_draw(d);
     /* Sampler state goes with the first draw after the texture's settings changed. */
     d->stage[0].sampler = d->stage[1].sampler = 0;
@@ -1524,8 +1530,8 @@ static void submit_arrays(int prim, const Layout *L, uint32_t nv, const uint16_t
     d->nv = nv;
     d->ni = ni;
     d->idx = idx;
-    d->L = *L;
-    d->A = *A;
+    rt_copy_small(&d->L, L, sizeof(*L));
+    rt_copy_small(&d->A, A, sizeof(*A));
     fill_state(d, stages, !pretransformed);
     uint64_t t1 = fine_now();
     pc_frame[PC_STATE_US] += (t1 - t0) - (pc_frame[PC_TEX_US] - tex_before);
@@ -2208,7 +2214,7 @@ int render_draw_vb(void **slot, uint32_t gen, const RVertex *all, uint32_t count
     uint64_t t0 = fine_now_fe();
     perf.draws++;
     DrawArrays A;
-    memset(&A, 0, sizeof(A));
+    rt_fill_small((uint8_t *)&A, 0, sizeof(A));
     A.vbo = g->buf;
     A.pos = (const void *)(uintptr_t)(start * 12u);
     A.col = (const void *)(g->off_col + start * 4u);
@@ -2519,7 +2525,7 @@ static int dyn_prepare(uint32_t lock_id, uint32_t start, const GuestVerts *g, ui
     dyn.start = start;
     dyn.nv = nv;
     dyn.frame = frame;
-    dyn.L = *L;
+    rt_copy_small(&dyn.L, L, sizeof(*L));
     dyn.valid = 1;
     return 1;
 }
@@ -2582,7 +2588,7 @@ int render_draw_dynvb(uint32_t lock_id, uint32_t start, const GuestVerts *g, uin
         return 0;   /* the general path clamps out-of-range indices */
     }
     DrawArrays A;
-    memset(&A, 0, sizeof(A));
+    rt_fill_small((uint8_t *)&A, 0, sizeof(A));
     A.stride = (int)L.stride;
     uintptr_t b = (uintptr_t)dyn.data;
 #if defined(__vita__)

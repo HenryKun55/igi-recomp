@@ -358,9 +358,9 @@ int rt_native_bend_draw(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64
                         uint32_t sp = S - 0x60u;
                         rt_st32(gm + S - 4u, rt_ld32(gm + S + F_NEAR));
                         rt_st32(gm + S - 8u, S + F_ZMIN);
-                        memmove(gm + S - 0x24u, gm + v2, NV_VERT_SIZE);
-                        memmove(gm + S - 0x40u, gm + v1, NV_VERT_SIZE);
-                        memmove(gm + S - 0x5Cu, gm + v0, NV_VERT_SIZE);
+                        rt_move_small(gm + S - 0x24u, gm + v2, NV_VERT_SIZE);
+                        rt_move_small(gm + S - 0x40u, gm + v1, NV_VERT_SIZE);
+                        rt_move_small(gm + S - 0x5Cu, gm + v0, NV_VERT_SIZE);
                         rt_st32(gm + sp, RET_CLIP);
                         c->r[2] = v0;
                         c->r[3] = idx;
