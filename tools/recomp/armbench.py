@@ -40,6 +40,22 @@ TOOL = os.path.join(SDK, 'bin', 'arm-vita-eabi-')
 CFLAGS = ['-O2', '-mcpu=cortex-a9', '-mfpu=neon', '-mfloat-abi=hard', '-mthumb', '-fno-short-enums',
           '-ffunction-sections', '-fdata-sections', '-D__vita__']
 
+# The update-rate hooks (runtime/src/tick_rate.c) as they behave at the original
+# 30 Hz: nothing to do (the real ones read the configuration through the C library).
+TICK_STUB = r'''
+#include "recomp.h"
+#include "runtime.h"
+int rt_tick_now(void) { return 1; }
+int rt_tick_gate(Ctx *c, uint32_t fn, uint32_t esp, uint32_t flags, uint64_t *ret)
+{ (void)c; (void)fn; (void)esp; (void)flags; (void)ret; return 0; }
+int rt_tick_step_count(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret)
+{ (void)c; (void)esp; (void)ecx; (void)eax; (void)ret; return 0; }
+int rt_tick_camera_shake(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret)
+{ (void)c; (void)esp; (void)ecx; (void)eax; (void)ret; return 0; }
+int rt_tick_cutscene_time(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret)
+{ (void)c; (void)esp; (void)ecx; (void)eax; (void)ret; return 0; }
+'''
+
 GMEM = 0x10000000           # guest memory in the emulated address space
 GSIZE = 0x03000000
 CTX = 0x00900000
@@ -116,11 +132,15 @@ def build(exe, gen_dir, out, list_file=None):
     if not os.path.exists(stub) or open(stub).read() != STUB:
         with open(stub, 'w') as f:
             f.write(STUB)
+    tick = os.path.join(work, 'tick_stub.c')
+    if not os.path.exists(tick) or open(tick).read() != TICK_STUB:
+        with open(tick, 'w') as f:
+            f.write(TICK_STUB)
     incs = ['-I' + os.path.join(ROOT, 'runtime/include'), '-I' + gen_dir]
     srcs = sorted(glob.glob(os.path.join(gen_dir, 'funcs_*.c'))) + [
         os.path.join(gen_dir, 'import_stubs.c'), os.path.join(gen_dir, 'dispatch_table.c'),
         os.path.join(ROOT, 'runtime/src/cpu.c'), os.path.join(ROOT, 'runtime/src/crt_hle.c'),
-        os.path.join(work, 'stub.c')] + sorted(glob.glob(os.path.join(ROOT, 'runtime/src/native_*.c')))
+        os.path.join(work, 'stub.c'), tick] + sorted(glob.glob(os.path.join(ROOT, 'runtime/src/native_*.c')))
     objs = [os.path.join(work, os.path.basename(s)[:-2] + '.o') for s in srcs]
     with multiprocessing.Pool() as pool:
         pool.map(compile_one, [(s, o, incs) for s, o in zip(srcs, objs)])
