@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Make the Vita LiveArea pictures (platform/vita/sce_sys) from the game's own art.
+"""Make the Vita LiveArea pictures from the game's own art (run by CMake for the Vita build).
 
 The loading screen picture (LOCAL:menusystem/loading.pic in
 pc/menusystem/loadingscreen.res: the "I.G.I" logo over the agent and an
@@ -10,11 +10,12 @@ explosion, 640x480) becomes:
   sce_sys/livearea/contents/startup.png   280x158  LiveArea start gate (logo)
 All are 8-bit palette PNGs, as the LiveArea expects.
 
-The generated files are committed: they are derived from the retail data of the
-user's own copy of the game, like the recompiled code.
+The pictures are derived from the retail data, so they are not kept in the
+repo: CMake writes them into <build>/sce_sys next to a copy of
+platform/vita/sce_sys (the LiveArea template).
 
 usage: tools/make_vita_livearea.py [game pc directory] [sce_sys directory]
-       (defaults: gamedata/pc and platform/vita/sce_sys)
+       (defaults: gamedata/pc and build-vita/sce_sys)
 Needs Pillow.
 """
 import os
@@ -82,7 +83,7 @@ def save_png8(img, path):
 
 def main():
     game = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, 'gamedata', 'pc')
-    out = sys.argv[2] if len(sys.argv) > 2 else os.path.join(ROOT, 'platform', 'vita', 'sce_sys')
+    out = sys.argv[2] if len(sys.argv) > 2 else os.path.join(ROOT, 'build-vita', 'sce_sys')
     with open(os.path.join(game, 'menusystem', 'loadingscreen.res'), 'rb') as f:
         res = res_entries(f.read())
     art = decode_pic(res['LOCAL:menusystem/loading.pic'], 10)   # 640x480: 10 x 15 tiles of 64x32

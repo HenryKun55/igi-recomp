@@ -105,11 +105,24 @@ if(VITA)
         SceAudio_stub SceAudioIn_stub SceDisplay_stub SceGxm_stub SceCommonDialog_stub SceSysmodule_stub
         ScePower_stub SceAppMgr_stub SceAppUtil_stub SceIme_stub SceLibKernel_stub SceProcessmgr_stub
         stdc++ pthread m c)
+    # The LiveArea pictures come from the game's own art (the loading screen), so
+    # they are made here from the game data instead of being kept in the repo.
+    get_filename_component(IGI_PC_DIR "${IGI_EXE}" DIRECTORY)
+    set(IGI_SCE_SYS "${CMAKE_BINARY_DIR}/sce_sys")
+    file(COPY "${CMAKE_SOURCE_DIR}/platform/vita/sce_sys/" DESTINATION "${IGI_SCE_SYS}")
+    execute_process(
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/make_vita_livearea.py" "${IGI_PC_DIR}" "${IGI_SCE_SYS}"
+        RESULT_VARIABLE IGI_LIVEAREA_RESULT)
+    if(NOT IGI_LIVEAREA_RESULT EQUAL 0)
+        message(FATAL_ERROR "tools/make_vita_livearea.py failed (it needs Pillow: pip install Pillow)")
+    endif()
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/tools/make_vita_livearea.py"
+        "${IGI_PC_DIR}/menusystem/loadingscreen.res")
     vita_create_self(eboot.bin igi UNSAFE)
     vita_create_vpk(igi.vpk ${VITA_TITLEID} eboot.bin
         VERSION ${VITA_VERSION}
         NAME "Project IGI"
-        FILE ${CMAKE_SOURCE_DIR}/platform/vita/sce_sys sce_sys)
+        FILE ${IGI_SCE_SYS} sce_sys)
 else()
     find_package(SDL2 REQUIRED)
     find_package(OpenGL REQUIRED)
