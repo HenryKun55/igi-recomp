@@ -1196,6 +1196,7 @@ typedef struct FastWork {
     FClipV cv[FAST_MAX_CLIPV];
     /* Batches of this call by material and kind (see fast_get_batch). */
     uint32_t bc_material[64], bc_kind[64], bc_batch[64];
+    float lod_k[32];                /* level of detail factor by (25 - lod) & 31 */
 } FastWork;
 
 static uint32_t clip_overflow;
@@ -1360,6 +1361,74 @@ static __attribute__((noinline)) uint32_t fast_base_vertices(const Frame *f, Fas
 #endif
 }
 
+
+/* Morph vertex i: {x, y, z, parent}; it moves towards its parent base vertex. */
+static inline void fast_morph_one(const Frame *f, FastWork *w, const uint8_t *base, int32_t nbase, int32_t i)
+{
+    const uint8_t *vp = base + 16 * i;
+    float x = rdf(vp), y = rdf(vp + 4), z = rdf(vp + 8);
+    int32_t parent = (int32_t)rd32(vp + 12);
+    if (parent >= 0 && parent < 256) {
+        float t = fast_morph_of(w, parent, nbase);
+        const uint8_t *pv = base + 16 * parent;
+        x += (rdf(pv) - x) * t;
+        y += (rdf(pv + 4) - y) * t;
+        z += (rdf(pv + 8) - z) * t;
+    } else {
+        note_stale();
+    }
+    w->x[i] = x + f->ncam[0];
+    w->y[i] = y + f->ncam[1];
+    w->z[i] = z + f->ncam[2];
+}
+
+/* Morph vertices [nbase, ntotal): camera-relative positions into x, y, z. */
+static __attribute__((noinline)) void fast_morph_vertices(const Frame *f, FastWork *w, const uint8_t *base,
+                                                          int32_t nbase, int32_t ntotal)
+{
+    int32_t i = nbase;
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+    /* Four at a time when their parents are base vertices of the patch (the
+     * same operations per lane); lanes past ntotal take vertex 0 as parent and
+     * write the scratch entries past the patch. */
+    const float32x4_t c0 = vdupq_n_f32(f->ncam[0]), c1 = vdupq_n_f32(f->ncam[1]), c2 = vdupq_n_f32(f->ncam[2]);
+    const uint32x4_t lane = { 0, 1, 2, 3 }, vbase = vdupq_n_u32((uint32_t)nbase);
+    const uint32x4_t vtotal = vdupq_n_u32((uint32_t)ntotal);
+    for (; i < ntotal; i += 4) {
+        const uint8_t *vp = base + 16 * i;
+        float32x4x4_t r = vld4q_f32((const float *)(const void *)vp);
+        uint32x4_t active = vcltq_u32(vaddq_u32(lane, vdupq_n_u32((uint32_t)i)), vtotal);
+        uint32x4_t pv = vandq_u32(vreinterpretq_u32_f32(r.val[3]), active);
+        uint32x4_t badv = vcgeq_u32(pv, vbase);
+        uint32x2_t b2 = vorr_u32(vget_low_u32(badv), vget_high_u32(badv));
+        if (vget_lane_u32(vpmax_u32(b2, b2), 0)) {
+            for (int32_t e = i + 4 < ntotal ? i + 4 : ntotal; i < e; i++)
+                fast_morph_one(f, w, base, nbase, i);
+            i -= 4;
+            continue;
+        }
+        uint32_t p[4];
+        vst1q_u32(p, pv);
+        float32x4_t t = vdupq_n_f32(0.0f), px = t, py = t, pz = t;
+#define MORPH_LANE(k)                                                              \
+        t = vld1q_lane_f32(&w->morph[p[k]], t, k);                                 \
+        px = vld1q_lane_f32((const float *)(const void *)(base + 16 * p[k]), px, k);     \
+        py = vld1q_lane_f32((const float *)(const void *)(base + 16 * p[k] + 4), py, k); \
+        pz = vld1q_lane_f32((const float *)(const void *)(base + 16 * p[k] + 8), pz, k);
+        MORPH_LANE(0)
+        MORPH_LANE(1)
+        MORPH_LANE(2)
+        MORPH_LANE(3)
+#undef MORPH_LANE
+        vst1q_f32(w->x + i, vaddq_f32(vmlaq_f32(r.val[0], vsubq_f32(px, r.val[0]), t), c0));
+        vst1q_f32(w->y + i, vaddq_f32(vmlaq_f32(r.val[1], vsubq_f32(py, r.val[1]), t), c1));
+        vst1q_f32(w->z + i, vaddq_f32(vmlaq_f32(r.val[2], vsubq_f32(pz, r.val[2]), t), c2));
+    }
+#else
+    for (; i < ntotal; i++)
+        fast_morph_one(f, w, base, nbase, i);
+#endif
+}
 
 /* View-space transform, projection, fog and outcodes of vertices [0, n), the
  * view-space position back into x, y, z. Up to three entries past n are
@@ -2039,7 +2108,7 @@ static void fast_patch(const Frame *f, FastWork *w, uint32_t patch)
     int32_t nbase = (int32_t)hdr >> 16;
     int32_t ntotal = (int32_t)(hdr & 0xFFFFu);
     uint32_t lod = rd32(pp + 0x1C);
-    float lod_k = (float)(0.375 / (double)(int32_t)(1u << ((25u - lod) & 31u)));
+    float lod_k = w->lod_k[(25u - lod) & 31u];
     int32_t radius = 0x40000000 >> (lod & 31u);
 
     /* The patch range test is the exact version's (once per patch). */
@@ -2050,31 +2119,19 @@ static void fast_patch(const Frame *f, FastWork *w, uint32_t patch)
 
     const uint8_t *base = pp + 0x20;
     uint32_t passes = fast_base_vertices(f, w, base, nbase, lod_k);
-    /* Morph vertices: {x, y, z, parent}; they move towards their parent base vertex. */
-    const uint8_t *vp = base + 16 * nbase;
-    for (int32_t i = nbase; i < ntotal; i++, vp += 16) {
-        float x = rdf(vp), y = rdf(vp + 4), z = rdf(vp + 8);
-        int32_t parent = (int32_t)rd32(vp + 12);
-        if (parent >= 0 && parent < 256) {
-            float t = fast_morph_of(w, parent, nbase);
-            const uint8_t *pv = base + 16 * parent;
-            x += (rdf(pv) - x) * t;
-            y += (rdf(pv + 4) - y) * t;
-            z += (rdf(pv + 8) - z) * t;
-        } else {
-            note_stale();
-        }
-        w->x[i] = x + f->ncam[0];
-        w->y[i] = y + f->ncam[1];
-        w->z[i] = z + f->ncam[2];
-    }
+    fast_morph_vertices(f, w, base, nbase, ntotal);
+    const uint8_t *vp = base + 16 * ntotal;
     fast_project(f, w, ntotal);
     int behind = 0;
-    for (int32_t i = 0; i < ntotal; i++) {
+    for (int32_t i = 0; i < ntotal; i++)
         behind |= (int)w->code[i];
-        w->unused[i] = 1;
-    }
     behind &= OUT_NEAR;
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+    for (int32_t i = 0; i < ntotal; i += 16)    /* ntotal <= MAX_VERTS: inside the array */
+        vst1q_u8(w->unused + i, vdupq_n_u8(1));
+#else
+    memset(w->unused, 1, (size_t)ntotal);
+#endif
 
     uint32_t sflags = rd32(vp);
     WR32(G_STRIP_FLIP, (sflags >> 2) & 1u);
@@ -2199,6 +2256,8 @@ int rt_native_terrain_render(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, u
         static FastWork fwork;
         memset(fwork.blend, 0, sizeof(fwork.blend));
         memset(fwork.bc_batch, 0, sizeof(fwork.bc_batch));
+        for (uint32_t k = 0; k < 32; k++)
+            fwork.lod_k[k] = (float)(0.375 / (double)(int32_t)(1u << k));
         for (int32_t i = 0; i < npatch; i++) {
             uint32_t patch = RD32(G_PATCH_LIST + 4u * (uint32_t)i);
             if (patch)
