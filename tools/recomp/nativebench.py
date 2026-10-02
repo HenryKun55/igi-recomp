@@ -69,6 +69,12 @@ void rt_probe(Ctx *c, uint32_t f) { (void)c; (void)f; }
 void rt_log(const char *fmt, ...) { (void)fmt; }
 void rt_missing_import(Ctx *c, const char *n) { (void)c; (void)n; __asm__ volatile("udf #2"); }
 int *__errno(void) { static int e; return &e; }
+uint32_t g_guest_mem_size = 0x03000000u;
+/* Port features (runtime/src/igi_language.c): the guest code runs. */
+int rt_lang_count(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret)
+{ (void)c; (void)esp; (void)ecx; (void)eax; (void)ret; return 0; }
+int rt_lang_name(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret)
+{ (void)c; (void)esp; (void)ecx; (void)eax; (void)ret; return 0; }
 ''' + terrainbench.STUB[terrainbench.STUB.index('/* On the Vita memcpy'):]
 
 # Argument bytes (this included) and kind of the host thunks the tested code calls.
@@ -81,6 +87,11 @@ THUNKS = {
     'IDirect3DDevice7::DrawIndexedPrimitive': (32, 0),
     'IDirect3DDevice7::DrawPrimitiveVB': (24, 0),
     'IDirect3DDevice7::DrawIndexedPrimitiveVB': (32, 0),
+    'IDirect3DDevice7::SetTextureStageState': (16, 0),
+    'IDirect3DDevice7::SetTransform': (12, 0),
+    'IDirect3DDevice7::SetMaterial': (8, 0),
+    'IDirect3DDevice7::SetLight': (12, 0),
+    'IDirect3DDevice7::LightEnable': (12, 0),
 }
 KIND = {'lock': 1, 'lockfail': 2, 'locknull': 3}
 # Stack arguments of the guest functions called (recorded and compared with the
