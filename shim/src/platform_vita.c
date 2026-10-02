@@ -178,11 +178,13 @@ void platform_create_window(int w, int h, const char *title)
 
 void platform_show_window(int show) { (void)show; }
 void platform_set_title(const char *title) { (void)title; }
-/* Stop the audio thread (it reads guest memory) before the process goes away. */
+/* SDL_Quit is skipped: after a fatal error (MessageBox + ExitProcess) it was
+ * seen not to return on hardware, leaving the process alive in the background
+ * (the shell could not start another app until a reboot). Exiting the process
+ * stops every thread, the audio one included, before the memory goes away. */
 void platform_shutdown(void)
 {
     render_shutdown();
-    SDL_Quit();
     sceKernelExitProcess(0);
 }
 
