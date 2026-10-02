@@ -1190,9 +1190,28 @@ typedef struct FastWork {
     uint16_t rel[3 * MAX_STRIP + FAST_MAX_CLIPV];   /* index stream of a pass, from its vertex base */
     uint32_t nrel, ncv, ncv_main, ntri_main;
     FClipV cv[FAST_MAX_CLIPV];
+    /* Batches of this call by material and kind (see fast_get_batch). */
+    uint32_t bc_material[64], bc_kind[64], bc_batch[64];
 } FastWork;
 
 static uint32_t clip_overflow;
+
+/* get_batch through a cache: 0x514680 finds the batch of a material and kind
+ * in its hash chains or creates it; a batch, once there, stays until
+ * flush_batches. A found batch has no other effect (the guest's lookup only
+ * writes its dead stack), so a repeated lookup in the same call is answered
+ * here. The cache is cleared at the start of every call. */
+static uint32_t fast_get_batch(const Frame *f, FastWork *w, uint32_t material, uint32_t kind)
+{
+    uint32_t h = ((material >> 4) ^ (material >> 10) ^ (kind * 23u)) & 63u;
+    if (w->bc_batch[h] && w->bc_material[h] == material && w->bc_kind[h] == kind)
+        return w->bc_batch[h];
+    uint32_t b = get_batch(f, material, kind);
+    w->bc_material[h] = material;
+    w->bc_kind[h] = kind;
+    w->bc_batch[h] = b;
+    return b;
+}
 
 /* fist of a non-negative value in the frame's rounding mode (nearest or truncate). */
 static inline int32_t ffist(const Frame *f, float v)
@@ -2006,7 +2025,7 @@ static void fast_patch(const Frame *f, FastWork *w, uint32_t patch)
             uint32_t material = rd32(rec);
             uint32_t vbase = RD32(G_VBUF_COUNT);
             rec = fast_pass_vertices(w, rec + 4, nbase, ntotal, RD32(G_VBUF_PTR), 0);
-            uint32_t batch = get_batch(f, material, first_batch ? 0u : 1u);
+            uint32_t batch = fast_get_batch(f, w, material, first_batch ? 0u : 1u);
             first_batch = 0;
             fast_emit(f, w, ntotal, batch, vbase);
         }
@@ -2017,7 +2036,7 @@ static void fast_patch(const Frame *f, FastWork *w, uint32_t patch)
         return;
     uint32_t vbase = RD32(G_VBUF_COUNT);
     fast_pass_vertices(w, rec + 4, nbase, ntotal, RD32(G_VBUF_PTR), 1);
-    uint32_t batch = get_batch(f, detail, 2);
+    uint32_t batch = fast_get_batch(f, w, detail, 2);
     /* Clipped triangles overwrite the flags of entries 64 and up (the guest's
      * overlay): entry by entry when a later one is affected. */
     if (first_clip >= 0 && (first_clip + 1 > 64 ? first_clip + 1 : 64) < nwords)
@@ -2085,6 +2104,7 @@ int rt_native_terrain_render(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, u
     } else {
         static FastWork fwork;
         memset(fwork.blend, 0, sizeof(fwork.blend));
+        memset(fwork.bc_batch, 0, sizeof(fwork.bc_batch));
         for (int32_t i = 0; i < npatch; i++) {
             uint32_t patch = RD32(G_PATCH_LIST + 4u * (uint32_t)i);
             if (patch)
