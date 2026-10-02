@@ -54,6 +54,13 @@ int rt_tick_camera_shake(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint6
 { (void)c; (void)esp; (void)ecx; (void)eax; (void)ret; return 0; }
 int rt_tick_cutscene_time(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret)
 { (void)c; (void)esp; (void)ecx; (void)eax; (void)ret; return 0; }
+/* Language hooks (igi_language.c): left to the generated code. */
+int rt_lang_count(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret)
+{ (void)c; (void)esp; (void)ecx; (void)eax; (void)ret; return 0; }
+int rt_lang_name(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret)
+{ (void)c; (void)esp; (void)ecx; (void)eax; (void)ret; return 0; }
+/* Guest memory size (memory.c): the emulated area (GSIZE below). */
+uint32_t g_guest_mem_size = 0x03000000u;
 '''
 
 GMEM = 0x10000000           # guest memory in the emulated address space
