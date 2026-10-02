@@ -76,31 +76,87 @@ static GuestFn thunk_fns[THUNK_MAX];
 static const char *thunk_names[THUNK_MAX];
 static uint32_t thunk_count;
 
+/* Call thunk `i` with eax, ecx and esp already stored in the context (what
+ * rt_dispatch does for a thunk address, without the range check and lookup). */
+static uint64_t thunk_run(Ctx *c, uint32_t i)
+{
+    const uint32_t target = THUNK_BASE + i * THUNK_STRIDE;
+#ifdef IGI_PROFILE
+    uint32_t prof_prev = rt_prof_cur;
+    rt_prof_cur = target;
+#endif
+    g_current_thunk = target;
+    thunk_fns[i](c);
+#ifdef IGI_PROFILE
+    rt_prof_cur = prof_prev;
+#endif
+    return ((uint64_t)c->r[4] << 32) | c->r[0];
+}
+
+/* Dispatch entries for the first THUNK_FAST_MAX thunks, cached by indirect call
+ * sites like the entries of generated functions: `fast` is a per-thunk entry with
+ * the GuestFastFn convention (the thunk index is a constant in it). */
+#define THUNK_FAST_MAX 1024u
+#define TF1(n)                                                                  \
+    static uint64_t thunk_fast_##n(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax) \
+    {                                                                           \
+        c->r[0] = eax;                                                          \
+        c->r[1] = ecx;                                                          \
+        c->r[4] = esp;                                                          \
+        return thunk_run(c, 0##n);                                              \
+    }
+#define TF8(n) TF1(n##0) TF1(n##1) TF1(n##2) TF1(n##3) TF1(n##4) TF1(n##5) TF1(n##6) TF1(n##7)
+#define TF64(n) TF8(n##0) TF8(n##1) TF8(n##2) TF8(n##3) TF8(n##4) TF8(n##5) TF8(n##6) TF8(n##7)
+#define TF512(n) TF64(n##0) TF64(n##1) TF64(n##2) TF64(n##3) TF64(n##4) TF64(n##5) TF64(n##6) TF64(n##7)
+TF512(0)
+TF512(1)
+#define TP1(n) thunk_fast_##n,
+#define TP8(n) TP1(n##0) TP1(n##1) TP1(n##2) TP1(n##3) TP1(n##4) TP1(n##5) TP1(n##6) TP1(n##7)
+#define TP64(n) TP8(n##0) TP8(n##1) TP8(n##2) TP8(n##3) TP8(n##4) TP8(n##5) TP8(n##6) TP8(n##7)
+#define TP512(n) TP64(n##0) TP64(n##1) TP64(n##2) TP64(n##3) TP64(n##4) TP64(n##5) TP64(n##6) TP64(n##7)
+static const GuestFastFn thunk_fast[THUNK_FAST_MAX] = {TP512(0) TP512(1)};
+static GuestFunc thunk_entries[THUNK_FAST_MAX];
+
+static uint32_t thunk_add(GuestFn fn, const char *name)
+{
+    if (thunk_count == THUNK_MAX)
+        rt_fatal(NULL, "too many host thunks");
+    uint32_t i = thunk_count;
+    uint32_t addr = THUNK_BASE + i * THUNK_STRIDE;
+    thunk_fns[i] = fn;
+    thunk_names[i] = name;
+    if (i < THUNK_FAST_MAX) {
+        thunk_entries[i].fn = fn;
+        thunk_entries[i].fast = thunk_fast[i];
+        thunk_entries[i].addr = addr;
+    }
+    thunk_count = i + 1u;
+    return addr;
+}
+
 uint32_t thunk_register(GuestFn fn, const char *name)
 {
     for (uint32_t i = 0; i < thunk_count; i++)
         if (thunk_fns[i] == fn)
             return THUNK_BASE + i * THUNK_STRIDE;
-    if (thunk_count == THUNK_MAX)
-        rt_fatal(NULL, "too many host thunks");
-    thunk_fns[thunk_count] = fn;
-    thunk_names[thunk_count] = name;
-    return THUNK_BASE + (thunk_count++) * THUNK_STRIDE;
+    return thunk_add(fn, name);
 }
 
 uint32_t thunk_register_unique(GuestFn fn, const char *name)
 {
-    if (thunk_count == THUNK_MAX)
-        rt_fatal(NULL, "too many host thunks");
-    thunk_fns[thunk_count] = fn;
-    thunk_names[thunk_count] = name;
-    return THUNK_BASE + (thunk_count++) * THUNK_STRIDE;
+    return thunk_add(fn, name);
 }
 
 GuestFn thunk_lookup(uint32_t addr)
 {
     uint32_t i = (addr - THUNK_BASE) / THUNK_STRIDE;
     return i < thunk_count ? thunk_fns[i] : NULL;
+}
+
+const GuestFunc *thunk_entry(uint32_t addr)
+{
+    uint32_t i = (addr - THUNK_BASE) / THUNK_STRIDE;
+    return i < thunk_count && i < THUNK_FAST_MAX ? &thunk_entries[i] : NULL;
 }
 
 const char *thunk_name(uint32_t addr)
