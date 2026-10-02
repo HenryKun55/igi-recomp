@@ -1187,12 +1187,13 @@ typedef struct FastWork {
     uint32_t blend[MAX_VERTS + 4][8];   /* rows from MAX_VERTS: scratch of the last vector */
     VTail tl[256];                  /* colour and texture coordinates of the current pass */
     uint8_t tri[MAX_STRIP];
-    uint8_t cdone[MAX_STRIP];       /* the clipper output of the strip entry is in cv */
+    uint8_t cdone[MAX_STRIP];       /* fast_emit_detail: the entry's clipper output is in cv */
     uint16_t cstart[MAX_STRIP], ccount[MAX_STRIP];
     uint8_t clist[MAX_STRIP];       /* strip entries fast_prepare clipped, in order */
     uint32_t nclist;
     uint16_t rel[3 * MAX_STRIP + FAST_MAX_CLIPV];   /* index stream of a pass, from its vertex base */
     uint32_t nrel, ncv, ncv_main, ntri_main;
+    int32_t first_clip;             /* fast_cull: first strip entry clipped (-1: none) */
     FClipV cv[FAST_MAX_CLIPV];
     /* Batches of this call by material and kind (see fast_get_batch). */
     uint32_t bc_material[64], bc_kind[64], bc_batch[64];
@@ -1764,7 +1765,6 @@ static __attribute__((noinline)) int32_t fast_prepare(const Frame *f, FastWork *
     for (int32_t j = 0; j < nwords; j++) {
         uint32_t fl = w->tri[j];
         uint32_t word = rd32(strip + 4 * j);
-        w->cdone[j] = 0;
         if (fl == 0) {
             w->rel[nrel] = (uint16_t)(word & 0xFFu);
             w->rel[nrel + 1] = (uint16_t)((word >> 16) & 0xFFu);
@@ -1775,7 +1775,6 @@ static __attribute__((noinline)) int32_t fast_prepare(const Frame *f, FastWork *
                 first = j;
             uint32_t start = w->ncv;
             uint32_t n = fclip_entry(f, w, word);
-            w->cdone[j] = 1;
             w->cstart[j] = (uint16_t)start;
             w->ccount[j] = (uint16_t)n;
             w->clist[w->nclist++] = (uint8_t)j;
@@ -2013,6 +2012,9 @@ static void fast_emit_detail(const Frame *f, FastWork *w, const uint8_t *strip, 
     uint32_t vb = RD32(G_VBUF_PTR);
     uint8_t *ip = g_mem + batch + BATCH_INDICES + RD32(batch + BATCH_TRIS) * 6u;
     uint32_t m = 0, ntris = 0, nclip = 0;
+    memset(w->cdone, 0, (size_t)nwords);
+    for (uint32_t e = 0; e < w->nclist; e++)
+        w->cdone[w->clist[e]] = 1;
     for (int32_t j = 0; j < nwords; j++) {
         uint32_t fl = w->tri[j];
         uint32_t word = rd32(strip + 4 * j);
@@ -2045,9 +2047,15 @@ static void fast_emit_detail(const Frame *f, FastWork *w, const uint8_t *strip, 
 }
 
 /* Culls the strip entries as the exact version (flags into w->tri, used
- * vertices); returns 1 when every triangle is culled. */
-static __attribute__((noinline)) uint32_t fast_cull(FastWork *w, const uint8_t *strip, int32_t nwords, uint32_t sflags)
+ * vertices); returns 1 when every triangle is culled. Otherwise also does what
+ * fast_prepare does (index stream and clipper output, w->first_clip). */
+static __attribute__((noinline)) uint32_t fast_cull(const Frame *f, FastWork *w, const uint8_t *strip, int32_t nwords,
+                                                    uint32_t sflags, int32_t ntotal)
 {
+    int32_t first = -1;
+    uint32_t nrel = 0, ntri = 0;
+    w->ncv = 0;
+    w->nclist = 0;
     float wind0 = (sflags >> 2) & 1u ? -1.0f : 1.0f, wind = wind0;
     float x0 = 0, y0 = 0, x1 = 0, y1 = 0, x2 = 0, y2 = 0;
     uint32_t c0 = 0, c1 = 0, c2 = 0, i0 = 0, i1 = 0, i2 = 0;
@@ -2086,6 +2094,23 @@ static __attribute__((noinline)) uint32_t fast_cull(FastWork *w, const uint8_t *
                 w->unused[i0] = 0;
                 fl ^= TRI_CULLED;
                 allculled = 0;
+                if (fl == 0) {
+                    w->rel[nrel] = (uint16_t)(word & 0xFFu);
+                    w->rel[nrel + 1] = (uint16_t)((word >> 16) & 0xFFu);
+                    w->rel[nrel + 2] = (uint16_t)((word >> 8) & 0xFFu);
+                    nrel += 3;
+                } else {
+                    if (first < 0)
+                        first = j;
+                    uint32_t start = w->ncv;
+                    uint32_t n = fclip_entry(f, w, word);
+                    w->cstart[j] = (uint16_t)start;
+                    w->ccount[j] = (uint16_t)n;
+                    w->clist[w->nclist++] = (uint8_t)j;
+                    for (uint32_t q = start; q < w->ncv; q++)
+                        w->rel[nrel++] = (uint16_t)((uint32_t)ntotal + q);
+                    ntri += n;
+                }
             }
         }
         w->tri[j] = (uint8_t)fl;
@@ -2096,6 +2121,10 @@ static __attribute__((noinline)) uint32_t fast_cull(FastWork *w, const uint8_t *
             wind = wind0;
         }
     }
+    w->nrel = nrel;
+    w->ncv_main = w->ncv;
+    w->ntri_main = ntri;
+    w->first_clip = first;
     return allculled;
 }
 
@@ -2140,17 +2169,18 @@ static void fast_patch(const Frame *f, FastWork *w, uint32_t patch)
     int32_t nwords = (int32_t)rd32(vp + 12);
     const uint8_t *rec = vp + 16;
 
+    int32_t first_clip;
     if (!behind) {
-        if (fast_cull(w, strip, nwords, sflags))
+        if (fast_cull(f, w, strip, nwords, sflags, ntotal))
             return;
+        first_clip = w->first_clip;
     } else {
         if (nwords > 0)
             memset(w->tri, OUT_NEAR, (size_t)nwords);
         if (ntotal > 0)
             memset(w->unused, 0, (size_t)ntotal);
+        first_clip = fast_prepare(f, w, strip, nwords, ntotal);
     }
-
-    int32_t first_clip = fast_prepare(f, w, strip, nwords, ntotal);
     /* The vertices the passes write. */
     uint32_t nused = 0;
     int32_t i = 0;
