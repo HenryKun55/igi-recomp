@@ -64,17 +64,14 @@ static void thunk_stub(Ctx *c)
     c->r[4] += 4u + bytes;
 }
 GuestFn thunk_lookup(uint32_t a) { (void)a; return thunk_stub; }
+/* No cached thunk entries: indirect calls of thunks go through rt_dispatch. */
+const GuestFunc *thunk_entry(uint32_t a) { (void)a; return 0; }
 void rt_fatal(Ctx *c, const char *fmt, ...) { (void)c; (void)fmt; for (;;) __asm__ volatile("udf #1"); }
 void rt_probe(Ctx *c, uint32_t f) { (void)c; (void)f; }
 void rt_log(const char *fmt, ...) { (void)fmt; }
 void rt_missing_import(Ctx *c, const char *n) { (void)c; (void)n; __asm__ volatile("udf #2"); }
 int *__errno(void) { static int e; return &e; }
-uint32_t g_guest_mem_size = 0x03000000u;
-/* Port features (runtime/src/igi_language.c): the guest code runs. */
-int rt_lang_count(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret)
-{ (void)c; (void)esp; (void)ecx; (void)eax; (void)ret; return 0; }
-int rt_lang_name(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret)
-{ (void)c; (void)esp; (void)ecx; (void)eax; (void)ret; return 0; }
+/* The guest memory size and the language hooks come with armbench's TICK_STUB. */
 ''' + terrainbench.STUB[terrainbench.STUB.index('/* On the Vita memcpy'):]
 
 # Argument bytes (this included) and kind of the host thunks the tested code calls.

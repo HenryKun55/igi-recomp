@@ -33,7 +33,9 @@
  * for the frames whose busy time reaches the slow threshold (a sixth number in
  * bench.txt, IGI_BENCH_SLOW=<ms>; default 16 ms). With IGI_PROFILE and a threshold
  * given, the profile keeps only the samples of those slow frames (a negative
- * threshold: of the frames faster than that, for comparisons). */
+ * threshold: of the frames faster than that, for comparisons). A seventh number
+ * (IGI_BENCH_STILL=1) keeps the player still, facing the start direction (a
+ * heavy view of mission 1), for profiles of slow frames only. */
 #include "bench.h"
 #include "igi_fixes.h"
 #include "platform.h"
@@ -106,6 +108,7 @@ static int shot_every;          /* screenshot every N measured frames (0: none) 
 static int hold_secs;           /* sleep at the phase boundaries (see the top) */
 static int mission = 1;         /* mission list entry to start (1 = first) */
 static int views;               /* views mode: number of traced views (0: movement pattern) */
+static int still;               /* 1: no movement pattern, the view stays on the start direction */
 static int slow_ms;             /* slow frame threshold, ms (0: SLOW_DEFAULT_MS, profile keeps every frame;
                                  * negative: profile keeps the frames faster than -slow_ms) */
 #define SLOW_DEFAULT_MS 16
@@ -143,6 +146,7 @@ int bench_enabled(void)
                 int m = (int)strtol(end, &end, 10);
                 views = (int)strtol(end, &end, 10);
                 slow_ms = (int)strtol(end, &end, 10);
+                still = (int)strtol(end, &end, 10);
                 if (m > 0)
                     mission = m;
             }
@@ -164,6 +168,9 @@ int bench_enabled(void)
         e = getenv("IGI_BENCH_VIEWS");
         if (e)
             views = atoi(e);
+        e = getenv("IGI_BENCH_STILL");
+        if (e)
+            still = atoi(e);
         e = getenv("IGI_BENCH_SLOW");
         if (e)
             slow_ms = atoi(e);
@@ -565,7 +572,8 @@ void bench_frame(uint64_t now, uint64_t frame_us, uint64_t draw_us, uint64_t swa
         double t = (double)(now - run_start_us) / 1e6;
         if (t >= (double)bench_secs)
             finish(now);
-        run_pattern(t, dt);
+        if (!still)
+            run_pattern(t, dt);
         break;
     }
     }
