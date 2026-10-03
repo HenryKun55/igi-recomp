@@ -28,8 +28,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FONT = os.path.join(ROOT, 'platform', 'vita', 'fonts', 'Oswald.ttf')
 
 # At the bottom of the LiveArea, so everyone who opens the bubble knows what this is.
-# The version is the one installed from the .vpk: an update made from the game replaces
-# its files but not sce_sys, so after one the boot screen has the current version.
+# CMake passes no version: an update made from the game replaces its files but not
+# sce_sys, so a version here would go stale (the boot screen shows the current one).
 CREDITS = [
     'Project I.G.I. for PS Vita  -  PS Vita port by HenryKun55, made with love',
     'Project I.G.I. (c) Eidos Interactive / Innerloop Studios. Not affiliated with them or Sony.',

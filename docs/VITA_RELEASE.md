@@ -19,15 +19,15 @@ the pieces fit together.
   (`major.minor.patch`; minor and patch are one digit each, because the Vita's
   `param.sfo` APP_VER is `NN.NN`: 0.1.0 is `00.10`, 1.2.3 is `01.23`).
 - It is compiled into the game (the boot screen shows it in the bottom right
-  corner and in the update panel) and written on the LiveArea background.
+  corner and in the update panel). It is not on the LiveArea: an update made from
+  the game doesn't replace sce_sys, so it would go stale.
 - The update check offers a release only when its version is **higher** than the
   one running, so raise `IGI_PORT_VERSION` for every release.
 
 ## Cutting a release
 
 1. Raise `IGI_PORT_VERSION` in `CMakeLists.txt`, commit.
-2. Build the Vita package from a clean configure, so the LiveArea art gets the
-   new version too:
+2. Build the Vita package:
 
    ```sh
    cmake -S . -B build-vita -G Ninja -DCMAKE_TOOLCHAIN_FILE=$VITASDK/share/vita.toolchain.cmake

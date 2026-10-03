@@ -130,8 +130,9 @@ if(VITA)
     set(IGI_SCE_SYS "${CMAKE_BINARY_DIR}/sce_sys")
     file(COPY "${CMAKE_SOURCE_DIR}/platform/vita/sce_sys/" DESTINATION "${IGI_SCE_SYS}")
     execute_process(
+        # No version on the LiveArea: an update from the game doesn't replace sce_sys,
+        # so it would go stale (the boot screen shows the running version).
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/make_vita_livearea.py" "${IGI_PC_DIR}" "${IGI_SCE_SYS}"
-                "${IGI_PORT_VERSION}"
         RESULT_VARIABLE IGI_LIVEAREA_RESULT)
     if(NOT IGI_LIVEAREA_RESULT EQUAL 0)
         message(FATAL_ERROR "tools/make_vita_livearea.py failed (it needs Pillow: pip install Pillow)")
