@@ -2939,8 +2939,8 @@ static void perf_frame_begin_swap(void)
     if (perf.enabled < 0) {
         const char *e = getenv("IGI_OVERLAY");
 #if defined(__vita__)
-        perf.enabled = !(e && e[0] == '0');
-        FILE *f = fopen("ux0:data/igi/igi.cfg", "r");   /* overlay=0 hides it */
+        perf.enabled = e && e[0] == '1';
+        FILE *f = fopen("ux0:data/igi/igi.cfg", "r");   /* overlay=1 shows it */
         if (f) {
             char buf[128];
             while (fgets(buf, sizeof(buf), f))
