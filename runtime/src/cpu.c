@@ -269,6 +269,15 @@ RtStr rt_rep_stos_slow(uint8_t *gm, uint32_t df, uint32_t n, uint32_t di, uint32
 RT_NO_LIBCALL void rt_copy_fwd(uint8_t *d, const uint8_t *s, uint32_t b)
 {
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
+    /* 64 bytes a step, all loaded before any is stored (see recomp.h). */
+    for (; b >= 64u; b -= 64u, d += 64, s += 64) {
+        __builtin_prefetch(s + 256);
+        uint8x16_t a0 = vld1q_u8(s), a1 = vld1q_u8(s + 16), a2 = vld1q_u8(s + 32), a3 = vld1q_u8(s + 48);
+        vst1q_u8(d, a0);
+        vst1q_u8(d + 16, a1);
+        vst1q_u8(d + 32, a2);
+        vst1q_u8(d + 48, a3);
+    }
     for (; b >= 16u; b -= 16u, d += 16, s += 16)
         vst1q_u8(d, vld1q_u8(s));
     if (b & 8u) {
@@ -298,6 +307,12 @@ RT_NO_LIBCALL void rt_fill_fwd(uint8_t *d, uint32_t v, uint32_t b)
 {
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
     const uint8x16_t q = vreinterpretq_u8_u32(vdupq_n_u32(v));
+    for (; b >= 64u; b -= 64u, d += 64) {
+        vst1q_u8(d, q);
+        vst1q_u8(d + 16, q);
+        vst1q_u8(d + 32, q);
+        vst1q_u8(d + 48, q);
+    }
     for (; b >= 16u; b -= 16u, d += 16)
         vst1q_u8(d, q);
     if (b & 8u) {

@@ -11,6 +11,8 @@
 #include <arm_neon.h>
 #endif
 
+static void copy_bytes(uint8_t *d, const uint8_t *s, size_t n);
+
 #define D3D_OK 0u
 #define D3DERR_INVALIDVERTEXTYPE 0x88760809u
 
@@ -1081,7 +1083,7 @@ static void vb_data_detach(VertexBuffer *vb, uint32_t lock_flags, int release)
     }
     uint32_t n = d->hi > d->lo ? d->hi - d->lo : 0u;
     d->copy = malloc(n ? n : 1u);
-    memcpy(d->copy, g_mem + vb->mem + d->lo, n);
+    copy_bytes(d->copy, g_mem + vb->mem + d->lo, n);
     /* Sequentially consistent with the render thread's busy/base pair: after this
      * either it sees the copy, or it is still in the draw that read the buffer. */
     atomic_store(&d->base, (uintptr_t)d->copy - d->lo);
@@ -1196,21 +1198,14 @@ static void pk_exec(const void *p)
     atomic_store(&d->busy, 0);
 }
 
-/* Small copies inline: on the Vita memcpy is a call into SceLibKernel. */
+/* Copies up to RT_STR_INLINE_MAX bytes inline (non-overlapping): on the Vita
+ * memcpy is a call into SceLibKernel, billed per call and per byte by Vita3K. */
 static void copy_bytes(uint8_t *d, const uint8_t *s, size_t n)
 {
-    if (n > 256u) {
+    if (n > RT_STR_INLINE_MAX)
         memcpy(d, s, n);
-        return;
-    }
-    size_t i = 0;
-    for (; i + 4u <= n; i += 4u) {
-        uint32_t w;
-        memcpy(&w, s + i, 4);
-        memcpy(d + i, &w, 4);
-    }
-    for (; i < n; i++)
-        d[i] = s[i];
+    else
+        rt_copy_fwd(d, s, (uint32_t)n);
 }
 
 static const uint8_t *pk_bytes(const uint8_t *s, size_t n)

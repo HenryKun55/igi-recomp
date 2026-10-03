@@ -362,13 +362,14 @@ RtStr rt_rep_stos_slow(uint8_t *gm, uint32_t df, uint32_t n, uint32_t di, uint32
 
 /* Up to this many bytes, forward copies and fills that are not small
  * constants run here (runtime/src/cpu.c) on the Vita instead of in SceLibc's
- * memmove and memset: a library call costs more than the work below 256 bytes
- * (and Vita3K bills each one as about 150 instructions). rt_copy_fwd copies
- * forward in 16-byte steps, each loaded before it is stored, which equals an
+ * memmove and memset: a library call costs about 150 instructions in Vita3K and
+ * its bytes are billed at 400 MB/s (memset 800 MB/s), more than the NEON loops
+ * below (about 0.2 instructions a byte). rt_copy_fwd copies forward in 64- and
+ * 16-byte steps, each loaded before it is stored, which equals an
  * element-by-element forward copy whenever the destination does not start
  * inside the source; rt_fill_fwd stores the 32-bit pattern v (b need not be a
  * multiple of 4: the tail gets v's low bytes, which is right for byte fills). */
-#define RT_STR_INLINE_MAX 256u
+#define RT_STR_INLINE_MAX 16384u
 void rt_copy_fwd(uint8_t *d, const uint8_t *s, uint32_t b);
 void rt_fill_fwd(uint8_t *d, uint32_t v, uint32_t b);
 
