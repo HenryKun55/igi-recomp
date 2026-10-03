@@ -35,7 +35,9 @@
  * given, the profile keeps only the samples of those slow frames (a negative
  * threshold: of the frames faster than that, for comparisons). A seventh number
  * (IGI_BENCH_STILL=1) keeps the player still, facing the start direction (a
- * heavy view of mission 1), for profiles of slow frames only. */
+ * heavy view of mission 1), for profiles of slow frames only. An eighth number
+ * (IGI_BENCH_SLOW_UPDATE=<ms>) makes the profile keep the frames whose update
+ * steps took at least that long instead. */
 #include "bench.h"
 #include "igi_fixes.h"
 #include "platform.h"
@@ -109,6 +111,7 @@ static int hold_secs;           /* sleep at the phase boundaries (see the top) *
 static int mission = 1;         /* mission list entry to start (1 = first) */
 static int views;               /* views mode: number of traced views (0: movement pattern) */
 static int still;               /* 1: no movement pattern, the view stays on the start direction */
+static int slow_update_ms;      /* > 0: the profile keeps the frames whose update steps took that long */
 static int slow_ms;             /* slow frame threshold, ms (0: SLOW_DEFAULT_MS, profile keeps every frame;
                                  * negative: profile keeps the frames faster than -slow_ms) */
 #define SLOW_DEFAULT_MS 16
@@ -147,6 +150,7 @@ int bench_enabled(void)
                 views = (int)strtol(end, &end, 10);
                 slow_ms = (int)strtol(end, &end, 10);
                 still = (int)strtol(end, &end, 10);
+                slow_update_ms = (int)strtol(end, &end, 10);
                 if (m > 0)
                     mission = m;
             }
@@ -168,6 +172,9 @@ int bench_enabled(void)
         e = getenv("IGI_BENCH_VIEWS");
         if (e)
             views = atoi(e);
+        e = getenv("IGI_BENCH_SLOW_UPDATE");
+        if (e)
+            slow_update_ms = atoi(e);
         e = getenv("IGI_BENCH_STILL");
         if (e)
             still = atoi(e);
@@ -530,7 +537,7 @@ void bench_frame(uint64_t now, uint64_t frame_us, uint64_t draw_us, uint64_t swa
             mouse_acc = 0;
             memset(&g_bench_ctr, 0, sizeof(g_bench_ctr));
 #ifdef IGI_PROFILE
-            rt_prof_reset(slow_ms != 0);
+            rt_prof_reset(slow_ms != 0 || slow_update_ms > 0);
 #endif
             run_start_us = now;
             set_phase(PH_RUN, now);
@@ -558,7 +565,11 @@ void bench_frame(uint64_t now, uint64_t frame_us, uint64_t draw_us, uint64_t swa
             s->allocs = g_bench_ctr.heap_allocs;
 #ifdef IGI_PROFILE
             float b = s->frame_ms - s->wait_ms;
-            rt_prof_frame_end(slow_ms == 0 || (slow_ms > 0 ? b >= (float)slow_ms : b < (float)-slow_ms));
+            /* The update steps of this frame ran before its render step, now running. */
+            if (slow_update_ms > 0)
+                rt_prof_frame_end(pend_upd_us >= (uint64_t)slow_update_ms * 1000u);
+            else
+                rt_prof_frame_end(slow_ms == 0 || (slow_ms > 0 ? b >= (float)slow_ms : b < (float)-slow_ms));
 #endif
         }
         memset(&g_bench_ctr, 0, sizeof(g_bench_ctr));

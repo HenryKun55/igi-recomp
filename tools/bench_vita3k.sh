@@ -24,6 +24,8 @@
 #                 (default 16); with an IGI_PROFILE build, the profile then keeps only
 #                 the samples of frames at least that slow (negative: of the frames
 #                 faster than -SLOW ms, for comparisons)
+#        SLOW_UPDATE  with an IGI_PROFILE build: the profile keeps only the frames
+#                 whose update steps took at least that many ms
 #        STILL    1: the player stands still facing the start direction (a heavy
 #                 view in mission 1) instead of the movement pattern
 #        FRAMES   where to copy the per-frame breakdown bench_frames.csv (default
@@ -65,7 +67,7 @@ echo "installed $BUILD/igi.vpk eboot.bin"
 # Vita3K does not truncate files the game rewrites: stale tails would stay.
 rm -f "$DATA/bench_result.txt" "$DATA/bench_frames.csv"
 touch "$DATA/.bench_start"
-echo "$SECS ${SHOT:-0} ${HOLD:-0} ${MISSION:-1} ${VIEWS:-0} ${SLOW:-0} ${STILL:-0}" > "$DATA/bench.txt"
+echo "$SECS ${SHOT:-0} ${HOLD:-0} ${MISSION:-1} ${VIEWS:-0} ${SLOW:-0} ${STILL:-0} ${SLOW_UPDATE:-0}" > "$DATA/bench.txt"
 
 stop() {
     pkill -9 -f "Vita3K -r PIGI00001" 2>/dev/null
