@@ -2822,10 +2822,14 @@ static void pk_send_parts(uint32_t parts)
         r->fog = rs[28];
         r->fogtable = rs[35];
         r->fogvertex = rs[140];
-        static const uint8_t idx[RS_WORDS] = { 7,  8,  9,  14, 15, 19, 20, 22, 23, 24,  25,
-                                               27, 28, 34, 35, 36, 37, 38, 41, 137, 140, 60 };
-        for (uint32_t i = 0; i < RS_WORDS; i++)
-            r->v[i] = rs[idx[i]];
+        /* Per draw when objects set their own fog range: constant indices, no loop. */
+#define RS_COPY(i, n) r->v[i] = rs[n]
+        RS_COPY(0, 7), RS_COPY(1, 8), RS_COPY(2, 9), RS_COPY(3, 14), RS_COPY(4, 15), RS_COPY(5, 19);
+        RS_COPY(6, 20), RS_COPY(7, 22), RS_COPY(8, 23), RS_COPY(9, 24), RS_COPY(10, 25), RS_COPY(11, 27);
+        RS_COPY(12, 28), RS_COPY(13, 34), RS_COPY(14, 35), RS_COPY(15, 36), RS_COPY(16, 37), RS_COPY(17, 38);
+        RS_COPY(18, 41), RS_COPY(19, 137), RS_COPY(20, 140), RS_COPY(21, 60);
+#undef RS_COPY
+        _Static_assert(RS_WORDS == 22u, "RS_COPY list");
         rq_end();
     }
     if (parts & RS_PART_XF) {
