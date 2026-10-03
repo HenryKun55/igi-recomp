@@ -267,7 +267,8 @@ int rt_native_skin_mesh(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64
     }
 
     WR32(sp - 4u, c->r[5]);   /* push ebp */
-    Locals l = { { 0 }, 0 };
+    Locals l;
+    rt_fill_small((uint8_t *)&l, 0, sizeof(l));   /* no SceLibc memset on the Vita */
     uint32_t rigid = RD32(rigid_slot);
     uint32_t cnt = RD32(mesh + MESH_NVERTS);
     uint32_t verts = RD32(mesh + MESH_VERTS);

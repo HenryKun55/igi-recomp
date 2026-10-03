@@ -155,7 +155,7 @@ int rt_native_fog_range(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64
     for (uint32_t i = 0; i < K_WORDS; i++)
         diff |= key[i] ^ memo.key[i];
     if (diff) {
-        memcpy(memo.key, key, sizeof(key));
+        rt_copy_small(memo.key, key, sizeof(key));   /* no SceLibc memcpy on the Vita */
         memo.valid = 1;
         compute(c, gm, key);
     }
