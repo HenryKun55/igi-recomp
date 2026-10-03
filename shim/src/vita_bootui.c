@@ -304,7 +304,10 @@ static void show_install_result(void)
         wait_button(~0u, 2500);
     } else if (r < 0) {
         rt_log("update: install failed: %s (%s)", error, detail);
-        snprintf(text, sizeof(text), "%s  The installed game still works. Details: " LOG_PATH, detail);
+        /* only a failure while files were replaced (step "install") can leave the game
+         * incomplete, and then updater.bin's message says what to do */
+        snprintf(text, sizeof(text), "%s. %sDetails: " LOG_PATH, detail,
+                 strncmp(detail, "install", 7) ? "The installed game still works. " : "");
         show(error, C_ERROR, text, -1.0f, "Press any button to continue.");
         wait_button(~0u, 20000);
     }
@@ -314,7 +317,7 @@ static void run_check(void)
 {
     char url[256], text[512];
     vitaUpdateState_t st;
-    int shown = 0;
+    int shown = 0, installing = 0;
 
     cfg_value("update_url", url, sizeof(url), "");
     VitaUpdate_Check(url);
@@ -344,8 +347,15 @@ static void run_check(void)
         snprintf(text, sizeof(text), "Version %s is available (you have %s).", VitaUpdate_NewVersion(),
                  VitaUpdate_CurrentVersion());
         show(text, C_TEXT, "Settings, saves and game files are kept.", -1.0f, "X: install      O: skip");
-        if (wait_button(SCE_CTRL_CROSS | SCE_CTRL_CIRCLE, 0) != SCE_CTRL_CROSS)
+        /* update_auto=1 (for testing) installs without asking */
+        cfg_value("update_auto", url, sizeof(url), "0");
+        if (atoi(url) != 0) {
+            sceKernelDelayThread(1500 * 1000);
+        } else if (wait_button(SCE_CTRL_CROSS | SCE_CTRL_CIRCLE, 0) != SCE_CTRL_CROSS) {
+            rt_log("update: skipped");
             return;
+        }
+        installing = 1;
         VitaUpdate_Download();
         while ((st = VitaUpdate_State()) == VU_DOWNLOADING) {
             long long done, total;
@@ -367,11 +377,13 @@ static void run_check(void)
             st = VitaUpdate_State();
         }
     }
-    /* every failure is told, but for the Wi-Fi being off (nothing to do about it here) */
+    /* A failed check (no Wi-Fi, no internet, GitHub unreachable or without a release)
+     * only goes to the log: the game just starts. Once the player chose to install,
+     * every failure is told. */
     if (st == VU_ERROR) {
         rt_log("update: %s (%s)", VitaUpdate_Error(), VitaUpdate_ErrorDetail());
-        if (strcmp(VitaUpdate_Error(), "The Vita is not connected to Wi-Fi.")) {
-            snprintf(text, sizeof(text), "%s  The installed game still works.", VitaUpdate_ErrorDetail());
+        if (installing) {
+            snprintf(text, sizeof(text), "%s. The installed game still works.", VitaUpdate_ErrorDetail());
             show(VitaUpdate_Error(), C_ERROR, text, -1.0f, "Press any button to continue.");
             wait_button(~0u, 15000);   /* nobody looking: the game goes on by itself */
         }

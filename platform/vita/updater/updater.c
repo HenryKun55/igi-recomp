@@ -247,6 +247,12 @@ static int ExtractEntry(SceUID zfd, uint32_t dataOff, int method, uint32_t csize
             zs.next_out  = out;
             zs.avail_out = sizeof(out);
             zr           = inflate(&zs, Z_NO_FLUSH);
+            if (zr == Z_BUF_ERROR && zs.avail_in == 0) {
+                /* the last output filled the buffer exactly: nothing was left to do
+                 * with this input, so read more (not an error) */
+                zr = Z_OK;
+                break;
+            }
             if (zr != Z_OK && zr != Z_STREAM_END) {
                 res = -3;
                 break;
@@ -565,6 +571,10 @@ static void Install(void)
      * refused, 0x8080201E), and that folder now holds the new version */
     res = sceAppMgrLoadExec("app0:eboot.bin", NULL, NULL);
     Log("starting app0:eboot.bin = 0x%08X", (unsigned)res);
+    /* an accepted call may return first (as in Vita3K) while the switch is under way */
+    for (int i = 0; res >= 0 && i < 50; i++) {
+        sceKernelDelayThread(100 * 1000);
+    }
     Fail("start", 0, "The new version is installed, but could not be started: start Project I.G.I. again from the "
                      "LiveArea.");
 }

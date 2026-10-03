@@ -18,6 +18,7 @@
 #include <psp2/io/stat.h>
 #include <psp2/net/net.h>
 #include <psp2/net/netctl.h>
+#include <psp2/kernel/threadmgr.h>
 #include <psp2/sysmodule.h>
 
 #include <curl/curl.h>
@@ -749,7 +750,11 @@ void VitaUpdate_Launch(void)
     VU_Log("starting updater.bin");
     remove(RESULT_FILE);
     res = sceAppMgrLoadExec("app0:updater.bin", NULL, NULL);
-    // only returns when the Vita refused
+    // Returns only when the Vita refused; an accepted call may still return first (as in
+    // Vita3K) while the switch is under way: give it time before calling it a failure.
+    for (int i = 0; res >= 0 && i < 50; i++) {
+        sceKernelDelayThread(100 * 1000);
+    }
     VU_Fail("The installer could not start. Enable Unsafe Homebrew in Settings > HENkaku Settings and try again.",
             "sceAppMgrLoadExec = 0x%08X", (unsigned)res);
 }
