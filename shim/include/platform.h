@@ -32,6 +32,7 @@ void render_shutdown(void);
 void platform_pump(void);
 /* Renderer: step to the next live diagnostic mode. */
 void render_diag_cycle(void);
+int render_overlay_enabled(void);
 /* Block until at least one event is available, then pump. */
 void platform_wait(void);
 void platform_show_cursor(int show);

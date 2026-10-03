@@ -2934,6 +2934,12 @@ static void perf_overlay_draw(void)
     rq_exec(bk_overlay, &o, sizeof(o));
 }
 
+/* The debug pad combos (diagnostic modes, frame traces) only work with the overlay on. */
+int render_overlay_enabled(void)
+{
+    return perf.enabled > 0;
+}
+
 static void perf_frame_begin_swap(void)
 {
     if (perf.enabled < 0) {

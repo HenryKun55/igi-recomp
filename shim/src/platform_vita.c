@@ -311,11 +311,13 @@ void platform_pump(void)
         else
             set_key(m->dik, down);
     }
+    /* Debug combos, only with the performance overlay on (overlay=1 in igi.cfg). */
     const uint32_t diag = SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER | SCE_CTRL_SELECT;
-    if ((pad.buttons & diag) == diag && (prev_buttons & diag) != diag)
+    const int debug = render_overlay_enabled();
+    if (debug && (pad.buttons & diag) == diag && (prev_buttons & diag) != diag)
         render_diag_cycle();
     const uint32_t trace = SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER | SCE_CTRL_START;
-    if ((pad.buttons & trace) == trace && (prev_buttons & trace) != trace && !g_trace_next_frame)
+    if (debug && (pad.buttons & trace) == trace && (prev_buttons & trace) != trace && !g_trace_next_frame)
         g_trace_next_frame = 1;   /* log the next frame's draws and save its image */
     prev_buttons = pad.buttons;
 
