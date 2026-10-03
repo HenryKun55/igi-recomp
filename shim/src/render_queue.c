@@ -70,11 +70,8 @@ static void sema_wait_game(Sema *s)
 
 /* ---- memory ------------------------------------------------------------------ */
 
-typedef struct Chunk {
-    struct Chunk *next;
-    size_t cap, used;
-    _Alignas(16) uint8_t mem[];
-} Chunk;
+typedef RqChunk Chunk;   /* rq_fast.h (rq_begin_fast) */
+_Static_assert(RQ_MAX_ARGS == RQ_FAST_MAX_ARGS, "rq_fast.h argument limit");
 
 static Chunk *chunk_new(size_t cap)
 {
@@ -126,10 +123,7 @@ static uint8_t *arena_room(Arena *a, size_t n)
 #define NSLOTS 2u
 
 typedef void (*CmdFn)(const void *args);
-typedef struct CmdHdr {
-    _Alignas(16) CmdFn fn;   /* NULL: continue at the next chunk */
-    uint32_t size;           /* whole record, header included */
-} CmdHdr;
+typedef RqCmdHdr CmdHdr;
 
 typedef struct Slot {
     Chunk *cmd_first;
@@ -139,8 +133,8 @@ typedef struct Slot {
 static Slot slots[NSLOTS];
 
 /* Game thread recording state. */
-static Chunk *rec_chunk;
-static uint64_t rec_cmds;      /* commands recorded */
+RqChunk *rq_rec_chunk;
+uint64_t rq_rec_cmds;          /* commands recorded */
 static uint32_t rec_frame;     /* frame being recorded */
 static size_t vtx_reserved;
 
@@ -161,23 +155,23 @@ static void cmd_exit(const void *a) { (void)a; }
 static void *rq_cmd(CmdFn fn, uint32_t args)
 {
     uint32_t size = (uint32_t)((sizeof(CmdHdr) + args + 15u) & ~(size_t)15u);
-    Chunk *c = rec_chunk;
+    Chunk *c = rq_rec_chunk;
     if (c->cap - c->used < size + sizeof(CmdHdr)) {
         CmdHdr *j = (CmdHdr *)(void *)(c->mem + c->used);
         j->fn = NULL;
         j->size = 0;
-        rec_cmds++;
+        rq_rec_cmds++;
         if (!c->next)
             c->next = chunk_new(CMD_CHUNK);
         c = c->next;
         c->used = 0;
-        rec_chunk = c;
+        rq_rec_chunk = c;
     }
     CmdHdr *h = (CmdHdr *)(void *)(c->mem + c->used);
     h->fn = fn;
     h->size = size;
     c->used += size;
-    rec_cmds++;
+    rq_rec_cmds++;
     return h + 1;
 }
 
@@ -208,7 +202,7 @@ void rq_vtx_commit(size_t used)
 
 static void publish(void)
 {
-    atomic_store(&pub_cmds, rec_cmds);
+    atomic_store(&pub_cmds, rq_rec_cmds);
     if (atomic_exchange(&render_idle, 0))
         sema_signal(&render_sema);
 }
@@ -242,7 +236,7 @@ static void notify_game(void)
 
 uint64_t rq_mark(void)
 {
-    return rec_cmds;
+    return rq_rec_cmds;
 }
 
 int rq_passed(uint64_t mark)
@@ -255,7 +249,7 @@ void rq_sync(void)
     if (!rq_on)
         return;
     publish();
-    wait_for(&done_cmds, rec_cmds);
+    wait_for(&done_cmds, rq_rec_cmds);
 }
 
 /* ---- render thread ------------------------------------------------------------- */
@@ -395,7 +389,7 @@ void rq_start(void)
         slots[i].vtx.first = slots[i].vtx.cur = chunk_new(VTX_CHUNK);
         slots[i].vtx.chunk_size = VTX_CHUNK;
     }
-    rec_chunk = slots[0].cmd_first;
+    rq_rec_chunk = slots[0].cmd_first;
     sema_init(&render_sema, "igi_rq_render");
     sema_init(&game_sema, "igi_rq_game");
     platform_gl_release();
@@ -438,8 +432,8 @@ uint64_t rq_swap_end_frame(void)
     wait_frames(lockstep ? rec_frame + 1u : rec_frame);
     rec_frame++;
     Slot *s = &slots[rec_frame % NSLOTS];
-    rec_chunk = s->cmd_first;
-    rec_chunk->used = 0;
+    rq_rec_chunk = s->cmd_first;
+    rq_rec_chunk->used = 0;
     arena_reset(&s->data);
     arena_reset(&s->vtx);
     return win32_perf_counter() - t0;
@@ -459,7 +453,7 @@ void rq_shutdown(void)
 #endif
     rq_cmd(cmd_exit, 0);
     publish();
-    wait_for(&done_cmds, rec_cmds);
+    wait_for(&done_cmds, rq_rec_cmds);
 #if defined(__vita__)
     sceKernelWaitThreadEnd(render_tid, NULL, NULL);
 #else

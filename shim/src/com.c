@@ -5,9 +5,9 @@
 #include <stdlib.h>
 #include <strings.h>
 
-#define MAX_OBJECTS 65536u
+#define MAX_OBJECTS COM_MAX_OBJECTS
 
-static void *hosts[MAX_OBJECTS];
+void *com_hosts[COM_MAX_OBJECTS];
 static uint32_t next_host = 1;
 static uint32_t free_list[MAX_OBJECTS];
 static uint32_t free_count;
@@ -35,7 +35,7 @@ uint32_t com_new(uint32_t vtable, void *host)
     uint32_t idx = free_count ? free_list[--free_count] : next_host++;
     if (idx >= MAX_OBJECTS)
         rt_fatal(NULL, "too many COM objects");
-    hosts[idx] = host;
+    com_hosts[idx] = host;
     uint32_t obj = heap_alloc(16);
     WR32(obj, vtable);
     WR32(obj + 4u, idx);
@@ -44,11 +44,6 @@ uint32_t com_new(uint32_t vtable, void *host)
     return obj;
 }
 
-void *com_host(uint32_t obj)
-{
-    uint32_t idx = obj ? RD32(obj + 4u) : 0u;
-    return idx < MAX_OBJECTS ? hosts[idx] : NULL;
-}
 
 uint32_t com_addref(uint32_t obj)
 {
@@ -65,7 +60,7 @@ uint32_t com_release(uint32_t obj)
     WR32(obj + 8u, n);
     if (n == 0) {
         uint32_t idx = RD32(obj + 4u);
-        hosts[idx] = NULL;
+        com_hosts[idx] = NULL;
         free_list[free_count++] = idx;
         WR32(obj, 0);
         heap_free(obj);

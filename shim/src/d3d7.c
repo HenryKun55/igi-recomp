@@ -1151,12 +1151,12 @@ static void pk_decode_cmd(const void *p)
 static void pk_decode_later(VertexBuffer *vb, VBVersion *c)
 {
     VBData *d = vb_data(vb, 0, vb->count);
-    PkDecode *k = rq_begin(pk_decode_cmd, sizeof(PkDecode));
+    PkDecode *k = rq_begin_fast(pk_decode_cmd, sizeof(PkDecode));
     k->ver = c;
     k->data = d;
     k->fvf = vb->fvf;
     k->stride = vb->stride;
-    rq_end();
+    rq_end_fast();
     d->last_ref = rq_mark();
 }
 
@@ -1265,7 +1265,7 @@ static uint16_t *pk_indices(const uint16_t *s, uint32_t n, uint32_t *lo_out, uin
 static PkDraw *pk_begin(uint32_t kind, uint32_t prim, uint32_t fvf, uint32_t stride, uint32_t nv)
 {
     render_pk_prepare((fvf & 0x0Eu) == 0x4u, (fvf & 0x10u) != 0);
-    PkDraw *c = rq_begin(pk_exec, sizeof(PkDraw));
+    PkDraw *c = rq_begin_fast(pk_exec, sizeof(PkDraw));
     c->kind = (uint8_t)kind;
     c->diag = (uint8_t)render_diag_mode();
     c->trace = g_trace_next_frame == 2;
@@ -1287,7 +1287,7 @@ static PkDraw *pk_begin(uint32_t kind, uint32_t prim, uint32_t fvf, uint32_t str
 
 static void pk_end(void)
 {
-    rq_end();
+    rq_end_fast();
     render_pk_recorded();
 }
 

@@ -121,6 +121,7 @@ int render_diag_mode(void);
 void rq_exec(void (*fn)(const void *args), const void *args, size_t size);
 void *rq_begin(void (*fn)(const void *args), size_t size);
 void rq_end(void);
+#include "rq_fast.h"
 void *rq_data(size_t n);
 uint64_t rq_mark(void);
 int rq_passed(uint64_t mark);

@@ -51,6 +51,8 @@ void rq_exec(void (*fn)(const void *args), const void *args, size_t size);
 /* Same, with the arguments built in place: fill the returned memory, then rq_end. */
 void *rq_begin(void (*fn)(const void *args), size_t size);
 void rq_end(void);
+
+#include "rq_fast.h"
 /* Render thread side: the GL name for a name from q_glGenTextures/q_glGenBuffers
  * (created on first use; the name itself without the render thread). */
 GLuint rq_tex_name(GLuint name);

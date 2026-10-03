@@ -28,7 +28,14 @@ uint32_t com_vtable(const char *iface, const ComMethod *methods, int count);
 
 /* Create an object; `host` is returned by com_host() for method implementations. */
 uint32_t com_new(uint32_t vtable, void *host);
-void *com_host(uint32_t obj);
+#define COM_MAX_OBJECTS 65536u
+extern void *com_hosts[COM_MAX_OBJECTS];
+/* Inline: the device methods look up their objects on every call. */
+static inline void *com_host(uint32_t obj)
+{
+    uint32_t idx = obj ? RD32(obj + 4u) : 0u;
+    return idx < COM_MAX_OBJECTS ? com_hosts[idx] : NULL;
+}
 uint32_t com_addref(uint32_t obj);
 /* Decrement; returns the new count. The caller frees host data when it reaches 0. */
 uint32_t com_release(uint32_t obj);

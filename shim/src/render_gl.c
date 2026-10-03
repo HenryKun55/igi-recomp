@@ -1033,7 +1033,7 @@ static void send_lights(void)
     light_sent_valid = 1;
     light_sent_serial = g_light_serial;
     const uint32_t *rs = g_rs.rs;
-    LightSnapshot *cur = rq_begin(bk_lights, sizeof(*cur));
+    LightSnapshot *cur = rq_begin_fast(bk_lights, sizeof(*cur));
     rt_fill_small((uint8_t *)cur, 0, sizeof(*cur));   /* also clears padding for memcmp; no SceLibc memset */
     cur->ambient = rs[139];
     cur->color_material = rs[141] && rs[145] == 1u;
@@ -1071,7 +1071,7 @@ static void send_lights(void)
                        (double)l->falloff);
         }
     }
-    rq_end();
+    rq_end_fast();
 }
 
 /* The draw's texture stages: textures uploaded (and bound names), combiner
@@ -1533,7 +1533,7 @@ static void submit_arrays(int prim, const Layout *L, uint32_t nv, const uint16_t
         memcpy(copy, idx, (size_t)ni * sizeof(uint16_t));
         idx = copy;
     }
-    DrawCmd *d = rq_begin(bk_draw, pretransformed ? offsetof(DrawCmd, vp_x) : sizeof(DrawCmd));
+    DrawCmd *d = rq_begin_fast(bk_draw, pretransformed ? offsetof(DrawCmd, vp_x) : sizeof(DrawCmd));
     d->prim = prim;
     d->nv = nv;
     d->ni = ni;
@@ -1543,7 +1543,7 @@ static void submit_arrays(int prim, const Layout *L, uint32_t nv, const uint16_t
     fill_state(d, stages, !pretransformed);
     uint64_t t1 = fine_now();
     pc_frame[PC_STATE_US] += (t1 - t0) - (pc_frame[PC_TEX_US] - tex_before);
-    rq_end();
+    rq_end_fast();
     pc_frame[PC_GL_US] += fine_now() - t1;
     pc_frame[PC_VERTS] += nv;
     pc_frame[PC_INDICES] += idx || A->ibo ? ni : 0u;
@@ -2807,17 +2807,17 @@ static void pk_send_parts(uint32_t parts)
 {
     const uint32_t serial = g_rs_serial;
     if (parts & RS_PART_STAGE) {
-        PkStages *s = rq_begin(pk_stages_cmd, sizeof(PkStages));
+        PkStages *s = rq_begin_fast(pk_stages_cmd, sizeof(PkStages));
         s->serial = serial;
         s->stages = active_stages();
         for (int i = 0; i < MAX_STAGES; i++)
             s->tci[i] = g_rs.stage[i].texcoordindex;
         stages_for_draw(s->st);   /* no uploads: stage_textures_dirty() said so */
-        rq_end();
+        rq_end_fast();
     }
     if (parts & RS_PART_RS) {
         const uint32_t *rs = g_rs.rs;
-        PkRs *r = rq_begin(pk_rs_cmd, sizeof(PkRs));
+        PkRs *r = rq_begin_fast(pk_rs_cmd, sizeof(PkRs));
         r->serial = serial;
         r->fog = rs[28];
         r->fogtable = rs[35];
@@ -2830,10 +2830,10 @@ static void pk_send_parts(uint32_t parts)
         RS_COPY(18, 41), RS_COPY(19, 137), RS_COPY(20, 140), RS_COPY(21, 60);
 #undef RS_COPY
         _Static_assert(RS_WORDS == 22u, "RS_COPY list");
-        rq_end();
+        rq_end_fast();
     }
     if (parts & RS_PART_XF) {
-        PkXf *x = rq_begin(pk_xf_cmd, sizeof(PkXf));
+        PkXf *x = rq_begin_fast(pk_xf_cmd, sizeof(PkXf));
         x->serial = serial;
         x->vp_x = g_rs.vp_x;
         x->vp_y = g_rs.vp_y;
@@ -2844,17 +2844,17 @@ static void pk_send_parts(uint32_t parts)
         mat4_copy(x->world, g_rs.world);
         mat4_copy(x->view, g_rs.view);
         mat4_copy(x->proj, g_rs.proj);
-        rq_end();
+        rq_end_fast();
     } else if (parts & RS_PART_WORLD) {
-        PkWorld *w = rq_begin(pk_world_cmd, sizeof(PkWorld));
+        PkWorld *w = rq_begin_fast(pk_world_cmd, sizeof(PkWorld));
         w->serial = serial;
         mat4_copy(w->world, g_rs.world);
-        rq_end();
+        rq_end_fast();
     }
     if (!parts) {
-        uint32_t *s = rq_begin(pk_serial_cmd, sizeof(uint32_t));
+        uint32_t *s = rq_begin_fast(pk_serial_cmd, sizeof(uint32_t));
         *s = serial;
-        rq_end();
+        rq_end_fast();
     }
 }
 
@@ -2866,11 +2866,11 @@ void render_pk_prepare(int pretransformed, int has_normal)
         DrawStage stages[MAX_STAGES];
         stages_for_draw(stages);
         send_params();
-        PkState *s = rq_begin(pk_state_cmd, sizeof(PkState));
+        PkState *s = rq_begin_fast(pk_state_cmd, sizeof(PkState));
         s->serial = g_rs_serial;
         layout_in_current(&s->li);
         fill_state(&s->d, stages, 1);
-        rq_end();
+        rq_end_fast();
         pk_snap_valid = 1;
         pk_snap_serial = g_rs_serial;
         g_rs_parts = 0;
