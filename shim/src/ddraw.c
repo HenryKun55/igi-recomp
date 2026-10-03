@@ -284,6 +284,7 @@ static void surf_AddAttachedSurface(Ctx *c)
     } else if (a) {
         s->attached = a;
         a->refs++;
+        g_tex_epoch++;   /* a texture's mip chain may have changed */
     }
     stdcall_ret(c, DD_OK, 2);
 }
@@ -367,7 +368,7 @@ static void soft_blit(Surface *dst, const Rect *dr, Surface *src, const Rect *sr
                 }
             }
         }
-        dst->dirty = 1;
+        surface_set_dirty(dst);
         return;
     }
     /* Source column per destination column, computed once per blit rather than
@@ -403,7 +404,7 @@ static void soft_blit(Surface *dst, const Rect *dr, Surface *src, const Rect *sr
             memcpy(drow + (uint32_t)(dr->l + x) * bpp, sp, bpp);
         }
     }
-    dst->dirty = 1;
+    surface_set_dirty(dst);
 }
 
 static void soft_fill(Surface *dst, const Rect *r, uint32_t v)
@@ -419,7 +420,7 @@ static void soft_fill(Surface *dst, const Rect *r, uint32_t v)
             memcpy(g_mem + dst->mem + (uint32_t)y * dst->pitch + (uint32_t)x * bpp, &v, bpp);
         }
     }
-    dst->dirty = 1;
+    surface_set_dirty(dst);
 }
 
 /* The primary surface of a flip chain is the visible front buffer. The loading
@@ -604,7 +605,7 @@ static void surf_SetColorKey(Ctx *c)
         }
         /* The key is baked into the uploaded texture's alpha: re-upload only on a change. */
         if (s->has_ck != had || (s->has_ck && (s->ck_lo != lo || s->ck_hi != hi)))
-            s->dirty = 1;
+            surface_set_dirty(s);
     }
     stdcall_ret(c, DD_OK, 3);
 }
@@ -659,7 +660,7 @@ static void surf_Unlock(Ctx *c)
     s->locked = 0;
     /* A read-only lock changed nothing: no texture re-upload, no render target write back. */
     if (!s->lock_readonly) {
-        s->dirty = 1;
+        surface_set_dirty(s);
         if (s->lock_readback)
             render_writeback(s);
     }
@@ -696,7 +697,7 @@ static void surf_SetSurfaceDesc(Ctx *c)
             s->w = RD32(d + 12u);
         if (flags & DDSD_HEIGHT)
             s->h = RD32(d + 8u);
-        s->dirty = 1;
+        surface_set_dirty(s);
     }
     stdcall_ret(c, DD_OK, 3);
 }

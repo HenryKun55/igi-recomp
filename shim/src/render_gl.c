@@ -221,6 +221,7 @@ int render_pk_no_compact(void)
 void render_diag_cycle(void)
 {
     diag_mode = (diag_mode + 1) % DIAG_COUNT;
+    g_tex_epoch++;
     rt_log("diagnostic mode %d: %s", diag_mode, diag_names[diag_mode]);
 }
 /* 1: remap D3D clip z [0,w] to GL [-w,w] (desktop GL). zremap=0 in igi.cfg disables it.
@@ -770,8 +771,11 @@ static void hash_store(Surface *m, uint64_t h)
     m->priv[TEXP_HASH_OK] = 1;
 }
 
+uint32_t g_tex_epoch = 1;
+
 void render_texture_release(Surface *s)
 {
+    g_tex_epoch++;
     if (g_pack_thread && s->gl_tex) {
         /* Recorded draws still to be drawn may use it. */
         render_flush();
@@ -803,11 +807,15 @@ static uint32_t texture_get(Surface *s)
 {
     if (!s)
         return white_tex;
+    if (s->clean_epoch == g_tex_epoch)
+        return s->gl_tex;
     int levels_dirty = 0;
     for (Surface *m = s; m; m = next_mip(m))
         levels_dirty |= m->dirty;
-    if (s->gl_tex && !levels_dirty && !(diag_mode != DIAG_LEVEL0 && s->priv[0] == 0 && next_mip(s)))
+    if (s->gl_tex && !levels_dirty && !(diag_mode != DIAG_LEVEL0 && s->priv[0] == 0 && next_mip(s))) {
+        s->clean_epoch = g_tex_epoch;
         return s->gl_tex;
+    }
     uint64_t t0 = fine_now();
 
     /* Lock/Unlock marks a texture dirty even when the game only read it or wrote
@@ -2678,12 +2686,15 @@ static int stage_textures_dirty(void)
         if (st->colorop == 1u || (i > 0 && active < i) || !st->texture)
             continue;
         active++;
-        const Surface *s = st->texture;
+        Surface *s = st->texture;
+        if (s->clean_epoch == g_tex_epoch)
+            continue;
         if (!s->gl_tex || (diag_mode != DIAG_LEVEL0 && s->priv[0] == 0 && next_mip(s)))
             return 1;
         for (const Surface *m = s; m; m = next_mip(m))
             if (m->dirty)
                 return 1;
+        s->clean_epoch = g_tex_epoch;
     }
     return 0;
 }

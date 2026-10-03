@@ -76,7 +76,8 @@ struct Surface {
     int lock_readback;     /* lock of a render target: pixels came from GL */
     int lock_readonly;     /* current lock has DDLOCK_READONLY */
     uint32_t gl_tex;       /* texture name, 0 = none */
-    int dirty;             /* guest pixels changed since the last upload */
+    int dirty;             /* guest pixels changed since the last upload (surface_set_dirty) */
+    uint32_t clean_epoch;  /* g_tex_epoch when its texture was last found up to date */
     int mip_levels;
     int client_mem;        /* mem belongs to the game (DDSD_LPSURFACE): never freed */
     /* Video fast path: the decoder hands its RGBA frame straight to the renderer
@@ -84,6 +85,17 @@ struct Surface {
     struct VideoFrameSource *video;   /* set while the surface shows a decoded movie */
     uint32_t priv[8];      /* renderer scratch */
 };
+
+/* Bumped whenever a texture may stop being up to date: a surface made dirty,
+ * a texture released, an attachment added, the diagnostic mode changed. A
+ * surface whose clean_epoch equals it needs no checks before drawing. */
+extern uint32_t g_tex_epoch;
+
+static inline void surface_set_dirty(Surface *s)
+{
+    s->dirty = 1;
+    g_tex_epoch++;
+}
 
 /* Display state. */
 extern int g_dd_width, g_dd_height, g_dd_bpp;
