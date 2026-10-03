@@ -511,7 +511,17 @@ static int words_differ(const void *a, const void *b, size_t n)
 {
     const uint8_t *pa = a, *pb = b;
     uint32_t acc = 0;
-    for (size_t i = 0; i < n; i += 4) {
+    size_t i = 0;
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+    if (n >= 16u) {
+        uint8x16_t d = veorq_u8(vld1q_u8(pa), vld1q_u8(pb));
+        for (i = 16; i + 16u <= n; i += 16)
+            d = vorrq_u8(d, veorq_u8(vld1q_u8(pa + i), vld1q_u8(pb + i)));
+        uint32x2_t h = vreinterpret_u32_u8(vorr_u8(vget_low_u8(d), vget_high_u8(d)));
+        acc = vget_lane_u32(h, 0) | vget_lane_u32(h, 1);
+    }
+#endif
+    for (; i < n; i += 4) {
         uint32_t x, y;
         memcpy(&x, pa + i, 4);
         memcpy(&y, pb + i, 4);

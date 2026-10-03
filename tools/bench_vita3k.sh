@@ -62,7 +62,8 @@ SAVED_EBOOT=${TMPDIR:-/tmp}/igi_bench_saved_eboot.$$
 cp "$APP/eboot.bin" "$SAVED_EBOOT" 2>/dev/null
 unzip -p "$BUILD/igi.vpk" eboot.bin > "$APP/eboot.bin" || exit 1
 echo "installed $BUILD/igi.vpk eboot.bin"
-rm -f "$DATA/bench_result.txt"
+# Vita3K does not truncate files the game rewrites: stale tails would stay.
+rm -f "$DATA/bench_result.txt" "$DATA/bench_frames.csv"
 touch "$DATA/.bench_start"
 echo "$SECS ${SHOT:-0} ${HOLD:-0} ${MISSION:-1} ${VIEWS:-0} ${SLOW:-0} ${STILL:-0}" > "$DATA/bench.txt"
 
