@@ -855,7 +855,46 @@ def synth_objcull(seed, bases):
     return st
 
 
-SYNTH = {0x004D0510: synth_objcull, 0x004DD7F0: synth_bounds, 0x0050D4C0: synth_poly2d, 0x0049B700: synth_skin, 0x004A1570: synth_mesh, 0x004D14E0: synth_tree, 0x00496280: synth_adpcm,
+def synth_fog(seed, bases):
+    """0x49B2D0: a captured call with the position (around the camera, near or
+    far), the radius (zero: equal fogs; negative, special values), the fog scale
+    and unit, the view axis, the camera, the x87 rounding mode and status word and
+    the stale frame randomised."""
+    rnd = random.Random(seed)
+    st = base_state(rnd, bases, 0x0049B2D0)
+    m, pk = st.mem, Peek(st.mem)
+    E = st.esp
+    pos = pk.u32(E + 4)
+    far = rnd.choice([1.0, 30.0, 300.0, 3000.0, 30000.0])
+    for k in range(3):
+        v = pk.f64(0xBCAB08 + 8 * k) + rnd.uniform(-far, far)
+        if rnd.random() < 0.3:
+            v = pk.f64(pos + 8 * k)
+        elif rnd.random() < 0.02:
+            v = rnd.choice([float('nan'), float('inf'), 1e300])
+        m.f64(pos + 8 * k, v)
+    r = rnd.choice([pk.f32(E + 8), 0.0, -3.0, rnd.uniform(0.0, 50.0), rnd.uniform(0.0, 2000.0)])
+    if rnd.random() < 0.03:
+        r = rnd.choice([float('nan'), float('inf'), -0.0, 1e-40])
+    m.f32(E + 8, r)
+    for a in (0xB46D04, 0xBCABEC):
+        if rnd.random() < 0.3:
+            m.f32(a, jitter(rnd, pk.f32(a), 0.5))
+    if rnd.random() < 0.1:
+        m.f32(0xB46D04, rnd.choice([0.0, 1e-6, 0.05, 1.0, 100.0]))
+    for i in range(3):
+        if rnd.random() < 0.3:
+            m.f32(0xBCAAF8 + 4 * i, jitter(rnd, pk.f32(0xBCAAF8 + 4 * i), 0.2))
+    if rnd.random() < 0.3:
+        st.fcw = (st.fcw & ~0xC00) | (rnd.randrange(4) << 10)
+    st.fsw = (rnd.getrandbits(16) & 0x4700) | (st.fsw & ~0x4700)
+    if rnd.random() < 0.5:
+        for off in range(-0x40, 0, 4):
+            m.u32(E + off, rnd.getrandbits(32))
+    return st
+
+
+SYNTH = {0x0049B2D0: synth_fog, 0x004D0510: synth_objcull, 0x004DD7F0: synth_bounds, 0x0050D4C0: synth_poly2d, 0x0049B700: synth_skin, 0x004A1570: synth_mesh, 0x004D14E0: synth_tree, 0x00496280: synth_adpcm,
          0x0049CC80: synth_deform, 0x0049FEB0: synth_sphere, 0x0049BE10: synth_bend,
          0x00510010: synth_patch, 0x004C1840: synth_raycast}
 
@@ -901,30 +940,9 @@ def hot_lines(path, addrs, blocks, top=40):
         print('  %-40s %9d %5.1f%%' % (k, per[k], 100.0 * per[k] / max(1, tot)))
 
 
-def run(exe, path, fn, state, native, prof_gen=None, trace=True, hot=None):
-    """(status, ARM instructions, per host function, guest memory, context, trace)."""
-    ab = armbench
-    from unicorn import Uc, UcError, UC_ARCH_ARM, UC_MODE_THUMB, UC_HOOK_BLOCK
+def load_state(uc, ab, exe, state, gsize, syms, native):
+    """Writes the guest state, thunk table, context and entry registers; returns the context bytes."""
     from unicorn import arm_const as A
-    segs, syms = ab.load_elf(path)
-    addrs, _ = ab.classify(path)
-    fsyms = terrainbench.funcs_of(path)
-    starts = [s[0] for s in fsyms]
-    entries = {}
-    for a, _, name in fsyms:
-        if name.startswith('f_') and len(name) == 10:
-            entries[a & ~1] = int(name[2:], 16)
-    stub_addr = syms['thunk_stub'] & ~1 if 'thunk_stub' in syms else None
-    uc = Uc(UC_ARCH_ARM, UC_MODE_THUMB)
-    for va, blob, memsz in segs:
-        lo = va & ~0xFFF
-        uc.mem_map(lo, ((va + memsz + 0xFFF) & ~0xFFF) - lo)
-        uc.mem_write(va, blob)
-    uc.mem_map(ab.HSTACK - 0x100000, 0x100000)
-    uc.mem_map(ab.CTX, 0x1000)
-    uc.mem_map(ab.STOP, 0x1000)
-    gsize = state.gsize
-    uc.mem_map(ab.GMEM, gsize + EXTRA)
     if state.image:
         uc.mem_write(ab.GMEM + 0x400000, ab.guest_image(exe))
     for a, b in state.mem.w.items():
@@ -954,6 +972,45 @@ def run(exe, path, fn, state, native, prof_gen=None, trace=True, hot=None):
     uc.reg_write(A.UC_ARM_REG_R2, regs[1])
     uc.reg_write(A.UC_ARM_REG_R3, regs[0])
     uc.reg_write(A.UC_ARM_REG_LR, ab.STOP | 1)
+    return ctx
+
+
+def run(exe, path, fn, state, native, prof_gen=None, trace=True, hot=None, twice=False):
+    """(status, ARM instructions, per host function, guest memory, context, trace).
+    twice: the function runs once from the state first (host statics, such as a
+    native function's cache of its last results, stay), then from the state again:
+    only the second run counts."""
+    ab = armbench
+    from unicorn import Uc, UcError, UC_ARCH_ARM, UC_MODE_THUMB, UC_HOOK_BLOCK
+    from unicorn import arm_const as A
+    segs, syms = ab.load_elf(path)
+    addrs, _ = ab.classify(path)
+    fsyms = terrainbench.funcs_of(path)
+    starts = [s[0] for s in fsyms]
+    entries = {}
+    for a, _, name in fsyms:
+        if name.startswith('f_') and len(name) == 10:
+            entries[a & ~1] = int(name[2:], 16)
+    stub_addr = syms['thunk_stub'] & ~1 if 'thunk_stub' in syms else None
+    uc = Uc(UC_ARCH_ARM, UC_MODE_THUMB)
+    for va, blob, memsz in segs:
+        lo = va & ~0xFFF
+        uc.mem_map(lo, ((va + memsz + 0xFFF) & ~0xFFF) - lo)
+        uc.mem_write(va, blob)
+    uc.mem_map(ab.HSTACK - 0x100000, 0x100000)
+    uc.mem_map(ab.CTX, 0x1000)
+    uc.mem_map(ab.STOP, 0x1000)
+    gsize = state.gsize
+    uc.mem_map(ab.GMEM, gsize + EXTRA)
+    for _ in range(2 if twice else 1):
+        if _:
+            try:
+                uc.emu_start(syms['f_%08X' % fn] | 1, ab.STOP, count=LIMIT)
+            except UcError:
+                pass
+            uc.mem_write(ab.GMEM, bytes(gsize + EXTRA))
+            uc.ctl_flush_tb()   # blocks translated without the counting hook added below
+        ctx = load_state(uc, ab, exe, state, gsize, syms, native)
     per = {}
     tot = [0]
     blocks = {}
@@ -1088,7 +1145,7 @@ def diff_mode(args, fn):
     tot = [0, 0]
     ncases = 0
     for label, state in cases(args, fn):
-        res = [run(args.exe, args.elf, fn, state, k) for k in (0, 1)]
+        res = [run(args.exe, args.elf, fn, state, k, twice=k == 1 and args.twice) for k in (0, 1)]
         d = compare(res[0], res[1], state)
         ok = not d and res[0][0] == res[1][0] == 'ok'
         ncases += 1
@@ -1116,6 +1173,9 @@ def main():
     ap.add_argument('rest', nargs='*')
     ap.add_argument('--synth', type=int, default=0, help='number of synthetic states')
     ap.add_argument('--seed', type=int, default=1)
+    ap.add_argument('--twice', action='store_true',
+                    help='diff: the native version runs from each state twice, only the second run is compared '
+                         '(a native function that reuses its last results)')
     ap.add_argument('--capture', action='append', default=[], help='captured state (file or glob pattern)')
     ap.add_argument('--base', action='append', default=[],
                     help='captured states the synthetic ones of some functions start from')

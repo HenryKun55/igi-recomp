@@ -139,6 +139,10 @@ NATIVE = {
     0x004D0510: ('rt_native_object_cull', [
         (0x004D0510, 426, 'dd2d45984d3132ed0440847974a547ef03b7067e'),
     ]),
+    # Per-object fog range (runtime/src/native_fog.c).
+    0x0049B2D0: ('rt_native_fog_range', [
+        (0x0049B2D0, 351, 'af063ef2ce0ec26e00530819129d34cef55db56d'),
+    ]),
     # IMA ADPCM decoder (runtime/src/native_adpcm.c).
     0x00496280: ('rt_native_adpcm_decode', [
         (0x00496280, 409, 'a4e5b69d2e3cf1c83797f92ee34bd5b9512949ae'),
