@@ -7,7 +7,13 @@ reimplemented on top of vitaGL and the Vita's own APIs. Hot parts of the game
 (terrain, meshes, skinning, culling...) have been rewritten by hand for the
 Vita's CPU.
 
-**The download contains no game files.** You need your own copy of the PC game.
+## Disclaimer
+
+**This release contains no game files, and none will be provided.** It is an
+unofficial fan project, not affiliated with or endorsed by the rights holders
+of Project I.G.I. To play you need your own copy of the original PC game: copy
+the files from your disc as described below. Please don't ask for the game
+files in this thread or in DMs.
 
 ## What works
 
@@ -25,8 +31,8 @@ Vita's CPU.
 2. **libshacccg.suprx** (the runtime shader compiler) in `ur0:data/`.
    If you already play other vitaGL ports you have it. Otherwise, extract it
    with [ShaRKBR33D](https://github.com/Rinnegatamante/ShaRKBR33D).
-3. **The PC game files** from the original 2000 release. The port is built for
-   this exact `IGI.exe`:
+3. **The PC game files** from the original 2000 CD release. The port is built
+   for this exact `IGI.exe`:
    - size: 1,384,448 bytes
    - SHA-1: `e4daed6ab0feb7ca5614a0d61fa8aa6c14bd8164`
 
@@ -35,22 +41,28 @@ Vita's CPU.
 
 ## Installation
 
+You need the files of the original PC CD (the disc itself or an image of it):
+the `pc` folder and the small `.AFP` files at the root of the disc, which the
+game's CD check looks for.
+
 1. Install `igi.vpk` with VitaShell.
-2. On your PC, open the folder where the game is installed and find the folder
-   that contains `IGI.exe` (it is called `pc`, next to folders like
-   `missions`, `language`, `menusystem`, `weapons`...). It is about 480 MB.
-3. Copy that whole folder to the Vita so you end up with:
+2. Copy from the CD to the Vita (USB or FTP with VitaShell) so you end up with:
 
    ```
-   ux0:data/igi/pc/IGI.exe
+   ux0:data/igi/ANYS.AFP          <- from the root of the CD
+   ux0:data/igi/CONFIG.AFP        <- from the root of the CD
+   ux0:data/igi/MPZM.AFP          <- from the root of the CD
+   ux0:data/igi/YMBE.AFP          <- from the root of the CD
+   ux0:data/igi/pc/IGI.exe        <- the whole pc folder of the CD (about 480 MB)
    ux0:data/igi/pc/missions/...
    ux0:data/igi/pc/language/...
    ux0:data/igi/pc/menusystem/...
    ...
    ```
 
-   (USB or FTP with VitaShell; the `.url` shortcut files can be skipped.)
-4. Launch **Project IGI** from the LiveArea.
+   The `.url` shortcut files in `pc` can be skipped. Nothing needs to be
+   installed on a PC first: the files are used straight from the disc.
+3. Launch **Project IGI** from the LiveArea.
 
 Updating to a newer version only needs the new vpk; your game data and saves in
 `ux0:data/igi/` are kept.
