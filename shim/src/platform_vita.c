@@ -4,6 +4,7 @@
 #include "platform.h"
 #include "bench.h"
 #include "runtime.h"
+#include "vita_bootui.h"
 
 #include <SDL.h>
 #include <psp2/ctrl.h>
@@ -33,6 +34,7 @@ static int gl_ready;
 #define PIC_H 480
 
 static SceUID boot_fb_block = -1;
+static uint32_t *boot_fb_base;
 static int boot_fb_swaps;
 
 static uint32_t le32(const uint8_t *p)
@@ -155,6 +157,7 @@ static void boot_picture_show(void)
         return;
     }
     boot_fb_block = block;
+    boot_fb_base = base;
 }
 
 void platform_init(void)
@@ -165,6 +168,8 @@ void platform_init(void)
     scePowerSetGpuXbarClockFrequency(166);
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG_WIDE);
     boot_picture_show();
+    /* The version and the update check over the boot picture (vita_bootui.c). */
+    vita_bootui_run(boot_fb_base);
     if (SDL_Init(SDL_INIT_AUDIO | SDL_INIT_TIMER) != 0)
         rt_fatal(NULL, "SDL_Init: %s", SDL_GetError());
 }

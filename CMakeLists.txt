@@ -13,12 +13,27 @@ if(NOT EXISTS "${IGI_EXE}")
     message(FATAL_ERROR "IGI.exe not found at ${IGI_EXE}; pass -DIGI_EXE=/path/to/IGI.exe")
 endif()
 
+# The port's version: the one place it is set. Vita releases are tagged v<this> on
+# IGI_UPDATE_REPO (docs/VITA_RELEASE.md); the update check installs a release only when
+# its version is higher, so raise it for every release. major.minor.patch, each 0-9 for
+# minor and patch (the Vita's APP_VER is NN.NN: 0.1.0 -> 00.10, 1.2.3 -> 01.23).
+set(IGI_PORT_VERSION "0.1.0")
+set(IGI_UPDATE_REPO "HenryKun55/igi-vita" CACHE STRING "GitHub owner/repo whose releases the Vita update check reads")
+if(NOT IGI_PORT_VERSION MATCHES "^([0-9]+)\\.([0-9])\\.([0-9])$")
+    message(FATAL_ERROR "IGI_PORT_VERSION must be major.minor.patch with one-digit minor and patch")
+endif()
+math(EXPR IGI_VERSION_MAJOR "${CMAKE_MATCH_1}")
+if(IGI_VERSION_MAJOR LESS 10)
+    set(IGI_VERSION_MAJOR "0${IGI_VERSION_MAJOR}")
+endif()
+set(IGI_APP_VER "${IGI_VERSION_MAJOR}.${CMAKE_MATCH_2}${CMAKE_MATCH_3}")
+
 if(DEFINED VITA_ELF_CREATE)
     # PlayStation Vita (vitasdk toolchain file).
     set(VITA TRUE)
     include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
     set(VITA_TITLEID "PIGI00001" CACHE STRING "Vita title id")
-    set(VITA_VERSION "01.00" CACHE STRING "Vita app version")
+    set(VITA_VERSION "${IGI_APP_VER}")   # param.sfo APP_VER, from IGI_PORT_VERSION
     add_compile_definitions(__vita__)
     add_compile_options(-mcpu=cortex-a9 -mfpu=neon -mfloat-abi=hard -fno-short-enums
                         -ffunction-sections -fdata-sections -fno-pic -fno-pie)
@@ -69,6 +84,7 @@ file(GLOB SHIM_SOURCES CONFIGURE_DEPENDS shim/src/*.c)
 add_executable(igi ${RUNTIME_SOURCES} ${SHIM_SOURCES})
 target_include_directories(igi PRIVATE runtime/include shim/include "${GEN_DIR}")
 target_compile_options(igi PRIVATE -Wall -Wextra -fwrapv -fno-strict-aliasing -fsigned-char)
+target_compile_definitions(igi PRIVATE IGI_PORT_VERSION="${IGI_PORT_VERSION}")
 # Sampling profiler (runtime/src/profile.c): hooks in the generated code and a
 # sampling thread; writes profile.txt / igi_profile.txt. No cost when OFF.
 option(IGI_PROFILE "Build with the sampling profiler" OFF)
@@ -104,7 +120,10 @@ if(VITA)
         SceShaccCg_stub SceKernelDmacMgr_stub SceCtrl_stub SceTouch_stub SceHid_stub SceMotion_stub
         SceAudio_stub SceAudioIn_stub SceDisplay_stub SceGxm_stub SceCommonDialog_stub SceSysmodule_stub
         ScePower_stub SceAppMgr_stub SceAppUtil_stub SceIme_stub SceLibKernel_stub SceProcessmgr_stub
-        stdc++ pthread m c)
+        SceNet_stub SceNetCtl_stub SceIofilemgr_stub
+        curl ssl crypto z zstd stdc++ pthread m c)
+    # The update check (shim/src/vita_update.c) and its start-up screen (vita_bootui.c).
+    target_compile_definitions(igi PRIVATE IGI_UPDATE_REPO="${IGI_UPDATE_REPO}")
     # The LiveArea pictures come from the game's own art (the loading screen), so
     # they are made here from the game data instead of being kept in the repo.
     get_filename_component(IGI_PC_DIR "${IGI_EXE}" DIRECTORY)
@@ -112,17 +131,45 @@ if(VITA)
     file(COPY "${CMAKE_SOURCE_DIR}/platform/vita/sce_sys/" DESTINATION "${IGI_SCE_SYS}")
     execute_process(
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/make_vita_livearea.py" "${IGI_PC_DIR}" "${IGI_SCE_SYS}"
+                "${IGI_PORT_VERSION}"
         RESULT_VARIABLE IGI_LIVEAREA_RESULT)
     if(NOT IGI_LIVEAREA_RESULT EQUAL 0)
         message(FATAL_ERROR "tools/make_vita_livearea.py failed (it needs Pillow: pip install Pillow)")
     endif()
+    # The start-up screen's fonts (Oswald, OFL).
+    set(IGI_BOOT_FONTS "${CMAKE_BINARY_DIR}/vita_font")
+    execute_process(
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/make_vita_boot_font.py" "${IGI_BOOT_FONTS}"
+        RESULT_VARIABLE IGI_FONT_RESULT)
+    if(NOT IGI_FONT_RESULT EQUAL 0)
+        message(FATAL_ERROR "tools/make_vita_boot_font.py failed (it needs Pillow: pip install Pillow)")
+    endif()
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/tools/make_vita_livearea.py"
+        "${CMAKE_SOURCE_DIR}/tools/make_vita_boot_font.py" "${CMAKE_SOURCE_DIR}/platform/vita/fonts/Oswald.ttf"
         "${IGI_PC_DIR}/menusystem/loadingscreen.res")
+
+    # updater.bin: puts a downloaded release in place of the game's files
+    # (platform/vita/updater). A separate program, so the game is closed while its files
+    # are replaced; unsafe, as only unsafe homebrew may write to ux0:app.
+    set(IGI_UPDATER_DIR "${CMAKE_SOURCE_DIR}/platform/vita/updater")
+    add_executable(igi_updater "${IGI_UPDATER_DIR}/updater.c" "${IGI_UPDATER_DIR}/debugScreen.c")
+    target_compile_options(igi_updater PRIVATE -Wall -Wextra)
+    target_link_libraries(igi_updater PRIVATE png z m
+        SceDisplay_stub SceCtrl_stub SceAppMgr_stub ScePower_stub SceLibKernel_stub
+        SceKernelThreadMgr_stub SceIofilemgr_stub SceProcessmgr_stub)
+    vita_create_self(updater.bin igi_updater UNSAFE)
+
     vita_create_self(eboot.bin igi UNSAFE)
     vita_create_vpk(igi.vpk ${VITA_TITLEID} eboot.bin
         VERSION ${VITA_VERSION}
         NAME "Project IGI"
-        FILE ${IGI_SCE_SYS} sce_sys)
+        FILE ${IGI_SCE_SYS} sce_sys
+             "${CMAKE_BINARY_DIR}/updater.bin.out" updater.bin
+             # CA certificates for the update check's HTTPS (curl.se/ca, MPL 2.0)
+             "${IGI_UPDATER_DIR}/cacert.pem" cacert.pem
+             "${IGI_BOOT_FONTS}/boot.font" font/boot.font
+             "${IGI_BOOT_FONTS}/boot_small.font" font/boot_small.font
+             "${CMAKE_SOURCE_DIR}/platform/vita/fonts/OFL.txt" font/Oswald-OFL.txt)
 else()
     find_package(SDL2 REQUIRED)
     find_package(OpenGL REQUIRED)
