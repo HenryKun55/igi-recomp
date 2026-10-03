@@ -86,6 +86,12 @@ fi
 # In a subshell, so the shell does not report the kill below.
 (VITA3K_CPU_MHZ=${MHZ:-444} "$VITA3K" -r PIGI00001 > "$LOG" 2>&1 &)
 echo "Vita3K started (CPU ${MHZ:-444} MHz), waiting for the result (timeout $TIMEOUT s)"
+# The loop below ends when the instance is gone: wait for it to appear first.
+started=0
+while [ $started -lt 30 ] && ! pgrep -f "Vita3K -r PIGI00001" > /dev/null; do
+    sleep 1
+    started=$((started + 1))
+done
 
 shots=0
 waited=0
