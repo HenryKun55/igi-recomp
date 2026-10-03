@@ -97,6 +97,18 @@ Create `ux0:data/igi/igi.cfg` (a text file, one setting per line):
 | --- | --- |
 | `aspect=keep` | Original 4:3 picture with black bars (default: fill the 16:9 screen) |
 | `overlay=1` | Performance overlay (frame time, CPU time per frame) |
+| `update_check=0` | No check for a new version at start-up (default: on) |
+
+## Updates
+
+At start-up, over the boot picture, the game looks for a newer release of the
+port (for at most about three seconds; without Wi-Fi it goes straight on). When
+one is found it offers it: X installs it, O skips it. The download is checked,
+the game closes, puts the new files in place of its own and starts again;
+`igi.cfg`, saves and the game files in `ux0:data/igi` are kept. If anything goes
+wrong the installed game keeps working, and the details are in
+`ux0:data/igi/update/update.log`. The installed version is shown in the bottom
+right corner of the boot screen.
 
 ## Known issues
 

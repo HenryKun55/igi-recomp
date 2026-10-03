@@ -63,7 +63,8 @@ Install `build-vita/igi.vpk` and copy the game's `pc` directory to
 configure time, so they are not part of this repository either.
 
 Optional settings go in `ux0:data/igi/igi.cfg` (one `key=value` per line, e.g.
-`overlay=1` for the performance overlay).
+`overlay=1` for the performance overlay, `update_check=0` to skip the update
+check at start-up). Releases and the in-game updater: `docs/VITA_RELEASE.md`.
 
 ## Brazilian Portuguese
 
