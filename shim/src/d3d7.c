@@ -1587,7 +1587,7 @@ static void dev_Load(Ctx *c)
         dst->has_ck = src->has_ck;
         dst->ck_lo = src->ck_lo;
         dst->ck_hi = src->ck_hi;
-        dst->dirty = 1;
+        surface_set_dirty(dst);
         if (!dst->attached || !src->attached)
             break;
     }
@@ -1718,6 +1718,55 @@ static const ComMethod vb_methods[] = {
     { "ProcessVerticesStrided", NULL },
 };
 
+/* Entries of the device methods called most (several thousand calls a frame;
+ * see thunk_set_fast): most calls change nothing and return at once. */
+static uint64_t fast_SetRenderState(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax)
+{
+    const uint32_t s = RD32(esp + 8u);
+    c->r[1] = ecx;
+    if (s < 256u && g_rs.rs[s] != RD32(esp + 12u)) {
+        c->r[0] = eax;
+        c->r[4] = esp;
+        dev_SetRenderState(c);
+        return ((uint64_t)c->r[4] << 32) | c->r[0];
+    }
+    c->r[0] = D3D_OK;
+    c->r[4] = esp + 16u;
+    return ((uint64_t)(esp + 16u) << 32) | D3D_OK;
+}
+
+static uint64_t fast_SetTextureStageState(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax)
+{
+    const uint32_t stage = RD32(esp + 8u), type = RD32(esp + 12u);
+    c->r[1] = ecx;
+    if (stage >= MAX_STAGES || type != 12u) {
+        const uint32_t *p = stage < MAX_STAGES ? tss_slot(&g_rs.stage[stage], type) : NULL;
+        if (!p || *p == RD32(esp + 16u)) {
+            c->r[0] = D3D_OK;
+            c->r[4] = esp + 20u;
+            return ((uint64_t)(esp + 20u) << 32) | D3D_OK;
+        }
+    }
+    c->r[0] = eax;
+    c->r[4] = esp;
+    dev_SetTextureStageState(c);
+    return ((uint64_t)c->r[4] << 32) | c->r[0];
+}
+
+#define FAST_METHOD(name)                                                              \
+    static uint64_t fast_##name(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax)        \
+    {                                                                                  \
+        c->r[0] = eax;                                                                 \
+        c->r[1] = ecx;                                                                 \
+        c->r[4] = esp;                                                                 \
+        name(c);                                                                       \
+        return ((uint64_t)c->r[4] << 32) | c->r[0];                                    \
+    }
+FAST_METHOD(dev_SetTexture)
+FAST_METHOD(dev_SetTransform)
+FAST_METHOD(dev_DrawIndexedPrimitiveVB)
+FAST_METHOD(dev_DrawPrimitiveVB)
+
 uint32_t d3d7_create(void)
 {
     if (!d3d_vtbl) {
@@ -1725,6 +1774,12 @@ uint32_t d3d7_create(void)
         device_vtbl = com_vtable("IDirect3DDevice7", device_methods,
                                  (int)(sizeof(device_methods) / sizeof(device_methods[0])));
         vb_vtbl = com_vtable("IDirect3DVertexBuffer7", vb_methods, (int)(sizeof(vb_methods) / sizeof(vb_methods[0])));
+        thunk_set_fast(dev_SetRenderState, fast_SetRenderState);
+        thunk_set_fast(dev_SetTextureStageState, fast_SetTextureStageState);
+        thunk_set_fast(dev_SetTexture, fast_dev_SetTexture);
+        thunk_set_fast(dev_SetTransform, fast_dev_SetTransform);
+        thunk_set_fast(dev_DrawIndexedPrimitiveVB, fast_dev_DrawIndexedPrimitiveVB);
+        thunk_set_fast(dev_DrawPrimitiveVB, fast_dev_DrawPrimitiveVB);
         d3d_obj = com_new(d3d_vtbl, NULL);
     }
     return d3d_obj;

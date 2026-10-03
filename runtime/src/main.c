@@ -147,6 +147,18 @@ uint32_t thunk_register_unique(GuestFn fn, const char *name)
     return thunk_add(fn, name);
 }
 
+void thunk_set_fast(GuestFn fn, GuestFastFn fast)
+{
+#ifndef IGI_PROFILE
+    for (uint32_t i = 0; i < thunk_count && i < THUNK_FAST_MAX; i++)
+        if (thunk_fns[i] == fn)
+            thunk_entries[i].fast = fast;
+#else
+    (void)fn;
+    (void)fast;
+#endif
+}
+
 GuestFn thunk_lookup(uint32_t addr)
 {
     uint32_t i = (addr - THUNK_BASE) / THUNK_STRIDE;

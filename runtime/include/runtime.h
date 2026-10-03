@@ -42,6 +42,11 @@ uint32_t heap_size(uint32_t ptr);
 
 uint32_t thunk_register(GuestFn fn, const char *name);
 uint32_t thunk_register_unique(GuestFn fn, const char *name);
+/* Gives every thunk of fn its own entry for cached call sites (GuestFastFn
+ * convention: arguments read from the guest stack at esp, the result in the
+ * return value; it leaves eax, ecx and esp in the context as the thunk would).
+ * Not in profiling builds, which bill thunks in the generic entry. */
+void thunk_set_fast(GuestFn fn, GuestFastFn fast);
 extern uint32_t g_current_thunk;   /* address of the thunk being executed */
 GuestFn thunk_lookup(uint32_t addr);
 /* Dispatch entry of a thunk (`fast` with the GuestFastFn convention) for the
