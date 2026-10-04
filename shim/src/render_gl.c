@@ -1354,6 +1354,33 @@ static void pack_vertices(const Layout *L, const RVertex *v, uint32_t nv, uint32
     const uint32_t st = L->stride;
     uint8_t *d0 = vtx + (size_t)base * st;
     uint8_t *d = d0;
+    /* The objects' layout (position, normal, one or two texture coordinate sets,
+     * no colour or fog): one pass over the vertices. */
+    if (!L->pretransformed && L->has_normal && !L->use_color && !L->use_fog && L->off_nrm == 12u &&
+        L->uv_src[0] >= 0 && L->off_uv[0] == 24u && (L->uv_src[1] < 0 ? st == 32u : L->off_uv[1] == 32u && st == 40u)) {
+        const int k0 = L->uv_src[0], k1 = L->uv_src[1];
+        float *p = (float *)(void *)d0;
+        const uint32_t n = st / 4u;
+        for (uint32_t i = 0; i < nv; i++, p += n) {
+            const RVertex *s = &v[i];
+            p[0] = s->x;
+            p[1] = s->y;
+            p[2] = s->z;
+            p[3] = s->nx;
+            p[4] = s->ny;
+            p[5] = s->nz;
+            p[6] = s->uv[k0][0];
+            p[7] = s->uv[k0][1];
+            if (k1 >= 0) {
+                p[8] = s->uv[k1][0];
+                p[9] = s->uv[k1][1];
+            }
+        }
+        if (!g_pack_thread)
+            pc_frame[PC_PACK_US] += fine_now() - t0;
+        PROF_RS_END;
+        return;
+    }
     if (L->pretransformed) {
         for (uint32_t i = 0; i < nv; i++, d += st) {
             float w = v[i].w != 0.0f ? 1.0f / v[i].w : 1.0f;
@@ -2321,6 +2348,36 @@ static void pack_guest_to(uint8_t *d0, const Layout *L, const GuestVerts *g, uin
             }
             p[ui] = t[0];
             p[ui + 1u] = t[1];
+        }
+        PROF_RS_END;
+        return;
+    }
+    /* The objects' layout (position, normal, one or two texture coordinate sets
+     * of two floats, no colour or fog): one pass, the attributes copied as words. */
+    if (!L->pretransformed && L->has_normal && !L->use_color && !L->use_fog && L->off_nrm == 12u &&
+        L->uv_src[0] >= 0 && L->off_uv[0] == 24u && g->uv_bytes[L->uv_src[0]] == 8u &&
+        (L->uv_src[1] < 0 ? st == 32u : L->off_uv[1] == 32u && st == 40u && g->uv_bytes[L->uv_src[1]] == 8u) &&
+        (((uintptr_t)vb | stride | g->nrm_off | g->uv_off[L->uv_src[0]] |
+          (L->uv_src[1] < 0 ? 0u : g->uv_off[L->uv_src[1]])) & 3u) == 0) {
+        const uint32_t no = g->nrm_off / 4u, u0 = g->uv_off[L->uv_src[0]] / 4u;
+        const int two = L->uv_src[1] >= 0;
+        const uint32_t u1 = two ? g->uv_off[L->uv_src[1]] / 4u : 0u;
+        uint32_t *p = (uint32_t *)(void *)d0;
+        const uint32_t n = st / 4u;
+        for (uint32_t i = 0; i < nv; i++, p += n) {
+            const uint32_t *s = (const uint32_t *)(const void *)(vb + (size_t)(src ? src[i] : i) * stride);
+            p[0] = s[0];
+            p[1] = s[1];
+            p[2] = s[2];
+            p[3] = s[no];
+            p[4] = s[no + 1u];
+            p[5] = s[no + 2u];
+            p[6] = s[u0];
+            p[7] = s[u0 + 1u];
+            if (two) {
+                p[8] = s[u1];
+                p[9] = s[u1 + 1u];
+            }
         }
         PROF_RS_END;
         return;
