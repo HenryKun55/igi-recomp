@@ -60,6 +60,17 @@ typedef struct CacheSlot {
 static CacheSlot cache[CACHE_SLOTS];
 static GLenum cur_unit = GL_TEXTURE0, cur_client_unit = GL_TEXTURE0;
 
+/* Changes of the state apply_states sets (capabilities other than texturing,
+ * blend/depth/alpha/cull/shading/polygon settings, fog): apply_states is skipped
+ * while its inputs and this count are what they were after its last run. */
+static uint32_t rs_changes;
+
+static inline int rs_key(uint32_t key)
+{
+    uint32_t fam = key >> 28;
+    return (fam == 1u && (key & 0xFFFFu) != GL_TEXTURE_2D) || fam == 3u || fam == 5u;
+}
+
 /* Returns 1 if the value changed (and records it). Called dozens of times per
  * draw with a constant n: inlined, and the values compare as words. */
 static inline __attribute__((always_inline)) int cache_set(uint32_t key, const float *v, int n)
@@ -77,6 +88,7 @@ static inline __attribute__((always_inline)) int cache_set(uint32_t key, const f
                 return 0;
             for (int k = 0; k < n; k++)
                 s->w[k] = w[k];
+            rs_changes += (uint32_t)rs_key(key);
             return 1;
         }
         if (!s->valid) {
@@ -84,9 +96,11 @@ static inline __attribute__((always_inline)) int cache_set(uint32_t key, const f
             s->key = key;
             for (int k = 0; k < 4; k++)
                 s->w[k] = k < n ? w[k] : 0u;
+            rs_changes += (uint32_t)rs_key(key);
             return 1;
         }
     }
+    rs_changes++;
     return 1;   /* table full: never skip */
 }
 
@@ -888,7 +902,36 @@ static void apply_lights(void)
     }
 }
 
+static void apply_states_now(const DrawCmd *d);
+
+/* Consecutive draws mostly differ in texture or transforms only: the render
+ * states are applied again only when an input differs from the last run or a
+ * cached setting changed since (rs_changes). */
 static void apply_states(const DrawCmd *d)
+{
+    enum { N = 26 };
+    static uint32_t last[N], changes_after;
+    static int valid;
+    const uint32_t k[N] = { d->zenable, d->fillmode, d->shademode, d->zwrite, d->alphatest, d->srcblend,
+                            d->destblend, d->cullmode, d->zfunc, d->alpharef, d->alphafunc, d->blend, d->fog,
+                            d->fogcolor, d->fogtablemode, d->fogstart, d->fogend, d->fogdensity, d->colorkey,
+                            d->lighting, d->fogvertexmode, (uint32_t)d->L.pretransformed,
+                            (uint32_t)d->L.has_normal << 1 | (uint32_t)d->L.has_color, (uint32_t)d->L.use_fog,
+                            (uint32_t)B.diag, (uint32_t)B.cull_override };
+    const int lit = !d->L.pretransformed && d->lighting && d->L.has_normal;
+    uint32_t diff = !valid || changes_after != rs_changes || (lit && light_in_new);
+    for (int i = 0; i < N; i++)
+        diff |= k[i] ^ last[i];
+    if (!diff)
+        return;
+    apply_states_now(d);
+    for (int i = 0; i < N; i++)
+        last[i] = k[i];
+    changes_after = rs_changes;
+    valid = 1;
+}
+
+static void apply_states_now(const DrawCmd *d)
 {
     const int pretransformed = d->L.pretransformed;
     if (B.diag == DIAG_DEPTH_LEQUAL && !pretransformed) {
