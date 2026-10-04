@@ -1775,11 +1775,30 @@ void render_flush(void)
  * and the transforms change between most draws: one shared copy per state
  * serial, and only the 80 products that column needs (the same arithmetic as
  * mat_mul's, so the same values). */
+/* Bitwise equality and copy of 4x4 matrices, inline (no SceLibc calls). */
+static inline int mat16_equal(const float *a, const float *b)
+{
+    const uint32_t *x = (const uint32_t *)(const void *)a, *y = (const uint32_t *)(const void *)b;
+    uint32_t d = 0;
+    for (int i = 0; i < 16; i++)
+        d |= x[i] ^ y[i];
+    return d == 0;
+}
+
+static inline void mat16_copy(float *d, const float *s)
+{
+    uint32_t *x = (uint32_t *)(void *)d;
+    const uint32_t *y = (const uint32_t *)(const void *)s;
+    for (int i = 0; i < 16; i++)
+        x[i] = y[i];
+}
+
 static const float *clip_z_column(void)
 {
     static float c[4];
     static uint32_t serial;
     static int valid;
+    static float kw[16], kv[16], kp[16];   /* the matrices c was made from */
     if (!valid || serial != cur_serial()) {
         const float *w = g_rs.world, *v = g_rs.view, *p = g_rs.proj;
         if (g_pack_thread) {
@@ -1787,6 +1806,13 @@ static const float *clip_z_column(void)
             v = rs_cur.d.view;
             p = rs_cur.d.proj;
         }
+        serial = cur_serial();
+        /* Most state changes leave the transforms as they were (a texture change). */
+        if (valid && mat16_equal(kw, w) && mat16_equal(kv, v) && mat16_equal(kp, p))
+            return c;
+        mat16_copy(kw, w);
+        mat16_copy(kv, v);
+        mat16_copy(kp, p);
         for (int i = 0; i < 4; i++) {
             float wv[4];
             for (int j = 0; j < 4; j++)
@@ -1794,7 +1820,6 @@ static const float *clip_z_column(void)
                         w[i * 4 + 3] * v[3 * 4 + j];
             c[i] = wv[0] * p[0 * 4 + 2] + wv[1] * p[1 * 4 + 2] + wv[2] * p[2 * 4 + 2] + wv[3] * p[3 * 4 + 2];
         }
-        serial = cur_serial();
         valid = 1;
     }
     return c;

@@ -439,9 +439,24 @@ void bk_init(const void *unused)
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 }
 
-/* Game pixel rectangle -> GL window rectangle (y up). */
+/* Game pixel rectangle -> GL window rectangle (y up). Every 3D draw asks for the
+ * same rectangle: the last result is kept (the 64-bit divisions are library
+ * calls on the Vita). */
 static void to_fb(int32_t x, int32_t y, int32_t w, int32_t h, GLint *ox, GLint *oy, GLsizei *ow, GLsizei *oh)
 {
+    static int32_t key[10], out[4];
+    static int valid;
+    const int32_t k[10] = { x, y, w, h, B.vp_x, B.vp_y, B.vp_w, B.vp_h, B.rt_w, B.rt_h };
+    int same = valid;
+    for (int i = 0; i < 10; i++)
+        same &= k[i] == key[i];
+    if (same) {
+        *ox = out[0];
+        *oy = out[1];
+        *ow = out[2];
+        *oh = out[3];
+        return;
+    }
     int32_t x0 = (int32_t)((int64_t)x * B.vp_w / B.rt_w);
     int32_t x1 = (int32_t)((int64_t)(x + w) * B.vp_w / B.rt_w);
     int32_t y0 = (int32_t)((int64_t)y * B.vp_h / B.rt_h);
@@ -450,6 +465,13 @@ static void to_fb(int32_t x, int32_t y, int32_t w, int32_t h, GLint *ox, GLint *
     *oy = B.vp_y + B.vp_h - y1;
     *ow = x1 - x0;
     *oh = y1 - y0;
+    for (int i = 0; i < 10; i++)
+        key[i] = k[i];
+    out[0] = *ox;
+    out[1] = *oy;
+    out[2] = *ow;
+    out[3] = *oh;
+    valid = 1;
 }
 
 static int use_z_remap(void)
@@ -1005,8 +1027,15 @@ static void apply_transforms(const DrawCmd *d)
         for (int r = 0; r < 4; r++)
             p[r * 4 + 2] = 2.0f * d->proj[r * 4 + 2] - d->proj[r * 4 + 3];
     c_load_matrix(GL_PROJECTION, p);
-    float wv[16];
-    mat_mul(d->world, d->view, wv);
+    /* Consecutive draws often differ in texture only: the product is kept with its factors. */
+    static float last_w[16], last_v[16], wv[16];
+    static int wv_valid;
+    if (!wv_valid || !mat_equal(last_w, d->world) || !mat_equal(last_v, d->view)) {
+        mat_copy(last_w, d->world);
+        mat_copy(last_v, d->view);
+        mat_mul(d->world, d->view, wv);
+        wv_valid = 1;
+    }
     c_load_matrix(GL_MODELVIEW, wv);
 }
 
