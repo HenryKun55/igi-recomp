@@ -114,11 +114,56 @@ static uint32_t unit_key(GLenum cap)
     return cap;
 }
 
+/* The capabilities and client arrays set for every draw have their own slots
+ * (0 unknown, 1 off, 2 on): no hashing on the way. Others use the cache. */
+static uint8_t enable_slots[11], client_slots[6];
+
+static int enable_slot(GLenum cap)
+{
+    switch (cap) {
+    case GL_DEPTH_TEST: return 0;
+    case GL_BLEND: return 1;
+    case GL_ALPHA_TEST: return 2;
+    case GL_CULL_FACE: return 3;
+    case GL_FOG: return 4;
+    case GL_LIGHTING: return 5;
+    case GL_COLOR_MATERIAL: return 6;
+    case GL_NORMALIZE: return 7;
+    case GL_SCISSOR_TEST: return 8;
+    case GL_TEXTURE_2D: return cur_unit == GL_TEXTURE0 ? 9 : cur_unit == GL_TEXTURE1 ? 10 : -1;
+    default: return -1;
+    }
+}
+
+static int client_slot(GLenum cap)
+{
+    switch (cap) {
+    case GL_VERTEX_ARRAY: return 0;
+    case GL_NORMAL_ARRAY: return 1;
+    case GL_COLOR_ARRAY: return 2;
+#if defined(GL_FOG_COORDINATE_ARRAY)
+    case GL_FOG_COORDINATE_ARRAY: return 3;
+#endif
+    case GL_TEXTURE_COORD_ARRAY:
+        return cur_client_unit == GL_TEXTURE0 ? 4 : cur_client_unit == GL_TEXTURE1 ? 5 : -1;
+    default: return -1;
+    }
+}
+
 static void c_enable(GLenum cap, int on)
 {
-    float v = (float)on;
-    if (!cache_set(0x10000000u ^ unit_key(cap), &v, 1))
-        return;
+    const int slot = enable_slot(cap);
+    if (slot >= 0) {
+        const uint8_t want = on ? 2u : 1u;
+        if (enable_slots[slot] == want)
+            return;
+        enable_slots[slot] = want;
+        rs_changes += cap != GL_TEXTURE_2D;
+    } else {
+        float v = (float)on;
+        if (!cache_set(0x10000000u ^ unit_key(cap), &v, 1))
+            return;
+    }
     if (on)
         (glEnable)(cap);
     else
@@ -127,9 +172,17 @@ static void c_enable(GLenum cap, int on)
 
 static void c_client(GLenum cap, int on)
 {
-    float v = (float)on;
-    if (!cache_set(0x20000000u ^ unit_key(cap), &v, 1))
-        return;
+    const int slot = client_slot(cap);
+    if (slot >= 0) {
+        const uint8_t want = on ? 2u : 1u;
+        if (client_slots[slot] == want)
+            return;
+        client_slots[slot] = want;
+    } else {
+        float v = (float)on;
+        if (!cache_set(0x20000000u ^ unit_key(cap), &v, 1))
+            return;
+    }
     if (on)
         (glEnableClientState)(cap);
     else
@@ -909,24 +962,47 @@ static void apply_states_now(const DrawCmd *d);
  * cached setting changed since (rs_changes). */
 static void apply_states(const DrawCmd *d)
 {
+    /* Two key buffers used in turn: the new key is written where the one before
+     * the last was (a copy of the key would be a SceLibc memcpy call). */
     enum { N = 26 };
-    static uint32_t last[N], changes_after;
-    static int valid;
-    const uint32_t k[N] = { d->zenable, d->fillmode, d->shademode, d->zwrite, d->alphatest, d->srcblend,
-                            d->destblend, d->cullmode, d->zfunc, d->alpharef, d->alphafunc, d->blend, d->fog,
-                            d->fogcolor, d->fogtablemode, d->fogstart, d->fogend, d->fogdensity, d->colorkey,
-                            d->lighting, d->fogvertexmode, (uint32_t)d->L.pretransformed,
-                            (uint32_t)d->L.has_normal << 1 | (uint32_t)d->L.has_color, (uint32_t)d->L.use_fog,
-                            (uint32_t)B.diag, (uint32_t)B.cull_override };
+    static uint32_t keys[2][N], changes_after;
+    static int last, valid;
+    uint32_t *k = keys[last ^ 1];
+    const uint32_t *o = keys[last];
+    k[0] = d->zenable;
+    k[1] = d->fillmode;
+    k[2] = d->shademode;
+    k[3] = d->zwrite;
+    k[4] = d->alphatest;
+    k[5] = d->srcblend;
+    k[6] = d->destblend;
+    k[7] = d->cullmode;
+    k[8] = d->zfunc;
+    k[9] = d->alpharef;
+    k[10] = d->alphafunc;
+    k[11] = d->blend;
+    k[12] = d->fog;
+    k[13] = d->fogcolor;
+    k[14] = d->fogtablemode;
+    k[15] = d->fogstart;
+    k[16] = d->fogend;
+    k[17] = d->fogdensity;
+    k[18] = d->colorkey;
+    k[19] = d->lighting;
+    k[20] = d->fogvertexmode;
+    k[21] = (uint32_t)d->L.pretransformed;
+    k[22] = (uint32_t)d->L.has_normal << 1 | (uint32_t)d->L.has_color;
+    k[23] = (uint32_t)d->L.use_fog;
+    k[24] = (uint32_t)B.diag;
+    k[25] = (uint32_t)B.cull_override;
     const int lit = !d->L.pretransformed && d->lighting && d->L.has_normal;
     uint32_t diff = !valid || changes_after != rs_changes || (lit && light_in_new);
     for (int i = 0; i < N; i++)
-        diff |= k[i] ^ last[i];
+        diff |= k[i] ^ o[i];
     if (!diff)
         return;
     apply_states_now(d);
-    for (int i = 0; i < N; i++)
-        last[i] = k[i];
+    last ^= 1;
     changes_after = rs_changes;
     valid = 1;
 }
