@@ -1797,11 +1797,6 @@ void render_flush(void)
  * entirely in front of it pass through untouched.
  */
 #if defined(__vita__)
-/* Clip-space z of object-space vertices: z = x*c[0] + y*c[1] + z*c[2] + c[3], the
- * third column of world * view * proj. Every near-plane test of a draw needs it
- * and the transforms change between most draws: one shared copy per state
- * serial, and only the 80 products that column needs (the same arithmetic as
- * mat_mul's, so the same values). */
 /* Bitwise equality and copy of 4x4 matrices, inline (no SceLibc calls). */
 static inline int mat16_equal(const float *a, const float *b)
 {
@@ -1820,6 +1815,11 @@ static inline void mat16_copy(float *d, const float *s)
         x[i] = y[i];
 }
 
+/* Clip-space z of object-space vertices: z = x*c[0] + y*c[1] + z*c[2] + c[3], the
+ * third column of world * view * proj. Every near-plane test of a draw needs it
+ * and the transforms change between many draws: one shared copy, made again
+ * when a state serial comes with other matrices, and only the 80 products that
+ * column needs (the same arithmetic as mat_mul's, so the same values). */
 static const float *clip_z_column(void)
 {
     static float c[4];
