@@ -25,8 +25,11 @@
  * depth-sorted transparent queue, mostly several times in a row with the same
  * object position: the results of the last call are kept with all its inputs
  * (position, radius, view, fog constants, rounding mode; compared bit for bit)
- * and reused when they are the same. The device calls are made every time. */
+ * and reused when they are the same. The device calls are made every time,
+ * through the shim's direct entries (shim/include/d3d_direct.h) when the
+ * device is the shim's. */
 #include "native.h"
+#include "d3d_direct.h"
 
 #if defined(__clang__)
 #pragma STDC FP_CONTRACT OFF
@@ -177,6 +180,20 @@ int rt_native_fog_range(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64
     rt_st32(gm + S - 12u, dev);
     c->r[2] = edx;
     c->fsw = (c->fsw & ~FSW_CC) | memo.cc;
+    if (vt == g_d3dd_vtbl) {
+        rt_st32(gm + S - 16u, RET_FOG_START);
+        d3dd_set_render_state(RS_FOGSTART, edx);
+        edx = memo.arg_pos;
+        rt_st32(gm + S - 4u, edx);
+        rt_st32(gm + S - 8u, RS_FOGEND);
+        rt_st32(gm + S - 12u, dev);
+        rt_st32(gm + S - 16u, RET_FOG_END);
+        d3dd_set_render_state(RS_FOGEND, edx);
+        c->r[1] = vt;
+        c->r[2] = edx;
+        *ret = ((uint64_t)(S + 0x1Cu) << 32) | D3DD_OK;
+        return 1;
+    }
     uint64_t rv = native_call_ic(c, rt_ld32(gm + vt + 0x50u), S - 12u, RET_FOG_START, vt, dev, &ic_start);
     uint32_t sp = (uint32_t)(rv >> 32);
     dev = rt_ld32(gm + G_DEVICE);
