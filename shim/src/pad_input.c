@@ -1,109 +1,51 @@
-/* Pad controls sent through the game's own bindings (see pad_input.h).
+/* Pad controls (see pad_input.h).
  *
- * The bindings live in guest memory, one table per player profile:
- *   0xBC2384                 index of the active player
- *   0xBC25BC + 0x564 * i     up to 64 entries {action bit, device, code}
- *   0xBC28BC + 0x564 * i     number of entries
- * GOInRemap(action, device, key) in pc/config.qvm fills them (0x4037C0), the
- * options screen edits them, and the game's defaults are the 27 entries at
- * 0x536410 (copied in at start-up by 0x405370; 0x4061B0 returns them for "reset
- * to defaults"). Players who brought a config.qvm with other bindings (a PC
- * install, their own keys) used to get controls that did nothing: the port sent
- * the default keys. */
+ * In play and while the controls screen waits for a key, a control presses its
+ * own key (IGI_VK_*); the player's bindings in guest memory, edited in Options ->
+ * Controls and saved in pc/config.qvm, turn it into an action
+ * (runtime/src/igi_controls.c adds those keys to the game's tables). An action
+ * bound to no pad key simply has no control, so nothing breaks: the controls
+ * screen and its "Reset to Default" stay reachable with the menu controls.
+ *
+ * The controls screen's binding list only answers the mouse in the game. With
+ * the pad scheme, the D-pad (or left stick) moves the cursor over its rows,
+ * scrolling it at the ends, and Cross clicks the row under the cursor; moving
+ * past the first or last row leaves the list for the screen's other items. */
 #include "pad_input.h"
+#include "igi_controls.h"
 #include "igi_fixes.h"
 #include "platform.h"
 #include "runtime.h"
 
-#include <string.h>
-
-#define ACTION_TABLE 0x00536558u     /* {char name[32]; u32 bit}, "MoveLeft" first */
-#define DEFAULT_BINDINGS 0x00536410u
-#define DEFAULT_COUNT 27u
-#define CURRENT_PLAYER 0x00BC2384u
-#define PLAYER_BINDINGS 0x00BC25BCu
-#define PLAYER_COUNT 0x00BC28BCu
-#define PLAYER_STRIDE 0x564u
-#define MAX_PLAYERS 8u               /* the tables before the next field; more than the menu offers */
-#define MAX_BINDINGS 64u
 #define UI_STATE_GAMEPLAY 9u
-#define WHEEL_REPEAT_MS 100u
+#define DIK_ESCAPE 0x01
+#define DIK_RETURN 0x1C
+#define DIK_UP 0xC8
+#define DIK_DOWN 0xD0
+#define DIK_LEFT 0xCB
+#define DIK_RIGHT 0xCD
+#define LIST_NEAR 30   /* a cursor this close above or below the list enters it with the D-pad */
 
-/* The executable is the one whose tables these addresses describe. */
-static int tables_valid(void)
-{
-    static int valid = -1;
-    if (valid < 0) {
-        valid = memcmp(g_mem + ACTION_TABLE, "MoveLeft", 9) == 0 && RD32(DEFAULT_BINDINGS) == IGI_ACT_MOVE_LEFT &&
-                RD32(DEFAULT_BINDINGS + 4u) == PAD_DEVICE_KEYBOARD && RD32(DEFAULT_BINDINGS + 8u) == 0xCBu;
-        if (!valid)
-            rt_log("pad: binding tables not found, controls use the default keys");
-    }
-    return valid;
-}
-
-static int usable(PadBinding b)
-{
-    if (b.device == PAD_DEVICE_KEYBOARD)
-        return b.code > 0u && b.code < 256u;
-    if (b.device == PAD_DEVICE_MOUSE)
-        return b.code == 1u || b.code == 2u || b.code == 4u || b.code == 8u || b.code == 0x100u || b.code == 0x200u;
-    return 0;
-}
-
-static PadBinding default_binding(uint32_t action)
-{
-    PadBinding b = { 0, 0 };
-    for (uint32_t i = 0; i < DEFAULT_COUNT; i++) {
-        uint32_t e = DEFAULT_BINDINGS + i * 12u;
-        if (RD32(e) == action) {
-            b.device = RD32(e + 4u);
-            b.code = RD32(e + 8u);
-            break;
-        }
-    }
-    return b;
-}
-
-PadBinding pad_binding(uint32_t action)
-{
-    PadBinding none = { 0, 0 };
-    if (!tables_valid())
-        return none;
-    PadBinding def = default_binding(action);
-    uint32_t player = RD32(CURRENT_PLAYER);
-    if (player >= MAX_PLAYERS)
-        return def;
-    uint32_t table = PLAYER_BINDINGS + player * PLAYER_STRIDE, count_at = PLAYER_COUNT + player * PLAYER_STRIDE;
-    uint32_t count = RD32(count_at), slot = MAX_BINDINGS;
-    if (count > MAX_BINDINGS)
-        return def;
-    for (uint32_t i = 0; i < count; i++) {
-        uint32_t e = table + i * 12u;
-        if (RD32(e) != action)
-            continue;
-        PadBinding b = { RD32(e + 4u), RD32(e + 8u) };
-        if (usable(b))
-            return b;
-        slot = i;   /* bound to the joypad (not emulated) or to nothing usable */
-    }
-    if (!usable(def) || !pad_in_gameplay())
-        return def;   /* the table is only changed in play, never while the game sets it up */
-    /* Nothing a keyboard or mouse can press: the default goes back in. */
-    if (slot == MAX_BINDINGS && count < MAX_BINDINGS) {
-        slot = count;
-        WR32(count_at, count + 1u);
-    }
-    if (slot < MAX_BINDINGS) {
-        uint32_t e = table + slot * 12u;
-        WR32(e, action);
-        WR32(e + 4u, def.device);
-        WR32(e + 8u, def.code);
-        rt_log("pad: action %08X had no keyboard or mouse binding, default (device %u, code %02X) restored", action,
-               def.device, def.code);
-    }
-    return def;
-}
+static const uint8_t control_key[PAD_CONTROL_COUNT] = {
+    [PAD_CROSS] = IGI_VK_CROSS,
+    [PAD_CIRCLE] = IGI_VK_CIRCLE,
+    [PAD_SQUARE] = IGI_VK_SQUARE,
+    [PAD_TRIANGLE] = IGI_VK_TRIANGLE,
+    [PAD_L] = IGI_VK_L,
+    [PAD_R] = IGI_VK_R,
+    [PAD_SELECT] = IGI_VK_SELECT,
+    [PAD_START] = DIK_ESCAPE,
+    [PAD_DPAD_UP] = IGI_VK_DPAD_UP,
+    [PAD_DPAD_DOWN] = IGI_VK_DPAD_DOWN,
+    [PAD_DPAD_LEFT] = IGI_VK_DPAD_LEFT,
+    [PAD_DPAD_RIGHT] = IGI_VK_DPAD_RIGHT,
+    [PAD_LSTICK_UP] = IGI_VK_LSTICK_UP,
+    [PAD_LSTICK_DOWN] = IGI_VK_LSTICK_DOWN,
+    [PAD_LSTICK_LEFT] = IGI_VK_LSTICK_LEFT,
+    [PAD_LSTICK_RIGHT] = IGI_VK_LSTICK_RIGHT,
+    [PAD_REAR_UP] = IGI_VK_REAR_UP,
+    [PAD_REAR_DOWN] = IGI_VK_REAR_DOWN,
+};
 
 /* ---- output: keys and mouse buttons, reference counted -------------------- */
 
@@ -133,72 +75,151 @@ void pad_mouse_button(int b, int down)
     }
 }
 
-static void wheel_step(uint32_t code)
-{
-    g_mouse.dz += code == 0x100u ? 120 : -120;
-}
-
-/* ---- actions ---------------------------------------------------------------- */
-
-#define ACTION_SLOTS 32
-static PadBinding held[ACTION_SLOTS];   /* what each held action pressed (device 0: not held) */
-static uint32_t wheel_next[ACTION_SLOTS];
-static uint32_t last_ms;
-
-static int action_slot(uint32_t action)
-{
-    for (int i = 0; i < ACTION_SLOTS; i++)
-        if (action == 1u << i)
-            return i;
-    return -1;
-}
-
-static void output(PadBinding b, int down)
-{
-    if (b.device == PAD_DEVICE_KEYBOARD) {
-        pad_key((uint8_t)b.code, down);
-    } else if (b.device == PAD_DEVICE_MOUSE) {
-        if (b.code >= 0x100u) {
-            if (down)
-                wheel_step(b.code);
-        } else {
-            pad_mouse_button(b.code == 1u ? 0 : b.code == 2u ? 1 : b.code == 4u ? 2 : 3, down);
-        }
-    }
-}
-
-void pad_action(uint32_t action, int down)
-{
-    int s = action_slot(action);
-    if (s < 0)
-        return;
-    if (down) {
-        if (held[s].device)
-            return;
-        PadBinding b = pad_binding(action);
-        if (!usable(b))
-            return;
-        held[s] = b;
-        wheel_next[s] = last_ms + WHEEL_REPEAT_MS * 3u;   /* a pause before the repeats, as a key does */
-        output(b, 1);
-    } else if (held[s].device) {
-        output(held[s], 0);
-        held[s].device = 0;
-    }
-}
-
-void pad_tick(uint32_t now_ms)
-{
-    last_ms = now_ms;
-    for (int s = 0; s < ACTION_SLOTS; s++) {
-        if (held[s].device == PAD_DEVICE_MOUSE && held[s].code >= 0x100u && (int32_t)(now_ms - wheel_next[s]) >= 0) {
-            wheel_step(held[s].code);
-            wheel_next[s] = now_ms + WHEEL_REPEAT_MS;
-        }
-    }
-}
-
 int pad_in_gameplay(void)
 {
     return igi_ui_state() == UI_STATE_GAMEPLAY;
+}
+
+int pad_capturing_key(void)
+{
+    IgiControlsList l;
+    return igi_controls_list(&l) && l.capturing;
+}
+
+/* ---- the controls screen's list ----------------------------------------------- */
+
+/* The menus move their cursor by the mouse's relative motion (DirectInput), so
+ * the cursor is where the game has it plus the motion it has not read yet. */
+static void list_cursor(const IgiControlsList *l, int32_t *x, int32_t *y)
+{
+    *x = l->cursor_x + g_mouse.dx;
+    *y = l->cursor_y + g_mouse.dy;
+}
+
+static void list_cursor_to(const IgiControlsList *l, int32_t x, int32_t y)
+{
+    int32_t cx, cy;
+    list_cursor(l, &cx, &cy);
+    g_mouse.dx += x - cx;
+    g_mouse.dy += y - cy;
+    g_mouse.x = x;
+    g_mouse.y = y;
+    user32_post_message(0x0200, 0, ((uint32_t)y << 16) | ((uint32_t)x & 0xFFFFu));
+}
+
+static void list_point_row(const IgiControlsList *l, int row)
+{
+    list_cursor_to(l, l->x + l->w / 3, l->y + row * l->row_h + l->row_h / 2);
+}
+
+/* D-pad up/down and Cross over the list; 1 if handled. */
+static int list_control(const IgiControlsList *l, PadControl control, uint8_t *mouse_sent)
+{
+    int32_t mx, my;
+    list_cursor(l, &mx, &my);
+    int visible = l->h / l->row_h;
+    int in_x = mx >= l->x && mx < l->x + l->w;
+    int inside = in_x && my >= l->y && my < l->y + visible * l->row_h;
+    int up = control == PAD_DPAD_UP || control == PAD_LSTICK_UP;
+    int down = control == PAD_DPAD_DOWN || control == PAD_LSTICK_DOWN;
+    if (control == PAD_CROSS && inside) {
+        pad_mouse_button(0, 1);
+        *mouse_sent = 1;
+        return 1;
+    }
+    if (!up && !down)
+        return 0;
+    if (!inside) {
+        /* Next to the list (where leaving it puts the cursor): back in. */
+        if (in_x && down && my < l->y && my >= l->y - LIST_NEAR) {
+            list_point_row(l, 0);
+            return 1;
+        }
+        if (in_x && up && my >= l->y + visible * l->row_h && my < l->y + visible * l->row_h + LIST_NEAR) {
+            list_point_row(l, visible - 1);
+            return 1;
+        }
+        return 0;
+    }
+    int row = (my - l->y) / l->row_h + (down ? 1 : -1);
+    int max_offset = l->rows - visible;
+    if (row < 0) {
+        if (l->offset > 0)
+            igi_controls_list_scroll(l->offset - 1);
+        else
+            list_cursor_to(l, mx, l->y - LIST_NEAR / 2);   /* off the top: the items above */
+        return 1;
+    }
+    if (row >= visible) {
+        if (l->offset < max_offset)
+            igi_controls_list_scroll(l->offset + 1);
+        else
+            list_cursor_to(l, mx, l->y + visible * l->row_h + LIST_NEAR / 2);   /* off the bottom */
+        return 1;
+    }
+    list_point_row(l, row);
+    return 1;
+}
+
+/* ---- controls ----------------------------------------------------------------- */
+
+typedef struct Sent {
+    uint8_t key;     /* key pressed by the control, 0 none */
+    uint8_t mouse;   /* left button pressed by the control */
+    uint8_t down;
+} Sent;
+static Sent sent[PAD_CONTROL_COUNT];
+
+static uint8_t menu_key(PadControl control)
+{
+    switch (control) {
+    case PAD_CROSS: return DIK_RETURN;
+    case PAD_CIRCLE: return DIK_ESCAPE;
+    case PAD_DPAD_UP: case PAD_LSTICK_UP: return DIK_UP;
+    case PAD_DPAD_DOWN: case PAD_LSTICK_DOWN: return DIK_DOWN;
+    case PAD_DPAD_LEFT: case PAD_LSTICK_LEFT: return DIK_LEFT;
+    case PAD_DPAD_RIGHT: case PAD_LSTICK_RIGHT: return DIK_RIGHT;
+    default: return control_key[control];
+    }
+}
+
+void pad_control(PadControl control, int down)
+{
+    if ((unsigned)control >= PAD_CONTROL_COUNT)
+        return;
+    Sent *s = &sent[control];
+    if (!down) {
+        if (s->key)
+            pad_key(s->key, 0);
+        if (s->mouse)
+            pad_mouse_button(0, 0);
+        s->key = s->mouse = s->down = 0;
+        return;
+    }
+    if (s->down)
+        return;
+    s->down = 1;
+    uint8_t key = control_key[control];
+    if (control != PAD_START && !pad_in_gameplay()) {
+        IgiControlsList l;
+        int list = igi_controls_list(&l);
+        if (!(list && l.capturing)) {
+            if (list && igi_controls_pad_scheme() && list_control(&l, control, &s->mouse))
+                return;
+            key = menu_key(control);
+        }
+    }
+    pad_key(key, 1);
+    s->key = key;
+}
+
+void pad_tick(void)
+{
+    /* The controls screen opening: the cursor on its first row, for the D-pad. */
+    static int list_up;
+    IgiControlsList l;
+    int up = igi_controls_list(&l);
+    if (up && !list_up && igi_controls_pad_scheme())
+        list_point_row(&l, 0);
+    list_up = up;
 }

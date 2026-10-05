@@ -58,9 +58,9 @@ void platform_key(uint8_t dik, int down)
 
 /* IGI_INPUT="ms:action,ms:action,...": scripted input for automated testing.
  * Actions: a DIK code in hex (tap), "mx+N"/"my+N" relative mouse motion, "lmb" click,
- * "act+B"/"act-B" press/release the game action with bit B (hex, IGI_ACT_*) the way
- * the Vita's pad does (through the player's key bindings, shim/src/pad_input.c),
- * "key+K"/"key-K" hold/release DIK code K (hex). */
+ * "pad+N"/"pad-N" press/release pad control N (hex, PadControl in pad_input.h) the
+ * way the Vita's pad does (shim/src/pad_input.c), "key+K"/"key-K" hold/release DIK
+ * code K (hex). */
 void platform_scripted_input(void)
 {
     static const char *script;
@@ -82,6 +82,7 @@ void platform_scripted_input(void)
 #endif
         t0 = win32_tick_count();
     }
+    pad_tick();
     static uint8_t release_dik;
     static int release_lmb;
     static Uint32 release_at;
@@ -129,12 +130,10 @@ void platform_scripted_input(void)
             script = end ? end + 1 : NULL;
             continue;
         }
-        if ((!strncmp(buf, "act", 3) || !strncmp(buf, "key", 3)) && (buf[3] == '+' || buf[3] == '-')) {
+        if ((!strncmp(buf, "pad", 3) || !strncmp(buf, "key", 3)) && (buf[3] == '+' || buf[3] == '-')) {
             uint32_t v = (uint32_t)strtoul(buf + 4, NULL, 16);
-            if (buf[0] == 'a') {
-                PadBinding b = pad_binding(v);
-                rt_log("[input] action %08X -> device %u code %02X", v, b.device, b.code);
-                pad_action(v, buf[3] == '+');
+            if (buf[0] == 'p') {
+                pad_control((PadControl)v, buf[3] == '+');
             } else {
                 pad_key((uint8_t)v, buf[3] == '+');
             }

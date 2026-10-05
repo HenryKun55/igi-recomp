@@ -39,6 +39,7 @@
  * (IGI_BENCH_SLOW_UPDATE=<ms>) makes the profile keep the frames whose update
  * steps took at least that long instead. */
 #include "bench.h"
+#include "igi_controls.h"
 #include "igi_fixes.h"
 #include "platform.h"
 #include "runtime.h"
@@ -247,9 +248,16 @@ static void release_keys(uint64_t now, int force)
 
 static void set_forward(int on)
 {
+    static uint8_t key;
     if (on != moving_forward) {
         moving_forward = on;
-        platform_key(DIK_UP, on);
+        if (on) {
+            /* With the pad's bindings, forward is a pad key (left stick up by default). */
+            key = igi_controls_pad_scheme() ? igi_controls_key_for(IGI_ACTION_MOVE_UP) : 0;
+            if (!key)
+                key = DIK_UP;
+        }
+        platform_key(key, on);
     }
 }
 

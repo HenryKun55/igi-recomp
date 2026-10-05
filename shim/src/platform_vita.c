@@ -256,78 +256,53 @@ void platform_swap(void)
 }
 
 /* ---- controls -----------------------------------------------------------
- * Every control stands for one of IGI's actions and is sent as whatever key or
- * mouse button the game has bound to it at that moment (pad_input.c), so the
- * controls work with any saved bindings. In the menus the left stick and Square
- * also press the arrow keys and Enter, which the menus read directly.
+ * Every button, the left stick's four directions and the rear panel's halves
+ * are keys of their own that the player binds in Options -> Controls; in the
+ * menus they work as a console's (pad_input.c). Defaults (runtime/src/igi_controls.c):
  *
  *   left stick  move / strafe          right stick  look (mouse)
  *   R  fire                            L  crouch
  *   X  jump                            O  activate
- *   [] reload (menus: Enter)           /\ next weapon
+ *   [] reload                          /\ next weapon
  *   up  binoculars                     down  walk / run
  *   left  previous weapon              right  map computer
- *   SELECT  peek                       START  Esc (menu)
- *   front touch  drag to look; in the menus, tap to click
+ *   SELECT  peek                       START  Esc (menu), not bindable
  *   rear touch   upper half zoom in, lower half zoom out (scope, binoculars)
+ *   front touch  drag to look; in the menus, tap to click
  *
- * igi.cfg: front_touch=0 / rear_touch=0 turn a touch panel off. */
+ * igi.cfg: front_touch=0 / rear_touch=0 turn a touch panel off;
+ * stick_sensitivity=<multiplier> scales the right stick (default 1.0). */
 
-typedef struct ButtonMap {
+static const struct {
     uint32_t button;
-    uint32_t action;   /* IGI_ACT_*, 0 = none */
-    uint8_t dik;       /* key pressed directly: always (action 0) or, with an action, in the menus */
-} ButtonMap;
-
-static const ButtonMap button_map[] = {
-    { SCE_CTRL_RTRIGGER, IGI_ACT_FIRE, 0 },
-    { SCE_CTRL_LTRIGGER, IGI_ACT_CROUCH, 0 },
-    { SCE_CTRL_CROSS, IGI_ACT_JUMP, 0 },
-    { SCE_CTRL_CIRCLE, IGI_ACT_ACTIVATE, 0 },
-    { SCE_CTRL_SQUARE, IGI_ACT_RELOAD, 0x1C },        /* Enter */
-    { SCE_CTRL_TRIANGLE, IGI_ACT_NEXT_WEAPON, 0 },
-    { SCE_CTRL_UP, IGI_ACT_BINOCULARS, 0 },
-    { SCE_CTRL_DOWN, IGI_ACT_TOGGLE_WALK_RUN, 0 },
-    { SCE_CTRL_LEFT, IGI_ACT_PREV_WEAPON, 0 },
-    { SCE_CTRL_RIGHT, IGI_ACT_MAP_COMPUTER, 0 },
-    { SCE_CTRL_SELECT, IGI_ACT_PEEK, 0 },
-    { SCE_CTRL_START, 0, 0x01 },                      /* Esc */
+    PadControl control;
+} button_map[] = {
+    { SCE_CTRL_CROSS, PAD_CROSS },
+    { SCE_CTRL_CIRCLE, PAD_CIRCLE },
+    { SCE_CTRL_SQUARE, PAD_SQUARE },
+    { SCE_CTRL_TRIANGLE, PAD_TRIANGLE },
+    { SCE_CTRL_LTRIGGER, PAD_L },
+    { SCE_CTRL_RTRIGGER, PAD_R },
+    { SCE_CTRL_SELECT, PAD_SELECT },
+    { SCE_CTRL_START, PAD_START },
+    { SCE_CTRL_UP, PAD_DPAD_UP },
+    { SCE_CTRL_DOWN, PAD_DPAD_DOWN },
+    { SCE_CTRL_LEFT, PAD_DPAD_LEFT },
+    { SCE_CTRL_RIGHT, PAD_DPAD_RIGHT },
 };
 #define N_BUTTONS (sizeof(button_map) / sizeof(button_map[0]))
 
 /* Left stick directions: up, down, left, right. */
-static const uint32_t stick_actions[4] = { IGI_ACT_MOVE_UP, IGI_ACT_MOVE_DOWN, IGI_ACT_MOVE_LEFT, IGI_ACT_MOVE_RIGHT };
-static const uint8_t stick_arrows[4] = { 0xC8, 0xD0, 0xCB, 0xCD };
+static const PadControl stick_controls[4] = { PAD_LSTICK_UP, PAD_LSTICK_DOWN, PAD_LSTICK_LEFT, PAD_LSTICK_RIGHT };
 
 static uint32_t prev_buttons;
-static uint8_t button_menu_key[N_BUTTONS];   /* the menu key a held button pressed */
-static uint8_t stick_held[4], stick_menu_key[4];
+static uint8_t stick_held[4];
 
-/* A control (button or stick direction) going down or up: its action, and its
- * menu key when pressed in a menu. */
-static void control(uint32_t action, uint8_t dik, uint8_t *menu_key_held, int down)
-{
-    if (down) {
-        if (action)
-            pad_action(action, 1);
-        if (dik && (!action || !pad_in_gameplay())) {
-            pad_key(dik, 1);
-            *menu_key_held = dik;
-        }
-    } else {
-        if (action)
-            pad_action(action, 0);
-        if (*menu_key_held) {
-            pad_key(*menu_key_held, 0);
-            *menu_key_held = 0;
-        }
-    }
-}
-
+#define DEADZONE 28
 static int deadzone(int v)
 {
     v -= 128;
-    if (v > -28 && v < 28)
+    if (v > -DEADZONE && v < DEADZONE)
         return 0;
     return v;
 }
@@ -360,6 +335,7 @@ static void mouse_motion(int32_t mx, int32_t my)
 static int front_touch_on = 1, rear_touch_on = 1, aspect_keep;
 static int rear_mid_y = 544;     /* rear panel: above = zoom in, below = zoom out */
 static int front_w = 1920, front_h = 1088;
+static float stick_sensitivity = 1.0f;   /* igi.cfg stick_sensitivity= */
 
 static void touch_init(void)
 {
@@ -373,9 +349,14 @@ static void touch_init(void)
                 rear_touch_on = line[11] != '0';
             else if (!strncmp(line, "aspect=", 7))
                 aspect_keep = !strncmp(line + 7, "keep", 4);   /* as render_gl.c: fill unless keep */
+            else if (!strncmp(line, "stick_sensitivity=", 18))
+                stick_sensitivity = strtof(line + 18, NULL);
         }
         fclose(f);
     }
+    if (!(stick_sensitivity >= 0.1f && stick_sensitivity <= 10.0f))
+        stick_sensitivity = 1.0f;
+    rt_log("right stick: sensitivity x%.2f", (double)stick_sensitivity);
     SceTouchPanelInfo info;
     if (sceTouchGetPanelInfo(SCE_TOUCH_PORT_FRONT, &info) >= 0 && info.maxAaX > info.minAaX &&
         info.maxAaY > info.minAaY) {
@@ -440,7 +421,9 @@ static void front_touch(void)
             g_mouse.x = gx;
             g_mouse.y = gy;
             post_mouse_move();
-        } else if (!clicking) {
+        } else if (!clicking && !pad_capturing_key()) {
+            /* (no click while the controls screen waits for a key: it would
+             * bind the mouse button, which the pad has not in play) */
             clicking = 1;
             pad_mouse_button(0, 1);
         }
@@ -456,21 +439,37 @@ static void front_touch(void)
     mouse_motion(mx, my);
 }
 
-/* Rear: held in the upper half zooms in, in the lower half zooms out. */
+/* Rear: the upper and lower halves are two controls (defaults: zoom in, zoom out). */
 static void rear_touch(void)
 {
-    static uint32_t zoom_held;
+    static int held = -1;
     SceTouchData t;
-    uint32_t want = 0;
+    int want = -1;
     if (sceTouchPeek(SCE_TOUCH_PORT_BACK, &t, 1) >= 0 && t.reportNum > 0)
-        want = t.report[0].y < rear_mid_y ? IGI_ACT_ZOOM_IN : IGI_ACT_ZOOM_OUT;
-    if (want == zoom_held)
+        want = t.report[0].y < rear_mid_y ? PAD_REAR_UP : PAD_REAR_DOWN;
+    if (want == held)
         return;
-    if (zoom_held)
-        pad_action(zoom_held, 0);
-    if (want)
-        pad_action(want, 1);
-    zoom_held = want;
+    if (held >= 0)
+        pad_control((PadControl)held, 0);
+    if (want >= 0)
+        pad_control((PadControl)want, 1);
+    held = want;
+}
+
+/* Right stick deflection (deadzone(): 0, or 28 to about 100 at full tilt, signed)
+ * -> mouse counts per second: a curve that starts slow for fine aiming and reaches
+ * LOOK_MAX at full tilt. The game's mouse sensitivity (Options -> Controls) applies
+ * on top. */
+#define LOOK_MAX 650.0f
+static float look_speed(int v)
+{
+    if (!v)
+        return 0.0f;
+    float n = (float)((v < 0 ? -v : v) - DEADZONE) / (float)(100 - DEADZONE);
+    if (n > 1.0f)
+        n = 1.0f;
+    float s = LOOK_MAX * stick_sensitivity * (0.25f * n + 0.75f * n * n);
+    return v < 0 ? -s : s;
 }
 
 void platform_pump(void)
@@ -490,15 +489,14 @@ void platform_pump(void)
         touch_ready = 1;
         touch_init();
     }
-    pad_tick((uint32_t)(t / 1000u));
     SceCtrlData pad;
     if (sceCtrlPeekBufferPositive(0, &pad, 1) < 0)
         return;
     for (unsigned i = 0; i < N_BUTTONS; i++) {
-        const ButtonMap *m = &button_map[i];
-        int down = (pad.buttons & m->button) != 0;
-        if (down != ((prev_buttons & m->button) != 0))
-            control(m->action, m->dik, &button_menu_key[i], down);
+        uint32_t b = button_map[i].button;
+        int down = (pad.buttons & b) != 0;
+        if (down != ((prev_buttons & b) != 0))
+            pad_control(button_map[i].control, down);
     }
     /* Debug combos, only with the performance overlay on (overlay=1 in igi.cfg). */
     const uint32_t diag = SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER | SCE_CTRL_SELECT;
@@ -510,13 +508,13 @@ void platform_pump(void)
         g_trace_next_frame = 1;   /* log the next frame's draws and save its image */
     prev_buttons = pad.buttons;
 
-    /* Left stick: the move actions (and the arrow keys in the menus). */
+    /* Left stick: four controls, one per direction. */
     int lx = deadzone(pad.lx), ly = deadzone(pad.ly);
     uint8_t want[4] = { ly < -40, ly > 40, lx < -40, lx > 40 };
     for (int i = 0; i < 4; i++) {
         if (want[i] != stick_held[i]) {
             stick_held[i] = want[i];
-            control(stick_actions[i], stick_arrows[i], &stick_menu_key[i], want[i]);
+            pad_control(stick_controls[i], want[i]);
         }
     }
 
@@ -533,8 +531,8 @@ void platform_pump(void)
             dt = 0.1f;
         int rx = deadzone(pad.rx), ry = deadzone(pad.ry);
         static float acc_x, acc_y;
-        acc_x += (float)rx * dt * 9.0f;
-        acc_y += (float)ry * dt * 9.0f;
+        acc_x += look_speed(rx) * dt;
+        acc_y += look_speed(ry) * dt;
         int32_t mx = (int32_t)acc_x, my = (int32_t)acc_y;
         acc_x -= (float)mx;
         acc_y -= (float)my;
