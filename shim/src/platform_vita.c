@@ -12,6 +12,7 @@
 #include <psp2/display.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/sysmem.h>
+#include <psp2/kernel/threadmgr.h>
 #include <psp2/power.h>
 #include <psp2/touch.h>
 #include <stdio.h>
@@ -185,12 +186,26 @@ void platform_create_window(int w, int h, const char *title)
 
 void platform_show_window(int show) { (void)show; }
 void platform_set_title(const char *title) { (void)title; }
+static int exit_watchdog(SceSize args, void *argp)
+{
+    (void)args;
+    (void)argp;
+    sceKernelDelayThread(3 * 1000 * 1000);
+    sceKernelExitProcess(0);
+    return 0;
+}
+
 /* SDL_Quit is skipped: after a fatal error (MessageBox + ExitProcess) it was
  * seen not to return on hardware, leaving the process alive in the background
  * (the shell could not start another app until a reboot). Exiting the process
- * stops every thread, the audio one included, before the memory goes away. */
+ * stops every thread, the audio one included, before the memory goes away.
+ * The render thread is stopped first (its GPU work must end before the memory goes);
+ * should that never finish (a stuck GPU job), a watchdog ends the process anyway. */
 void platform_shutdown(void)
 {
+    SceUID w = sceKernelCreateThread("igi_exit_watchdog", exit_watchdog, 0x10000100, 0x4000, 0, 0, NULL);
+    if (w >= 0)
+        sceKernelStartThread(w, 0, NULL);
     render_shutdown();
     sceKernelExitProcess(0);
 }
