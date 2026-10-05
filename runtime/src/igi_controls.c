@@ -49,7 +49,9 @@
 #define MAX_PLAYERS 8u
 #define MAX_BINDINGS 64u
 #define DEVICE_KEYBOARD 1u
-#define LANG_TABLE 0x0053331Cu      /* char name[][16]: ENGLISH ... USA (5) */
+#define LANG_ENGLISH 0u              /* language indices (runtime/src/igi_language.c) */
+#define LANG_USA 5u
+#define LANG_PORTUGUESE 6u
 #define WINDOW_LANGUAGE 0x27E4u     /* language index in a menu window */
 
 /* Controls screen object. */
@@ -69,28 +71,28 @@
 typedef struct VKey {
     uint8_t code;
     const char *id;      /* constant name (config.qvm stores the number) */
-    const char *label;   /* shown in the controls screen */
+    const char *label[2];   /* shown in the controls screen: English, Portuguese (cp1252) */
 } VKey;
 
 static const VKey vkeys[] = {
-    { IGI_VK_CROSS, "PAD_CROSS", "Cross" },
-    { IGI_VK_CIRCLE, "PAD_CIRCLE", "Circle" },
-    { IGI_VK_SQUARE, "PAD_SQUARE", "Square" },
-    { IGI_VK_TRIANGLE, "PAD_TRIANGLE", "Triangle" },
-    { IGI_VK_L, "PAD_L", "L" },
-    { IGI_VK_R, "PAD_R", "R" },
-    { IGI_VK_SELECT, "PAD_SELECT", "Select" },
-    { IGI_VK_DPAD_UP, "PAD_DPAD_UP", "D-pad Up" },
-    { IGI_VK_DPAD_DOWN, "PAD_DPAD_DOWN", "D-pad Down" },
-    { IGI_VK_DPAD_LEFT, "PAD_DPAD_LEFT", "D-pad Left" },
-    { IGI_VK_DPAD_RIGHT, "PAD_DPAD_RIGHT", "D-pad Right" },
-    { IGI_VK_LSTICK_UP, "PAD_LSTICK_UP", "Left stick Up" },
-    { IGI_VK_LSTICK_DOWN, "PAD_LSTICK_DOWN", "Left stick Down" },
-    { IGI_VK_LSTICK_LEFT, "PAD_LSTICK_LEFT", "Left stick Left" },
-    { IGI_VK_LSTICK_RIGHT, "PAD_LSTICK_RIGHT", "Left stick Right" },
-    { IGI_VK_REAR_UP, "PAD_REAR_UP", "Rear touch Up" },
-    { IGI_VK_REAR_DOWN, "PAD_REAR_DOWN", "Rear touch Down" },
-    { IGI_VK_NONE, "PAD_NONE", "Not set" },
+    { IGI_VK_CROSS, "PAD_CROSS", { "Cross", "Xis" } },
+    { IGI_VK_CIRCLE, "PAD_CIRCLE", { "Circle", "C\xEDrculo" } },
+    { IGI_VK_SQUARE, "PAD_SQUARE", { "Square", "Quadrado" } },
+    { IGI_VK_TRIANGLE, "PAD_TRIANGLE", { "Triangle", "Tri\xE2ngulo" } },
+    { IGI_VK_L, "PAD_L", { "L", "L" } },
+    { IGI_VK_R, "PAD_R", { "R", "R" } },
+    { IGI_VK_SELECT, "PAD_SELECT", { "Select", "Select" } },
+    { IGI_VK_DPAD_UP, "PAD_DPAD_UP", { "D-pad Up", "Direcional cima" } },
+    { IGI_VK_DPAD_DOWN, "PAD_DPAD_DOWN", { "D-pad Down", "Direcional baixo" } },
+    { IGI_VK_DPAD_LEFT, "PAD_DPAD_LEFT", { "D-pad Left", "Direcional esquerda" } },
+    { IGI_VK_DPAD_RIGHT, "PAD_DPAD_RIGHT", { "D-pad Right", "Direcional direita" } },
+    { IGI_VK_LSTICK_UP, "PAD_LSTICK_UP", { "Left stick Up", "Anal\xF3gico esq. cima" } },
+    { IGI_VK_LSTICK_DOWN, "PAD_LSTICK_DOWN", { "Left stick Down", "Anal\xF3gico esq. baixo" } },
+    { IGI_VK_LSTICK_LEFT, "PAD_LSTICK_LEFT", { "Left stick Left", "Anal\xF3gico esq. esquerda" } },
+    { IGI_VK_LSTICK_RIGHT, "PAD_LSTICK_RIGHT", { "Left stick Right", "Anal\xF3gico esq. direita" } },
+    { IGI_VK_REAR_UP, "PAD_REAR_UP", { "Rear touch Up", "Touch traseiro cima" } },
+    { IGI_VK_REAR_DOWN, "PAD_REAR_DOWN", { "Rear touch Down", "Touch traseiro baixo" } },
+    { IGI_VK_NONE, "PAD_NONE", { "Not set", "Nenhum" } },
 };
 #define N_VKEYS (sizeof(vkeys) / sizeof(vkeys[0]))
 
@@ -118,18 +120,18 @@ static const struct {
     { 0x00200000u, IGI_VK_REAR_DOWN },     /* ZoomOut */
 };
 
-/* Menu texts the pad scheme renames (English and USA menus only). */
+/* Menu texts the pad scheme renames: English, Portuguese (other languages keep theirs). */
 static const struct {
-    const char *key, *text;
+    const char *key, *text[2];
 } pad_texts[] = {
-    { "Invert Mouse", "Invert Look" },
-    { "Mouse Sensitivity", "Look Sensitivity" },
-    { "Select a key or button", "Press a button" },
+    { "Invert Mouse", { "Invert Look", "Inverter mira" } },
+    { "Mouse Sensitivity", { "Look Sensitivity", "Sensibilidade da mira" } },
+    { "Select a key or button", { "Press a button", "Pressione um bot\xE3o" } },
 };
 #define N_PAD_TEXTS (sizeof(pad_texts) / sizeof(pad_texts[0]))
 
 static int valid, scheme;
-static uint32_t id_ptr[N_VKEYS], label_ptr[N_VKEYS], text_ptr[N_PAD_TEXTS];
+static uint32_t id_ptr[N_VKEYS], label_ptr[N_VKEYS][2], text_ptr[N_PAD_TEXTS][2];
 static uint32_t list_obj, list_frames;   /* the screen's object, frames since its last update */
 
 int igi_controls_pad_scheme(void)
@@ -176,10 +178,12 @@ void igi_controls_init(void)
 #endif
     for (unsigned i = 0; i < N_VKEYS; i++) {
         id_ptr[i] = scratch_strdup(vkeys[i].id);
-        label_ptr[i] = scratch_strdup(vkeys[i].label);
+        label_ptr[i][0] = scratch_strdup(vkeys[i].label[0]);
+        label_ptr[i][1] = scratch_strdup(vkeys[i].label[1]);
     }
     for (unsigned i = 0; i < N_PAD_TEXTS; i++)
-        text_ptr[i] = scratch_strdup(pad_texts[i].text);
+        for (unsigned l = 0; l < 2; l++)
+            text_ptr[i][l] = scratch_strdup(pad_texts[i].text[l]);
     if (scheme) {
         /* The game copies these into new players and uses them for "Reset to Default". */
         for (uint32_t i = 0; i < DEFAULT_COUNT; i++) {
@@ -232,18 +236,16 @@ int rt_controls_text(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t 
     (void)eax;
     if (!valid)
         return 0;
-    uint32_t key = RD32(esp + 8u), text = 0;
+    uint32_t key = RD32(esp + 8u), window = RD32(esp + 4u), text = 0;
+    uint32_t lang = window ? RD32(window + WINDOW_LANGUAGE) : 0u;
+    unsigned l = lang == LANG_PORTUGUESE ? 1u : 0u;
     for (unsigned i = 0; i < N_VKEYS && !text; i++)
         if (key == id_ptr[i])
-            text = label_ptr[i];
-    if (!text && scheme) {
-        uint32_t window = RD32(esp + 4u);
-        uint32_t lang = window ? RD32(window + WINDOW_LANGUAGE) : 0u;
-        if (lang == 0u || lang == 5u) {
-            for (unsigned i = 0; i < N_PAD_TEXTS && !text; i++)
-                if (guest_streq(key, pad_texts[i].key))
-                    text = text_ptr[i];
-        }
+            text = label_ptr[i][l];
+    if (!text && scheme && (lang == LANG_ENGLISH || lang == LANG_USA || lang == LANG_PORTUGUESE)) {
+        for (unsigned i = 0; i < N_PAD_TEXTS && !text; i++)
+            if (guest_streq(key, pad_texts[i].key))
+                text = text_ptr[i][l];
     }
     if (!text)
         return 0;
