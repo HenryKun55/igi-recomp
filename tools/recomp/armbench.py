@@ -61,7 +61,35 @@ int rt_lang_name(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret
 { (void)c; (void)esp; (void)ecx; (void)eax; (void)ret; return 0; }
 /* Guest memory size (memory.c): the emulated area (GSIZE below). */
 uint32_t g_guest_mem_size = 0x03000000u;
+/* The shim's direct device entries (d3d_direct.h): no effect, each at an address
+ * of its own (nativebench records their calls). g_d3dd_vtbl is set by the
+ * harness (0: the native functions take their guest-call paths). */
+#include "d3d_direct.h"
+uint32_t g_d3dd_vtbl;
+static volatile uint32_t d3dd_last;
+void d3dd_set_render_state(uint32_t a, uint32_t b) { (void)a; (void)b; d3dd_last = 1u; }
+void d3dd_set_tss(uint32_t a, uint32_t b, uint32_t v) { (void)a; (void)b; (void)v; d3dd_last = 2u; }
+void d3dd_set_texture(uint32_t a, uint32_t b) { (void)a; (void)b; d3dd_last = 3u; }
+void d3dd_set_transform(uint32_t a, uint32_t b) { (void)a; (void)b; d3dd_last = 4u; }
+void d3dd_set_light(uint32_t a, uint32_t b) { (void)a; (void)b; d3dd_last = 5u; }
+void d3dd_light_enable(uint32_t a, uint32_t b) { (void)a; (void)b; d3dd_last = 6u; }
+void d3dd_set_material(uint32_t a) { (void)a; d3dd_last = 7u; }
+void d3dd_draw_indexed_vb(uint32_t p, uint32_t vb, uint32_t s, uint32_t nv, uint32_t i, uint32_t ni)
+{ (void)p; (void)vb; (void)s; (void)nv; (void)i; (void)ni; d3dd_last = 8u; }
 '''
+
+# The direct device entries and the COM methods they stand for (number of
+# arguments compared: DrawIndexedPrimitiveVB's flags are not passed).
+D3DD = {
+    'd3dd_set_render_state': ('IDirect3DDevice7::SetRenderState', 2),
+    'd3dd_set_tss': ('IDirect3DDevice7::SetTextureStageState', 3),
+    'd3dd_set_texture': ('IDirect3DDevice7::SetTexture', 2),
+    'd3dd_set_transform': ('IDirect3DDevice7::SetTransform', 2),
+    'd3dd_set_light': ('IDirect3DDevice7::SetLight', 2),
+    'd3dd_light_enable': ('IDirect3DDevice7::LightEnable', 2),
+    'd3dd_set_material': ('IDirect3DDevice7::SetMaterial', 1),
+    'd3dd_draw_indexed_vb': ('IDirect3DDevice7::DrawIndexedPrimitiveVB', 6),
+}
 
 GMEM = 0x10000000           # guest memory in the emulated address space
 GSIZE = 0x03000000

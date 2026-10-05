@@ -2,6 +2,7 @@
 #include "igi_fixes.h"
 #include "platform.h"
 #include "render.h"
+#include "d3d_direct.h"
 
 #include <stdatomic.h>
 #include <stddef.h>
@@ -17,6 +18,7 @@ static void copy_bytes(uint8_t *d, const uint8_t *s, size_t n);
 #define D3DERR_INVALIDVERTEXTYPE 0x88760809u
 
 static uint32_t d3d_vtbl, device_vtbl, vb_vtbl;
+uint32_t g_d3dd_vtbl;
 static uint32_t d3d_obj, device_obj;
 
 /* ---- device description ------------------------------------------------- */
@@ -530,16 +532,21 @@ static int words_differ(const void *a, const void *b, size_t n)
     return acc != 0;
 }
 
-static void dev_SetTransform(Ctx *c)
+void d3dd_set_transform(uint32_t type, uint32_t matrix)
 {
-    float *m = transform_slot(ARG(1));
-    if (m && words_differ(m, gptr(ARG(2)), 64)) {
+    float *m = transform_slot(type);
+    if (m && words_differ(m, gptr(matrix), 64)) {
         render_state_changing();
         g_rs_parts |= m == g_rs.world ? RS_PART_WORLD : RS_PART_XF;
-        memcpy(m, gptr(ARG(2)), 64);
+        memcpy(m, gptr(matrix), 64);
         if (m == g_rs.view)
             g_light_serial++;
     }
+}
+
+static void dev_SetTransform(Ctx *c)
+{
+    d3dd_set_transform(ARG(1), ARG(2));
     stdcall_ret(c, D3D_OK, 3);
 }
 
@@ -606,9 +613,8 @@ static void dev_GetViewport(Ctx *c)
     stdcall_ret(c, D3D_OK, 2);
 }
 
-static void dev_SetMaterial(Ctx *c)
+void d3dd_set_material(uint32_t m)
 {
-    uint32_t m = ARG(1);
     const uint8_t *g = gptr(m);
     if (words_differ(g_rs.mat_diffuse, g, 16) || words_differ(g_rs.mat_ambient, g + 16, 16) ||
         words_differ(g_rs.mat_specular, g + 32, 16) || words_differ(g_rs.mat_emissive, g + 48, 16) ||
@@ -621,6 +627,11 @@ static void dev_SetMaterial(Ctx *c)
         memcpy(g_rs.mat_emissive, g + 48, 16);
         memcpy(&g_rs.mat_power, g + 64, 4);
     }
+}
+
+static void dev_SetMaterial(Ctx *c)
+{
+    d3dd_set_material(ARG(1));
     stdcall_ret(c, D3D_OK, 2);
 }
 
@@ -641,9 +652,8 @@ _Static_assert(offsetof(Light, diffuse) == 4u && offsetof(Light, specular) == 20
                    offsetof(Light, enabled) == D3DLIGHT7_SIZE,
                "Light starts with the D3DLIGHT7 layout");
 
-static void dev_SetLight(Ctx *c)
+void d3dd_set_light(uint32_t i, uint32_t p)
 {
-    uint32_t i = ARG(1), p = ARG(2);
     if (i < MAX_LIGHTS) {
         /* D3DLIGHT7 is Light up to `enabled` (per object: no SceLibc memcpy). */
         Light *l = &g_rs.lights[i];
@@ -653,17 +663,26 @@ static void dev_SetLight(Ctx *c)
             rt_copy_small(l, gptr(p), D3DLIGHT7_SIZE);
         }
     }
+}
+
+static void dev_SetLight(Ctx *c)
+{
+    d3dd_set_light(ARG(1), ARG(2));
     stdcall_ret(c, D3D_OK, 3);
+}
+
+void d3dd_light_enable(uint32_t i, uint32_t enable)
+{
+    if (i < MAX_LIGHTS && g_rs.lights[i].enabled != (enable != 0)) {
+        render_state_changing();
+        g_light_serial++;
+        g_rs.lights[i].enabled = enable != 0;
+    }
 }
 
 static void dev_LightEnable(Ctx *c)
 {
-    uint32_t i = ARG(1);
-    if (i < MAX_LIGHTS && g_rs.lights[i].enabled != (ARG(2) != 0)) {
-        render_state_changing();
-        g_light_serial++;
-        g_rs.lights[i].enabled = ARG(2) != 0;
-    }
+    d3dd_light_enable(ARG(1), ARG(2));
     stdcall_ret(c, D3D_OK, 3);
 }
 
@@ -674,17 +693,21 @@ static void dev_GetLightEnable(Ctx *c)
     stdcall_ret(c, D3D_OK, 3);
 }
 
-static void dev_SetRenderState(Ctx *c)
+void d3dd_set_render_state(uint32_t s, uint32_t value)
 {
-    uint32_t s = ARG(1);
-    if (s < 256u && g_rs.rs[s] != ARG(2)) {
+    if (s < 256u && g_rs.rs[s] != value) {
         render_state_changing();
         g_rs_parts |= RS_PART_RS;
         /* SPECULARENABLE, AMBIENT, COLORVERTEX, NORMALIZENORMALS, DIFFUSEMATERIALSOURCE */
         if (s == 29u || s == 139u || s == 141u || s == 143u || s == 145u)
             g_light_serial++;
-        g_rs.rs[s] = ARG(2);
+        g_rs.rs[s] = value;
     }
+}
+
+static void dev_SetRenderState(Ctx *c)
+{
+    d3dd_set_render_state(ARG(1), ARG(2));
     stdcall_ret(c, D3D_OK, 3);
 }
 
@@ -695,17 +718,21 @@ static void dev_GetRenderState(Ctx *c)
     stdcall_ret(c, D3D_OK, 3);
 }
 
-static void dev_SetTexture(Ctx *c)
+void d3dd_set_texture(uint32_t stage, uint32_t tex)
 {
-    uint32_t stage = ARG(1);
     if (stage < MAX_STAGES) {
-        Surface *t = surface_from_obj(ARG(2));
+        Surface *t = surface_from_obj(tex);
         if (g_rs.stage[stage].texture != t) {
             render_state_changing();
             g_rs_parts |= RS_PART_STAGE;
             g_rs.stage[stage].texture = t;
         }
     }
+}
+
+static void dev_SetTexture(Ctx *c)
+{
+    d3dd_set_texture(ARG(1), ARG(2));
     stdcall_ret(c, D3D_OK, 3);
 }
 
@@ -738,9 +765,8 @@ static uint32_t *tss_slot(StageState *st, uint32_t type)
     }
 }
 
-static void dev_SetTextureStageState(Ctx *c)
+void d3dd_set_tss(uint32_t stage, uint32_t type, uint32_t value)
 {
-    uint32_t stage = ARG(1), type = ARG(2), value = ARG(3);
     if (stage < MAX_STAGES) {
         StageState *st = &g_rs.stage[stage];
         if (type == 12u) {           /* ADDRESS sets both */
@@ -758,6 +784,11 @@ static void dev_SetTextureStageState(Ctx *c)
             }
         }
     }
+}
+
+static void dev_SetTextureStageState(Ctx *c)
+{
+    d3dd_set_tss(ARG(1), ARG(2), ARG(3));
     stdcall_ret(c, D3D_OK, 4);
 }
 
@@ -1509,16 +1540,14 @@ static void dev_DrawPrimitiveVB(Ctx *c)
     stdcall_ret(c, D3D_OK, 6);
 }
 
-static void dev_DrawIndexedPrimitiveVB(Ctx *c)
+void d3dd_draw_indexed_vb(uint32_t prim, uint32_t vb_obj, uint32_t start, uint32_t nv, uint32_t idx, uint32_t ni)
 {
-    uint32_t prim = ARG(1), start = ARG(3), nv = ARG(4), idx = ARG(5), ni = ARG(6);
-    VertexBuffer *vb = com_host(ARG(2));
+    VertexBuffer *vb = com_host(vb_obj);
     const uint16_t *ip = idx ? (const uint16_t *)gptr(idx) : NULL;
     if (g_pack_thread) {
         PROF_SECTION(PROF_H_INDEX);
         pk_draw_vb(vb, prim, start, nv, ip, ni);
         PROF_SECTION_END;
-        stdcall_ret(c, D3D_OK, 8);
         return;
     }
     VBVersion *ver = vb_cache(vb);
@@ -1527,7 +1556,6 @@ static void dev_DrawIndexedPrimitiveVB(Ctx *c)
     if (ver && !ver->d.pretransformed && ip && ni &&
         render_draw_vb(&vb->gl, ver->gen, ver->v, vb->count, start, (int)prim, nv, ip, ni, ver->d.has_normal,
                        ver->d.has_color, ver->d.has_spec, ver->d.ntex)) {
-        stdcall_ret(c, D3D_OK, 8);
         return;
     }
     /* A pre-transformed buffer filled for this frame and drawn again over the
@@ -1548,7 +1576,6 @@ static void dev_DrawIndexedPrimitiveVB(Ctx *c)
             GuestVerts g;
             guest_verts(vb->fvf, g_mem + vb->mem + start * vb->stride, vb->stride, NULL, &g);
             if (render_draw_dynvb(vb->lock_id, start, &g, nv, (int)prim, ip, ni)) {
-                stdcall_ret(c, D3D_OK, 8);
                 return;
             }
         }
@@ -1561,6 +1588,11 @@ static void dev_DrawIndexedPrimitiveVB(Ctx *c)
          ver ? &ver->d : NULL);
     draw_vb = NULL;
     render_set_bounds(NULL, NULL);
+}
+
+static void dev_DrawIndexedPrimitiveVB(Ctx *c)
+{
+    d3dd_draw_indexed_vb(ARG(1), ARG(2), ARG(3), ARG(4), ARG(5), ARG(6));
     stdcall_ret(c, D3D_OK, 8);
 }
 static void dev_SetClipStatus(Ctx *c) { stdcall_ret(c, D3D_OK, 2); }
@@ -1778,6 +1810,7 @@ uint32_t d3d7_create(void)
         d3d_vtbl = com_vtable("IDirect3D7", d3d_methods, (int)(sizeof(d3d_methods) / sizeof(d3d_methods[0])));
         device_vtbl = com_vtable("IDirect3DDevice7", device_methods,
                                  (int)(sizeof(device_methods) / sizeof(device_methods[0])));
+        g_d3dd_vtbl = device_vtbl;
         vb_vtbl = com_vtable("IDirect3DVertexBuffer7", vb_methods, (int)(sizeof(vb_methods) / sizeof(vb_methods[0])));
         thunk_set_fast(dev_SetRenderState, fast_SetRenderState);
         thunk_set_fast(dev_SetTextureStageState, fast_SetTextureStageState);
