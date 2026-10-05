@@ -171,6 +171,11 @@ NATIVE = {
     0x00493AC0: ('rt_native_lighting_off', [
         (0x00493AC0, 81, 'f6949b776f1f305b955928b3c77cf3e10eb9da98'),
     ]),
+    # Transparent queue polygon draw, with the matrix builder inline (runtime/src/native_tquad.c).
+    0x0049F1C0: ('rt_native_tquad_draw', [
+        (0x0049F1C0, 1343, '1f643e0b34d7661deb84eaad23b327334e791fa2'),
+        (0x004950F0, 106, '338d7ff96c499ba49fee1c2a7fa81ff5f43dfd54'),
+    ]),
     # IMA ADPCM decoder (runtime/src/native_adpcm.c).
     0x00496280: ('rt_native_adpcm_decode', [
         (0x00496280, 409, 'a4e5b69d2e3cf1c83797f92ee34bd5b9512949ae'),
