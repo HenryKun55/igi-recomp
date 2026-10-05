@@ -507,6 +507,15 @@ int rt_native_poly2d(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t 
 int rt_native_group_bounds(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
 int rt_native_object_cull(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
 int rt_native_fog_range(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
+int rt_native_tss_plain(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
+int rt_native_tss_lightmap(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
+int rt_native_no_blend(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
+int rt_native_rs_fog(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
+int rt_native_rs_fog_blend(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
+int rt_native_rs_lit(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
+int rt_native_rs_lit_blend(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
+int rt_native_lighting_on(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
+int rt_native_lighting_off(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
 
 /* Update-rate fixes (runtime/src/tick_rate.c, tools/recomp/tick_rate.py). A gated
  * update handler calls rt_tick_gate first: nonzero means the call was handled

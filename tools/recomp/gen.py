@@ -143,6 +143,34 @@ NATIVE = {
     0x0049B2D0: ('rt_native_fog_range', [
         (0x0049B2D0, 351, 'af063ef2ce0ec26e00530819129d34cef55db56d'),
     ]),
+    # Render state setters of the object renderers' state groups (runtime/src/native_d3dstate.c).
+    0x0049D730: ('rt_native_tss_plain', [
+        (0x0049D730, 221, '9b63214ced61a693fa6ce66581d268a9062ada4a'),
+    ]),
+    0x0049D960: ('rt_native_tss_lightmap', [
+        (0x0049D960, 421, '5ab248763e04dbe88139ba32240fe603d2e81be4'),
+    ]),
+    0x0049DB10: ('rt_native_no_blend', [
+        (0x0049DB10, 16, 'e6b709204733ac610bc6a185b262123451b0c10e'),
+    ]),
+    0x0049D810: ('rt_native_rs_fog', [
+        (0x0049D810, 334, '144487b45d238cb883da20c66e7bbce3b0dab949'),
+    ]),
+    0x0049DDF0: ('rt_native_rs_fog_blend', [
+        (0x0049DDF0, 364, '8a2ccbcc343a4cca341befb943188d3e64457d79'),
+    ]),
+    0x0049D480: ('rt_native_rs_lit', [
+        (0x0049D480, 688, '38d22e85033041172dcdf269f59299ddc570211e'),
+    ]),
+    0x0049DB20: ('rt_native_rs_lit_blend', [
+        (0x0049DB20, 718, 'd354cdc409641562bc6dbd86de2382bf119fc00f'),
+    ]),
+    0x00493A60: ('rt_native_lighting_on', [
+        (0x00493A60, 81, '394cec6601a4cc1bcda953ba7b05ec20b58f7c40'),
+    ]),
+    0x00493AC0: ('rt_native_lighting_off', [
+        (0x00493AC0, 81, 'f6949b776f1f305b955928b3c77cf3e10eb9da98'),
+    ]),
     # IMA ADPCM decoder (runtime/src/native_adpcm.c).
     0x00496280: ('rt_native_adpcm_decode', [
         (0x00496280, 409, 'a4e5b69d2e3cf1c83797f92ee34bd5b9512949ae'),
