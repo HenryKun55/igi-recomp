@@ -153,6 +153,7 @@ void platform_scripted_input(void)
                 g_mouse.dy += v;
                 g_mouse.y += v;
             }
+            user32_post_message(0x0200, 0, ((uint32_t)g_mouse.y << 16) | ((uint32_t)g_mouse.x & 0xFFFFu));
         } else {
             uint8_t dik = (uint8_t)strtoul(buf, NULL, 16);
             platform_key(dik, 1);

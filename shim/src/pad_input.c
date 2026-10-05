@@ -7,10 +7,10 @@
  * bound to no pad key simply has no control, so nothing breaks: the controls
  * screen and its "Reset to Default" stay reachable with the menu controls.
  *
- * The controls screen's binding list only answers the mouse in the game. With
- * the pad scheme, the D-pad (or left stick) moves the cursor over its rows,
- * scrolling it at the ends, and Cross clicks the row under the cursor; moving
- * past the first or last row leaves the list for the screen's other items. */
+ * The controls screen only answers the mouse in the game. With the pad scheme
+ * the D-pad (or left stick) moves the cursor over the binding list's rows,
+ * scrolling it at the ends, and Cross clicks under the cursor (the right stick
+ * and the touchscreen reach the screen's other items). */
 #include "pad_input.h"
 #include "igi_controls.h"
 #include "igi_fixes.h"
@@ -24,7 +24,6 @@
 #define DIK_DOWN 0xD0
 #define DIK_LEFT 0xCB
 #define DIK_RIGHT 0xCD
-#define LIST_NEAR 30   /* a cursor this close above or below the list enters it with the D-pad */
 
 static const uint8_t control_key[PAD_CONTROL_COUNT] = {
     [PAD_CROSS] = IGI_VK_CROSS,
@@ -112,50 +111,35 @@ static void list_point_row(const IgiControlsList *l, int row)
     list_cursor_to(l, l->x + l->w / 3, l->y + row * l->row_h + l->row_h / 2);
 }
 
-/* D-pad up/down and Cross over the list; 1 if handled. */
+/* Controls on the controls screen; 1 if handled. Cross clicks wherever the cursor
+ * is (a row, or what the right stick or a tap put it on: Invert Look, Look
+ * Sensitivity, Reset to Default, OK); the D-pad walks the rows, scrolling at the
+ * ends, and brings a cursor that is elsewhere back to the list. */
 static int list_control(const IgiControlsList *l, PadControl control, uint8_t *mouse_sent)
 {
-    int32_t mx, my;
-    list_cursor(l, &mx, &my);
-    int visible = l->h / l->row_h;
-    int in_x = mx >= l->x && mx < l->x + l->w;
-    int inside = in_x && my >= l->y && my < l->y + visible * l->row_h;
-    int up = control == PAD_DPAD_UP || control == PAD_LSTICK_UP;
-    int down = control == PAD_DPAD_DOWN || control == PAD_LSTICK_DOWN;
-    if (control == PAD_CROSS && inside) {
+    if (control == PAD_CROSS) {
         pad_mouse_button(0, 1);
         *mouse_sent = 1;
         return 1;
     }
+    int up = control == PAD_DPAD_UP || control == PAD_LSTICK_UP;
+    int down = control == PAD_DPAD_DOWN || control == PAD_LSTICK_DOWN;
     if (!up && !down)
         return 0;
-    if (!inside) {
-        /* Next to the list (where leaving it puts the cursor): back in. */
-        if (in_x && down && my < l->y && my >= l->y - LIST_NEAR) {
-            list_point_row(l, 0);
-            return 1;
-        }
-        if (in_x && up && my >= l->y + visible * l->row_h && my < l->y + visible * l->row_h + LIST_NEAR) {
-            list_point_row(l, visible - 1);
-            return 1;
-        }
-        return 0;
+    int32_t mx, my;
+    list_cursor(l, &mx, &my);
+    int visible = l->h / l->row_h;
+    if (mx < l->x || mx >= l->x + l->w || my < l->y || my >= l->y + visible * l->row_h) {
+        list_point_row(l, my < l->y ? 0 : my >= l->y + visible * l->row_h ? visible - 1 : (my - l->y) / l->row_h);
+        return 1;
     }
     int row = (my - l->y) / l->row_h + (down ? 1 : -1);
-    int max_offset = l->rows - visible;
     if (row < 0) {
-        if (l->offset > 0)
-            igi_controls_list_scroll(l->offset - 1);
-        else
-            list_cursor_to(l, mx, l->y - LIST_NEAR / 2);   /* off the top: the items above */
-        return 1;
-    }
-    if (row >= visible) {
-        if (l->offset < max_offset)
-            igi_controls_list_scroll(l->offset + 1);
-        else
-            list_cursor_to(l, mx, l->y + visible * l->row_h + LIST_NEAR / 2);   /* off the bottom */
-        return 1;
+        igi_controls_list_scroll(l->offset - 1);
+        row = 0;
+    } else if (row >= visible) {
+        igi_controls_list_scroll(l->offset + 1);
+        row = visible - 1;
     }
     list_point_row(l, row);
     return 1;

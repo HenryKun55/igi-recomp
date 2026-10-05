@@ -99,14 +99,14 @@ Every button, the D-pad, the left stick's four directions and the rear touchpad'
 two halves can be bound to any action in **Controls** (main menu: Configuration →
 Controls; pause menu: Controls):
 
-1. Move to an action with the D-pad (the list scrolls; move past its first or last
-   row to reach the other items), or tap it.
+1. Move to an action with the D-pad (the list scrolls), or tap it.
 2. Press **Cross**: the game asks for a button.
 3. Press the control you want for that action. A control already used by another
    action swaps with it, so no control does two things. **Start** cancels.
 
-Changes count at once; **Circle** goes back, keeping them. **Reset to Default
-Settings** brings back the table above. Actions without a control show
+Changes count at once; **Circle** goes back, keeping them. On this screen the
+right stick (or a tap) moves the cursor to the other items and Cross clicks
+them: **Reset to Default Settings** brings back the table above. Actions without a control show
 "Not set" (weapon categories, alternate fire); bind them to a control if you
 like. Your controls are saved in `ux0:data/igi/pc/config.qvm`.
 
