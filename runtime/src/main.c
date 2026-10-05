@@ -1,4 +1,5 @@
 /* Loads IGI.exe into guest memory, wires imports to host thunks, and runs it. */
+#include "igi_controls.h"
 #include "native.h"
 #include "runtime.h"
 #include "tick_rate.h"
@@ -351,6 +352,7 @@ int main(int argc, char **argv)
     snprintf(exe, sizeof(exe), "%s/IGI.exe", g_game_dir);
     uint32_t entry = load_exe(exe);
     tick_rate_init();
+    igi_controls_init();
     rt_log("loaded %s, entry %08X, %u functions, %u imports", exe, entry, g_guest_func_count, g_guest_import_count);
 
 #ifdef IGI_PROFILE

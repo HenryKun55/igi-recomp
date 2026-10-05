@@ -1,6 +1,7 @@
 /* Game-specific behaviour fixes applied through entry hooks (rt_probe) that the
  * recompiler inserts into the functions listed in tools/recomp/gen.py GAME_HOOKS. */
 #include "igi_fixes.h"
+#include "igi_controls.h"
 #include "bench.h"
 #include "runtime.h"
 #include "tick_rate.h"
@@ -38,6 +39,7 @@ int igi_skip_untextured_2d(void)
 void igi_end_frame(void)
 {
     flushing_state = 0;
+    igi_controls_end_frame();
     if (++ui_frames > 2u)
         ui_state = IGI_UI_NONE;   /* no UI window drawn lately (videos, loading) */
 }
@@ -173,6 +175,13 @@ void rt_probe(Ctx *c, uint32_t func)
     case 0x0048A620u:
     case 0x0048A5D0u:
         loading_screen(func, sp);
+        break;
+    case 0x004234E0u:
+        igi_controls_probe(c, func, sp);
+        return;   /* every frame of the controls screen */
+    case 0x00423DB0u:
+    case 0x004ED5E0u:
+        igi_controls_probe(c, func, sp);
         break;
     case 0x004A53B3u:
     case 0x004B8810u:

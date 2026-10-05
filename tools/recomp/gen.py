@@ -59,6 +59,9 @@ GAME_HOOKS = [
     0x0048A5D0,   # loading screen: destroy
     0x004A53B3,   # sprintf: language directory / config line of the added language
     0x004B8810,   # script constant registration (adds PORTUGUESE)
+    0x004234E0,   # controls screen: per-frame update (key capture state)
+    0x00423DB0,   # controls screen: load the bindings into the list
+    0x004ED5E0,   # input: bind the player's key bindings for play
 ]
 
 # MSVC CRT setjmp/longjmp: setjmp call sites become host setjmp, and the
@@ -76,11 +79,16 @@ HLE = {
     0x004ACD10: ('rt_hle_memset', 88, '4fd4d112065490f5cdd92c83810b685d8c896ca8'),
 }
 
-# Game functions replaced for port features (runtime/src/igi_language.c), same
+# Game functions replaced for port features (runtime/src/igi_language.c,
+# runtime/src/igi_controls.c), same
 # format and matching as HLE but always applied.
 PATCHES = {
     0x00406310: ('rt_lang_count', 6, 'bc5fd08fad1be60d86791aa6084617ef2f754cf5'),
     0x00406320: ('rt_lang_name', 13, 'c11dd2e08d865817f816c552d3eabf4616cbe5a9'),
+    # Pad keys in the controls screen (runtime/src/igi_controls.c).
+    0x00406270: ('rt_controls_key_count', 6, 'd3a5597a866910ec0bf0e7dcd502b58cfa0f38c7'),
+    0x00406240: ('rt_controls_key_entry', 45, 'e2532e8f9b6ceb77f82782f3956c5011518639a8'),
+    0x00418EA0: ('rt_controls_text', 259, 'be0022c4fa8e0a1bfc505d384a8d8fd6099d69d9'),
 }
 
 # Game functions with hand-decompiled native versions (runtime/src/native_*.c): entry ->
