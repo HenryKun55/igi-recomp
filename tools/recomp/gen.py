@@ -176,6 +176,12 @@ NATIVE = {
         (0x0049F1C0, 1343, '1f643e0b34d7661deb84eaad23b327334e791fa2'),
         (0x004950F0, 106, '338d7ff96c499ba49fee1c2a7fa81ff5f43dfd54'),
     ]),
+    # Static object renderer, with the matrix builder and the group fog helper inline (runtime/src/native_static.c).
+    0x0049DF60: ('rt_native_static_draw', [
+        (0x0049DF60, 3049, '8b7caff02ba3201643a535114e129c2fe05aa3a4'),
+        (0x004950F0, 106, '338d7ff96c499ba49fee1c2a7fa81ff5f43dfd54'),
+        (0x0049CBE0, 147, 'e9f038b85ac815ce6affe3e3b1b13446e04e046d'),
+    ]),
     # IMA ADPCM decoder (runtime/src/native_adpcm.c).
     0x00496280: ('rt_native_adpcm_decode', [
         (0x00496280, 409, 'a4e5b69d2e3cf1c83797f92ee34bd5b9512949ae'),
