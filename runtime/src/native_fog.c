@@ -131,15 +131,27 @@ static void compute(Ctx *c, const uint8_t *gm, const uint32_t *key)
     memo.cc = rt_fcom(0u, ca, zero);
 }
 
+static int finish(Ctx *c, uint8_t *gm, uint32_t E, uint64_t *ret);
+
+uint32_t g_fog_runs;
+
+int native_fog_repeat(Ctx *c, uint32_t esp, uint64_t *ret)
+{
+    if (!memo.valid)
+        return 0;
+    return finish(c, g_mem, esp, ret);
+}
+
 int rt_native_fog_range(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret)
 {
     NATIVE_ENTRY(FN_FOG_RANGE);
     (void)ecx;
     (void)eax;
     uint8_t *const gm = g_mem;
+    g_fog_runs++;
     /* Frame: E = entry esp, S = E - 0x18: fb at S, b at S+4, fb - fa at S+8,
      * y and z at S+0x10, S+0x14; the argument slots E+4 and E+8. */
-    const uint32_t E = esp, S = E - 0x18u;
+    const uint32_t E = esp;
     const uint32_t pos = rt_ld32(gm + E + 4u);
     uint32_t key[K_WORDS];
     for (uint32_t i = 0; i < 6u; i++)
@@ -162,6 +174,13 @@ int rt_native_fog_range(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64
         memo.valid = 1;
         compute(c, gm, key);
     }
+    return finish(c, gm, E, ret);
+}
+
+/* What the call leaves: the frame, the argument slots, the two device calls. */
+static int finish(Ctx *c, uint8_t *gm, uint32_t E, uint64_t *ret)
+{
+    const uint32_t S = E - 0x18u;
     rt_st32(gm + S, memo.fb);
     rt_st32(gm + S + 4u, memo.b);
     rt_st32(gm + S + 8u, memo.df);

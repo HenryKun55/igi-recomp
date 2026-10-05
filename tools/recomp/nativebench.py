@@ -94,10 +94,12 @@ KIND = {'lock': 1, 'lockfail': 2, 'locknull': 3}
 # Stack arguments of the guest functions called (recorded and compared with the
 # return address; default 4). The stack above them is the caller's dead frame.
 CALL_ARGS = {}
-# Guest functions a native version does inline (its entry -> callees): their
-# entries are left out of the recompiled run's calls (the calls they make are kept).
+# Guest functions a native version does inline or calls only some of the times
+# (its entry -> callees): their entries are left out of both runs' calls (the
+# calls they make are kept). The static renderer applies the fog range's
+# results again for the groups after the first one.
 INLINE = {
-    0x0049DF60: {0x004950F0, 0x0049CBE0},
+    0x0049DF60: {0x004950F0, 0x0049CBE0, 0x004D0DE0, 0x004D0E20, 0x004CFCA0, 0x0049B2D0},
     0x0049F1C0: {0x004950F0},
 }
 
@@ -1127,7 +1129,7 @@ def compare(ra, rb, state, fn=0):
             out.append('st phys %d: %s / %s' % (k, ca[48 + 8 * k:56 + 8 * k].hex(), cb[48 + 8 * k:56 + 8 * k].hex()))
     skip = INLINE.get(fn, set())
     ta = [c for c in norm_calls(ra[5]) if c[0] not in skip]
-    tb = norm_calls(rb[5])
+    tb = [c for c in norm_calls(rb[5]) if c[0] not in skip]
     for i, (x, y) in enumerate(zip(ta, tb)):
         if x != y:
             out.append('call %d: %s / %s' % (i, fmt_call(x), fmt_call(y)))

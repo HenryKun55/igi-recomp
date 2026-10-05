@@ -51,7 +51,8 @@
 #define FN_SWAP_SIZE    0x004D0E50u
 #define FN_SWAP_SAVE    0x004D0E60u
 #define FN_QUEUE        0x004B72E0u   /* (callback, size, depth): depth-sorted queue entry */
-#define FN_DRAW_MODE    0x004CFCA0u
+#define FN_DRAW_MODE    0x004CFCA0u   /* inline: al = the byte at G_DRAW_MODE */
+#define G_DRAW_MODE     0x00548368u
 #define FN_LM_COORDS    0x0049EB50u
 #define CB_PLAIN        0x0049EC70u   /* queue callbacks */
 #define CB_LIGHTMAP     0x0049F1C0u
@@ -154,6 +155,7 @@ static inline void group_call(Regs *r, uint8_t *gm, uint32_t S, uint32_t tbl, ui
 typedef struct Centre {
     uint32_t y, z, radius;
     uint64_t x, yd, zd;
+    int repeat;                 /* the last fog range call was ours, natively, and no guest code ran since */
 } Centre;
 
 static void centre_load(const uint8_t *gm, uint32_t obj, uint32_t mesh, Centre *k)
@@ -172,11 +174,67 @@ static void centre_load(const uint8_t *gm, uint32_t obj, uint32_t mesh, Centre *
     memcpy(&k->yd, &yd, 8);
     memcpy(&k->zd, &zd, 8);
     k->radius = ld(gm, mesh + 0x3Cu);
+    k->repeat = 0;
 }
 
-static void draw_plain(Regs *r, uint8_t *gm, uint32_t S, uint32_t obj, const Centre *k);
-static void draw_lightmap(Regs *r, uint8_t *gm, uint32_t S, uint32_t obj, const Centre *k);
-static void draw_lm_none(Regs *r, uint8_t *gm, uint32_t S, uint32_t obj, const Centre *k);
+static void draw_plain(Regs *r, uint8_t *gm, uint32_t S, uint32_t obj, Centre *k);
+static void draw_lightmap(Regs *r, uint8_t *gm, uint32_t S, uint32_t obj, Centre *k);
+static void draw_lm_none(Regs *r, uint8_t *gm, uint32_t S, uint32_t obj, Centre *k);
+
+/* 0x4D0DE0(lodmesh) inline, called with its argument at E2 + 4 (E2: its entry
+ * esp, the return address there): the object's texture swaps (records of
+ * 0x14 bytes: two indices into the mesh's texture table; the second slot's
+ * texture saved in the record, then replaced by the first's). */
+static void tex_swap(Regs *r, uint8_t *gm, uint32_t E2, uint32_t ret_addr)
+{
+    const uint32_t lodmesh = ld(gm, E2 + 4u);
+    st(gm, E2, ret_addr);
+    st(gm, E2 - 4u, r->ebx);
+    st(gm, E2 - 8u, r->edi);
+    r->eax = ld(gm, lodmesh + 0x0Cu);
+    const int32_t n = (int32_t)ld(gm, r->eax + 0x10u);
+    if (n == 0)
+        return;
+    r->eax = ld(gm, r->eax + 0x14u);
+    if (n < 0)
+        return;
+    st(gm, E2 - 12u, r->esi);
+    uint32_t rec = r->eax + 4u, ecx = 0, edx = 0;
+    for (int32_t i = n; i != 0; i--, rec += 0x14u) {
+        ecx = ld(gm, rec + 4u);
+        const uint32_t tab = ld(gm, lodmesh + 0x10u), first = ld(gm, rec);
+        st(gm, rec + 8u, ld(gm, tab + ecx * 4u));
+        edx = ld(gm, lodmesh + 0x10u);
+        st(gm, edx + ecx * 4u, ld(gm, edx + first * 4u));
+    }
+    r->eax = rec;
+    r->ecx = ecx;
+    r->edx = edx;
+}
+
+/* 0x4D0E20(lodmesh) inline (as tex_swap): the saved textures put back. */
+static void tex_restore(Regs *r, uint8_t *gm, uint32_t E2, uint32_t ret_addr)
+{
+    const uint32_t lodmesh = ld(gm, E2 + 4u);
+    st(gm, E2, ret_addr);
+    r->edx = lodmesh;
+    r->eax = ld(gm, lodmesh + 0x0Cu);
+    const int32_t n = (int32_t)ld(gm, r->eax + 0x10u);
+    r->ecx = (uint32_t)n;
+    if (n == 0)
+        return;
+    r->eax = ld(gm, r->eax + 0x14u);
+    if (n < 0)
+        return;
+    st(gm, E2 - 4u, r->ebx);
+    st(gm, E2 - 8u, r->esi);
+    st(gm, E2 - 12u, r->edi);
+    uint32_t rec = r->eax + 8u;
+    for (int32_t i = n; i != 0; i--, rec += 0x14u)
+        st(gm, ld(gm, lodmesh + 0x10u) + ld(gm, rec) * 4u, ld(gm, rec + 4u));
+    r->eax = rec;
+    r->ecx = 0u;
+}
 
 /* The world matrix (0x49E0B1..0x49E1D1): camera-relative position and the
  * rotation rows times the scale, both times the unit, built by 0x4950F0
@@ -275,11 +333,8 @@ int rt_native_static_draw(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint
         goto out;
     st(gm, E - 0x234u, r.ebp);
     st(gm, E - 0x238u, r.edi);
-    {
-        static const GuestFunc *ic = g_guest_func_hash;
-        st(gm, S - 4u, r.eax);
-        gcall(&r, FN_TEX_SWAP, S - 4u, 0x0049DFF5u, &ic);
-    }
+    st(gm, S - 4u, r.eax);
+    tex_swap(&r, gm, S - 8u, 0x0049DFF5u);
     world_matrix(&r, gm, S, obj);
 
     /* The view axis in object space (for the queue depths) and the object's depth. */
@@ -319,12 +374,9 @@ int rt_native_static_draw(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint
     /* 0x49EB17: the texture swaps restored. */
     r.ebp = ebp0;
     r.edi = edi0;
-    {
-        static const GuestFunc *ic = g_guest_func_hash;
-        r.eax = ld(gm, S + L_LODMESH);
-        st(gm, E - 0x234u, r.eax);
-        gcall(&r, FN_TEX_RESTORE, E - 0x234u, 0x0049EB3Du, &ic);
-    }
+    r.eax = ld(gm, S + L_LODMESH);
+    st(gm, E - 0x234u, r.eax);
+    tex_restore(&r, gm, E - 0x238u, 0x0049EB3Du);
 out:
     c->r[1] = r.ecx;
     c->r[2] = r.edx;
@@ -342,7 +394,7 @@ out:
  * F-0x20, F-0x1C, the centre as doubles at F-0x18, the radius and the centre's
  * address as the arguments). The caller has the guest's registers (the mesh
  * in eax or edx) set. */
-static inline void group_fog(Regs *r, uint8_t *gm, uint32_t S, uint32_t obj, const Centre *k, uint32_t ret_addr)
+static inline void group_fog(Regs *r, uint8_t *gm, uint32_t S, uint32_t obj, Centre *k, uint32_t ret_addr)
 {
     static const GuestFunc *ic = g_guest_func_hash;
     const uint32_t F = S - 12u;
@@ -358,7 +410,20 @@ static inline void group_fog(Regs *r, uint8_t *gm, uint32_t S, uint32_t obj, con
     st(gm, F - 0x2Cu, F - 0x18u);
     r->eax = k->radius;
     r->ecx = F - 0x18u;
+    /* The same inputs as the previous group's call: its results again. */
+    if (k->repeat) {
+        uint64_t rv;
+        st(gm, F - 0x30u, RET_FOG_IN_GROUP);
+        if (native_fog_repeat(r->c, F - 0x30u, &rv)) {
+            r->eax = (uint32_t)rv;
+            r->ecx = r->c->r[1];
+            r->edx = r->c->r[2];
+            return;
+        }
+    }
+    const uint32_t runs = g_fog_runs;
     gcall(r, FN_FOG_RANGE, F - 0x2Cu, RET_FOG_IN_GROUP, &ic);
+    k->repeat = g_fog_runs == runs + 1u;
 }
 
 /* DrawIndexedPrimitiveVB of a face group (the guest's registers after it). */
@@ -404,7 +469,7 @@ static inline void queue_copy(uint8_t *gm, uint32_t item, uint32_t obj)
 }
 
 /* Type 0 meshes (0x49E2B1): face groups of 0x1C bytes from sub + 0x14. */
-static void draw_plain(Regs *r, uint8_t *gm, uint32_t S, uint32_t obj, const Centre *k)
+static void draw_plain(Regs *r, uint8_t *gm, uint32_t S, uint32_t obj, Centre *k)
 {
     r->ecx = ld(gm, S + L_MESH);
     r->edi = ld(gm, r->ecx + 0x24u);
@@ -485,6 +550,7 @@ static void draw_plain(Regs *r, uint8_t *gm, uint32_t S, uint32_t obj, const Cen
             }
         } else {
             /* Transparent: a queue entry drawn by 0x49EC70 at the group centre's depth. */
+            k->repeat = 0;
             const uint32_t gp = ld(gm, S + L_GROUP);
             st(gm, S + L_CENTRE, ld(gm, gp));
             r->eax = ld(gm, S + L_LODMESH);
@@ -574,17 +640,16 @@ static uint32_t queue_lightmap(Regs *r, uint8_t *gm, uint32_t S, uint32_t obj, u
 
 /* Type 3 meshes with a lightmap set (0x49E5CD): face groups of 0x20 bytes
  * from sub + 0x1C, texture and lightmap. */
-static void draw_lightmap(Regs *r, uint8_t *gm, uint32_t S, uint32_t obj, const Centre *k)
+static void draw_lightmap(Regs *r, uint8_t *gm, uint32_t S, uint32_t obj, Centre *k)
 {
     r->esi = ld(gm, ld(gm, S + L_MESH) + 0x24u);
     st(gm, S + L_BASE, r->esi);
     r->eax = ld16(gm, r->esi + 0x2Cu);
     r->ebp = ld(gm, r->esi + 0x1Cu);
     st(gm, S + L_GROUP, r->eax);
-    {
-        static const GuestFunc *ic = g_guest_func_hash;
-        gcall(r, FN_DRAW_MODE, S, 0x0049E5EAu, &ic);
-    }
+    /* 0x4CFCA0 inline: the draw mode in al. */
+    st(gm, S - 4u, 0x0049E5EAu);
+    r->eax = (r->eax & 0xFFFFFF00u) | gm[G_DRAW_MODE];
     {
         static const GuestFunc *ic = g_guest_func_hash;
         r->eax &= 0xFFu;
@@ -664,6 +729,7 @@ static void draw_lightmap(Regs *r, uint8_t *gm, uint32_t S, uint32_t obj, const 
                 r->edx = ld(gm, g + 4u);
                 r->eax = ld(gm, g + 8u);
                 r->ecx = ld(gm, g);
+                k->repeat = 0;
                 const uint32_t item = queue_lightmap(r, gm, S, obj, g, ld(gm, S + L_LOD), 0x0049E7DFu);
                 r->eax = item;
                 r->edx = ld(gm, S + L_LOD);
@@ -683,7 +749,7 @@ static void draw_lightmap(Regs *r, uint8_t *gm, uint32_t S, uint32_t obj, const 
 }
 
 /* Type 3 meshes without lightmaps (0x49E862): as type 3, one texture. */
-static void draw_lm_none(Regs *r, uint8_t *gm, uint32_t S, uint32_t obj, const Centre *k)
+static void draw_lm_none(Regs *r, uint8_t *gm, uint32_t S, uint32_t obj, Centre *k)
 {
     r->eax = ld(gm, S + L_MESH);
     st(gm, S - 4u, 0u);
@@ -764,6 +830,7 @@ static void draw_lm_none(Regs *r, uint8_t *gm, uint32_t S, uint32_t obj, const C
             r->eax = ld(gm, g);
             r->ecx = ld(gm, g + 4u);
             r->edx = ld(gm, g + 8u);
+            k->repeat = 0;
             const uint32_t item = queue_lightmap(r, gm, S, obj, g, 0u, 0x0049EA9Au);
             r->eax = item;
             r->edi = ld(gm, S + L_LOD);

@@ -141,6 +141,14 @@ static inline double native_ldd(uint32_t a)
 #define X87_BELOW(a, b) (!((a) >= (b)))
 #define X87_ABOVE(a, b) ((a) > (b))
 
+/* ---- fog range (native_fog.c) ----
+ * Calls of 0x49B2D0 that ran natively (counted), and the last one's results
+ * applied again for a call at esp (its entry, return address there) whose
+ * inputs the caller knows are those of the last native call (no guest code
+ * ran since): 0 when there are none. */
+extern uint32_t g_fog_runs;
+int native_fog_repeat(Ctx *c, uint32_t esp, uint64_t *ret);
+
 /* ---- view-space vertex transform of the object renderers (native_common.c) ----
  * Vertices are rotated by m and translated by t to view space, projected to the
  * screen with outcodes and written to a global array of vertices (view x, y,
