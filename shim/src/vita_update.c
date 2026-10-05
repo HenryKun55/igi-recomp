@@ -740,6 +740,15 @@ void VitaUpdate_Cancel(void)
     g_vu.cancel = 1;
 }
 
+int VitaUpdate_CanInstall(void)
+{
+    // Safe homebrew get this error for the memory card's device control, which VitaShell
+    // and PKGj use to tell the two modes apart; anything else (unsafe mode, Vita3K) can.
+    int res = sceIoDevctl("ux0:", 0x3001, NULL, 0, NULL, 0);
+    VU_Log("unsafe homebrew check: sceIoDevctl = 0x%08X", (unsigned)res);
+    return res != (int)0x80010030;
+}
+
 void VitaUpdate_Launch(void)
 {
     int res;

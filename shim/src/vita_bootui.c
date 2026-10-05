@@ -10,6 +10,10 @@
  * three seconds (no network, a slow one) the game starts as usual. After an update the
  * result that updater.bin left is shown once.
  *
+ * Installing needs HENkaku's "Enable Unsafe Homebrew": without it a new version is only
+ * announced, with how to turn it on. When the Vita refuses to start updater.bin, the game
+ * says so and closes on a button press rather than starting in that state.
+ *
  * Text: two sizes of Oswald (SIL Open Font License, platform/vita/fonts), turned into
  * 8-bit alpha glyphs by tools/make_vita_boot_font.py and packed as app0:font/.
  *
@@ -22,6 +26,7 @@
 
 #include <psp2/ctrl.h>
 #include <psp2/display.h>
+#include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
 
 #include <stdint.h>
@@ -44,6 +49,9 @@
 #define CFG_PATH "ux0:data/igi/igi.cfg"
 #define LOG_PATH "ux0:data/igi/update/update.log"
 
+#define ANY_BUTTON (SCE_CTRL_SELECT | SCE_CTRL_START | SCE_CTRL_UP | SCE_CTRL_RIGHT | SCE_CTRL_DOWN | SCE_CTRL_LEFT | \
+                    SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER | SCE_CTRL_TRIANGLE | SCE_CTRL_CIRCLE | SCE_CTRL_CROSS | \
+                    SCE_CTRL_SQUARE)
 #define RGB(r, g, b) (0xFF000000u | (uint32_t)(b) << 16 | (uint32_t)(g) << 8 | (uint32_t)(r))
 #define C_TEXT RGB(0xF2, 0xF2, 0xF2)
 #define C_DIM RGB(0xA8, 0xAE, 0xB4)
@@ -257,10 +265,13 @@ static unsigned buttons(void)
     return pad.buttons;
 }
 
-/* Waits for one of the buttons in mask (pressed after the call); returns it, or 0 after
- * timeout_ms (0: no timeout). */
+/* Waits for one of the buttons in mask; returns it, or 0 after timeout_ms (0: no
+ * timeout). A button still held from an earlier screen (X for "install") must be let go
+ * first: only a new press counts. */
 static unsigned wait_button(unsigned mask, int timeout_ms)
 {
+    for (int waited = 0; (buttons() & mask) && waited < 3000; waited += 16)
+        sceKernelDelayThread(16 * 1000);
     unsigned prev = buttons();
     for (int waited = 0; !timeout_ms || waited < timeout_ms; waited += 16) {
         unsigned now = buttons(), pressed = now & ~prev & mask;
@@ -301,7 +312,7 @@ static void show_install_result(void)
         rt_log("update: version %s installed", version);
         snprintf(text, sizeof(text), "Version %s is installed.", version);
         show(text, C_OK, "Settings, saves and game files were kept.", -1.0f, NULL);
-        wait_button(~0u, 2500);
+        wait_button(ANY_BUTTON, 2500);
     } else if (r < 0) {
         rt_log("update: install failed: %s (%s)", error, detail);
         /* only a failure while files were replaced (step "install") can leave the game
@@ -309,8 +320,25 @@ static void show_install_result(void)
         snprintf(text, sizeof(text), "%s. %sDetails: " LOG_PATH, detail,
                  strncmp(detail, "install", 7) ? "The installed game still works. " : "");
         show(error, C_ERROR, text, -1.0f, "Press any button to continue.");
-        wait_button(~0u, 20000);
+        wait_button(ANY_BUTTON, 20000);
     }
+}
+
+/* updater.bin did not take over. Whether the Vita is still switching to it is unknown,
+ * so the game does not go on starting in that state: it closes after a button press. */
+static void launch_failed(void) __attribute__((noreturn));
+static void launch_failed(void)
+{
+    char text[512];
+    rt_log("update: %s (%s)", VitaUpdate_Error(), VitaUpdate_ErrorDetail());
+    snprintf(text, sizeof(text), "%s. The installed game still works: close it and start it again.",
+             VitaUpdate_ErrorDetail());
+    show(VitaUpdate_Error(), C_ERROR, text, -1.0f, "Press any button to close the game.");
+    wait_button(ANY_BUTTON, 0);
+    rt_log("update: closing the game after the failed start of updater.bin");
+    sceKernelExitProcess(0);
+    for (;;)
+        sceKernelDelayThread(1000 * 1000);
 }
 
 static void run_check(void)
@@ -346,6 +374,16 @@ static void run_check(void)
         rt_log("update: version %s is available", VitaUpdate_NewVersion());
         snprintf(text, sizeof(text), "Version %s is available (you have %s).", VitaUpdate_NewVersion(),
                  VitaUpdate_CurrentVersion());
+        if (!VitaUpdate_CanInstall()) {
+            /* updater.bin could neither be started nor write the game's folder */
+            rt_log("update: Unsafe Homebrew is off, the update is not offered");
+            show(text, C_TEXT,
+                 "Updates need \"Enable Unsafe Homebrew\" in Settings > HENkaku Settings. Turn it on and start "
+                 "the game again to install.",
+                 -1.0f, "Press any button to continue.");
+            wait_button(ANY_BUTTON, 15000);
+            return;
+        }
         show(text, C_TEXT, "Settings, saves and game files are kept.", -1.0f, "X: install      O: skip");
         /* update_auto=1 (for testing) installs without asking */
         cfg_value("update_auto", url, sizeof(url), "0");
@@ -374,7 +412,7 @@ static void run_check(void)
             show(text, C_TEXT, "The game closes, installs the new version and starts again.", 1.0f, NULL);
             sceKernelDelayThread(1200 * 1000);
             VitaUpdate_Launch();   /* returns only when the Vita refused */
-            st = VitaUpdate_State();
+            launch_failed();
         }
     }
     /* A failed check (no Wi-Fi, no internet, GitHub unreachable or without a release)
@@ -385,7 +423,7 @@ static void run_check(void)
         if (installing) {
             snprintf(text, sizeof(text), "%s. The installed game still works.", VitaUpdate_ErrorDetail());
             show(VitaUpdate_Error(), C_ERROR, text, -1.0f, "Press any button to continue.");
-            wait_button(~0u, 15000);   /* nobody looking: the game goes on by itself */
+            wait_button(ANY_BUTTON, 15000);   /* nobody looking: the game goes on by itself */
         }
     }
 }

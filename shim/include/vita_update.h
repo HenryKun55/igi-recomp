@@ -22,6 +22,9 @@ void VitaUpdate_Check(const char *release_url);
 void VitaUpdate_Download(void);
 /* Stops a download. */
 void VitaUpdate_Cancel(void);
+/* 1 when the game may install an update: HENkaku's "Enable Unsafe Homebrew" is on
+ * (updater.bin needs it to write ux0:app and the game to start it). */
+int VitaUpdate_CanInstall(void);
 /* Replaces the game with updater.bin, which installs the download. Returns only on error. */
 void VitaUpdate_Launch(void);
 
