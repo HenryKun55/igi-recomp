@@ -69,29 +69,54 @@ Updating to a newer version only needs the new vpk; your game data and saves in
 
 ## Controls
 
+Default controls in play:
+
 | Vita | Action |
 | --- | --- |
-| Left stick | Move / strafe (menus: move the selection) |
+| Left stick | Move / strafe |
 | Right stick | Look / aim |
-| Front touchscreen | Drag to look / aim; in the menus, tap to click |
+| Front touchscreen | Drag to look / aim |
 | Rear touchpad | Upper half: zoom in, lower half: zoom out (sniper scope, binoculars) |
 | R | Fire |
 | L | Crouch |
 | Cross | Jump |
 | Circle | Use / activate |
-| Square | Reload / confirm in menus |
+| Square | Reload |
 | Triangle | Next weapon |
 | D-pad left | Previous weapon |
 | D-pad up | Binoculars |
 | D-pad down | Walk / run |
 | D-pad right | Map computer |
 | Select | Peek |
-| Start | Menu / back |
+| Start | Menu (pause) |
 
-The controls work whatever key bindings your game settings hold (a `config.qvm`
-from a PC install, keys you changed in the options): each Vita control sends the
-key the game has bound to that action at that moment. An action left without a
-key or mouse button gets its default binding back.
+In the menus: D-pad or left stick to move, Cross to confirm, Circle to go back,
+right stick to move the cursor, tap the front touchscreen to click.
+
+### Changing the controls
+
+Every button, the D-pad, the left stick's four directions and the rear touchpad's
+two halves can be bound to any action in **Controls** (main menu: Configuration →
+Controls; pause menu: Controls):
+
+1. Move to an action with the D-pad (the list scrolls; move past its first or last
+   row to reach the other items), or tap it.
+2. Press **Cross**: the game asks for a button.
+3. Press the control you want for that action. A control already used by another
+   action swaps with it, so no control does two things. **Start** cancels.
+
+Changes count at once; **Circle** goes back, keeping them. **Reset to Default
+Settings** brings back the table above. Actions without a control show
+"Not set" (weapon categories, alternate fire); bind them to a control if you
+like. Your controls are saved in `ux0:data/igi/pc/config.qvm`.
+
+**Look Sensitivity** and **Invert Look** on the same screen apply to the right
+stick and the touchscreen.
+
+Coming from an earlier version or a PC install: the first time this version
+starts, keyboard and mouse bindings (which a Vita cannot press) are replaced by
+the defaults above. Your old `config.qvm` is kept as
+`ux0:data/igi/pc/config_keyboard.qvm`.
 
 ## Optional settings
 
@@ -104,6 +129,7 @@ Create `ux0:data/igi/igi.cfg` (a text file, one setting per line):
 | `update_check=0` | No check for a new version at start-up (default: on) |
 | `front_touch=0` | Front touchscreen off |
 | `rear_touch=0` | Rear touchpad off (if you rest your fingers on it) |
+| `stick_sensitivity=0.7` | Right stick speed, as a multiplier (default 1.0; the game's Look Sensitivity applies on top) |
 
 ## Updates
 
