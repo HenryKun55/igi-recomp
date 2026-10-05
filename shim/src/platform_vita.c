@@ -271,7 +271,8 @@ void platform_swap(void)
  *   front touch  drag to look; in the menus, tap to click
  *
  * igi.cfg: front_touch=0 / rear_touch=0 turn a touch panel off;
- * stick_sensitivity=<multiplier> scales the right stick (default 1.0). */
+ * stick_sensitivity=<multiplier> scales the right stick in gameplay (default 1.0;
+ * the menu cursor speed is fixed). */
 
 static const struct {
     uint32_t button;
@@ -457,18 +458,24 @@ static void rear_touch(void)
 }
 
 /* Right stick deflection (deadzone(): 0, or 28 to about 100 at full tilt, signed)
- * -> mouse counts per second: a curve that starts slow for fine aiming and reaches
- * LOOK_MAX at full tilt. The game's mouse sensitivity (Options -> Controls) applies
- * on top. */
-#define LOOK_MAX 650.0f
+ * -> mouse counts per second.
+ *   - Gameplay: linear, 9 counts/s per unit (about 900/s at full tilt), times
+ *     stick_sensitivity; the game's mouse sensitivity (Options -> Controls) applies
+ *     on top, so players tune the look speed there.
+ *   - Menus: a fixed, slow cursor (a curve that starts slow and reaches
+ *     MENU_CURSOR_MAX at full tilt), not affected by the settings. */
+#define LOOK_PER_UNIT 9.0f
+#define MENU_CURSOR_MAX 650.0f
 static float look_speed(int v)
 {
     if (!v)
         return 0.0f;
+    if (pad_in_gameplay())
+        return (float)v * LOOK_PER_UNIT * stick_sensitivity;
     float n = (float)((v < 0 ? -v : v) - DEADZONE) / (float)(100 - DEADZONE);
     if (n > 1.0f)
         n = 1.0f;
-    float s = LOOK_MAX * stick_sensitivity * (0.25f * n + 0.75f * n * n);
+    float s = MENU_CURSOR_MAX * (0.25f * n + 0.75f * n * n);
     return v < 0 ? -s : s;
 }
 

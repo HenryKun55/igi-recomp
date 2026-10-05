@@ -129,7 +129,7 @@ Create `ux0:data/igi/igi.cfg` (a text file, one setting per line):
 | `update_check=0` | No check for a new version at start-up (default: on) |
 | `front_touch=0` | Front touchscreen off |
 | `rear_touch=0` | Rear touchpad off (if you rest your fingers on it) |
-| `stick_sensitivity=0.7` | Right stick speed, as a multiplier (default 1.0; the game's Look Sensitivity applies on top) |
+| `stick_sensitivity=0.7` | Right stick look speed in gameplay, as a multiplier (default 1.0; the game's Look Sensitivity applies on top). The menu cursor speed is fixed |
 
 ## Updates
 
