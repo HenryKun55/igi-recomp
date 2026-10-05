@@ -94,6 +94,12 @@ KIND = {'lock': 1, 'lockfail': 2, 'locknull': 3}
 # Stack arguments of the guest functions called (recorded and compared with the
 # return address; default 4). The stack above them is the caller's dead frame.
 CALL_ARGS = {}
+# Guest functions a native version does inline (its entry -> callees): their
+# entries are left out of the recompiled run's calls (the calls they make are kept).
+INLINE = {
+    0x0049DF60: {0x004950F0, 0x0049CBE0},
+    0x0049F1C0: {0x004950F0},
+}
 
 GSTACK = 0x02EFF000          # entry esp of synthetic states
 LIMIT = 40_000_000           # ARM instructions per run (a whole frame's terrain walk takes about 1M)
@@ -960,6 +966,11 @@ def load_state(uc, ab, exe, state, gsize, syms, native):
     uc.mem_write(syms['g_lock_buf'], struct.pack('<I', gsize + 0x10000))
     uc.mem_write(syms['g_mem'], struct.pack('<I', ab.GMEM))
     uc.mem_write(syms['g_igi_native'], struct.pack('<i', native))
+    # The device at 0x5CA114 is the shim's: the native functions call the direct entries.
+    if 'g_d3dd_vtbl' in syms:
+        dev, = struct.unpack('<I', bytes(uc.mem_read(ab.GMEM + 0x5CA114, 4)))
+        vt = struct.unpack('<I', bytes(uc.mem_read(ab.GMEM + dev, 4)))[0] if 0x1000 <= dev < gsize - 4 else 0
+        uc.mem_write(syms['g_d3dd_vtbl'], struct.pack('<I', vt))
     regs = list(state.regs)
     regs[4] = state.esp
     ctx = struct.pack('<8I3I4x8dIII', *regs, 0, 0, 0x00020000, *state.st, state.ftop, state.fcw, state.fsw)
@@ -992,6 +1003,7 @@ def run(exe, path, fn, state, native, prof_gen=None, trace=True, hot=None, twice
         if name.startswith('f_') and len(name) == 10:
             entries[a & ~1] = int(name[2:], 16)
     stub_addr = syms['thunk_stub'] & ~1 if 'thunk_stub' in syms else None
+    direct = {syms[k] & ~1: v for k, v in ab.D3DD.items() if k in syms}
     uc = Uc(UC_ARCH_ARM, UC_MODE_THUMB)
     for va, blob, memsz in segs:
         lo = va & ~0xFFF
@@ -1052,6 +1064,13 @@ def run(exe, path, fn, state, native, prof_gen=None, trace=True, hot=None, twice
         g = entries.get(addr)
         if g is not None:
             record(g, uc_.reg_read(A.UC_ARM_REG_R1), uc_.reg_read(A.UC_ARM_REG_R3), uc_.reg_read(A.UC_ARM_REG_R2))
+        elif addr in direct:
+            # A direct device entry: the method and its arguments (r0-r3, then the stack).
+            name, nargs = direct[addr]
+            args = [uc_.reg_read(r) for r in (A.UC_ARM_REG_R0, A.UC_ARM_REG_R1, A.UC_ARM_REG_R2, A.UC_ARM_REG_R3)]
+            sp = uc_.reg_read(A.UC_ARM_REG_SP)
+            args += list(struct.unpack('<2I', bytes(uc_.mem_read(sp, 8))))
+            calls.append(('direct', name, tuple(args[:nargs])))
         elif addr == stub_addr:
             c = bytes(uc_.mem_read(ab.CTX, 20))
             eax, ecx, _, _, esp = struct.unpack('<5I', c)
@@ -1081,7 +1100,7 @@ def run(exe, path, fn, state, native, prof_gen=None, trace=True, hot=None, twice
     return status, tot[0], per, mem, bytes(out), calls
 
 
-def compare(ra, rb, state):
+def compare(ra, rb, state, fn=0):
     """Differences between two runs (empty: identical)."""
     a, b = ra[3], rb[3]
     out = []
@@ -1106,7 +1125,9 @@ def compare(ra, rb, state):
     for k in range(state.ftop, 8 if state.ftop else 0):
         if ca[48 + 8 * k:56 + 8 * k] != cb[48 + 8 * k:56 + 8 * k]:
             out.append('st phys %d: %s / %s' % (k, ca[48 + 8 * k:56 + 8 * k].hex(), cb[48 + 8 * k:56 + 8 * k].hex()))
-    ta, tb = ra[5], rb[5]
+    skip = INLINE.get(fn, set())
+    ta = [c for c in norm_calls(ra[5]) if c[0] not in skip]
+    tb = norm_calls(rb[5])
     for i, (x, y) in enumerate(zip(ta, tb)):
         if x != y:
             out.append('call %d: %s / %s' % (i, fmt_call(x), fmt_call(y)))
@@ -1116,7 +1137,24 @@ def compare(ra, rb, state):
     return out
 
 
+def norm_calls(calls):
+    """Device method calls as (method, arguments) whether made through the COM
+    thunks or the direct entries (whose stack words are compared as memory)."""
+    methods = {v[0]: v[1] for v in armbench.D3DD.values()}
+    out = []
+    for c in calls:
+        if c[0] == 'direct':
+            out.append(c)
+        elif isinstance(c[0], str) and c[0] in methods:
+            out.append(('direct', c[0], tuple(c[6][2:2 + methods[c[0]]])))
+        else:
+            out.append(c)
+    return out
+
+
 def fmt_call(c):
+    if c[0] == 'direct':
+        return '%s(%s)' % (c[1], ', '.join('%08X' % w for w in c[2]))
     t, esp, eax, ecx, edx, ftop, words, more = c
     return '%s esp %08X eax %08X ecx %08X edx %08X top %d [%s]%s' % (
         t if isinstance(t, str) else 'f_%08X' % t, esp, eax, ecx, edx, ftop, ' '.join('%08X' % w for w in words),
@@ -1146,7 +1184,7 @@ def diff_mode(args, fn):
     ncases = 0
     for label, state in cases(args, fn):
         res = [run(args.exe, args.elf, fn, state, k, twice=k == 1 and args.twice) for k in (0, 1)]
-        d = compare(res[0], res[1], state)
+        d = compare(res[0], res[1], state, fn)
         ok = not d and res[0][0] == res[1][0] == 'ok'
         ncases += 1
         fails += not ok

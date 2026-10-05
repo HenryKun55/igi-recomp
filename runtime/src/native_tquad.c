@@ -26,7 +26,7 @@
  * Arithmetic follows the guest's x87 code as the recompiler models it (every x87
  * register a double, rounded to float where the game stores a float): the same
  * operations in the same order. The device calls go straight to the shim's
- * direct entries (shim/include/d3d_direct.h) in the guest's order, so the
+ * direct entries (runtime/include/d3d_direct.h) in the guest's order, so the
  * device ends in the same state and records the same draw. Beyond memory and
  * the returned registers, the guest calls that remain (state setters, fog
  * range) see the same registers, stack and arguments, and the frame left below

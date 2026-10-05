@@ -26,7 +26,7 @@
  * object position: the results of the last call are kept with all its inputs
  * (position, radius, view, fog constants, rounding mode; compared bit for bit)
  * and reused when they are the same. The device calls are made every time,
- * through the shim's direct entries (shim/include/d3d_direct.h) when the
+ * through the shim's direct entries (runtime/include/d3d_direct.h) when the
  * device is the shim's. */
 #include "native.h"
 #include "d3d_direct.h"

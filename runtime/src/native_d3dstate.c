@@ -23,7 +23,7 @@
  *   0x00493AC0  lighting_off   LIGHTING off
  *
  * The native versions make the same device calls in the same order through
- * the shim's direct entries (shim/include/d3d_direct.h), so the device ends
+ * the shim's direct entries (runtime/include/d3d_direct.h), so the device ends
  * in the same state, and leave what the guest leaves: the frame below the
  * entry esp (saved registers, locals, the last call's arguments and return
  * address; the earlier calls' words are overwritten by the later ones at the
