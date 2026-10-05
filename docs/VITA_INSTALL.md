@@ -71,8 +71,10 @@ Updating to a newer version only needs the new vpk; your game data and saves in
 
 | Vita | Action |
 | --- | --- |
-| Left stick | Move / strafe |
+| Left stick | Move / strafe (menus: move the selection) |
 | Right stick | Look / aim |
+| Front touchscreen | Drag to look / aim; in the menus, tap to click |
+| Rear touchpad | Upper half: zoom in, lower half: zoom out (sniper scope, binoculars) |
 | R | Fire |
 | L | Crouch |
 | Cross | Jump |
@@ -86,8 +88,10 @@ Updating to a newer version only needs the new vpk; your game data and saves in
 | Select | Peek |
 | Start | Menu / back |
 
-The controls follow the game's default key bindings: if you changed the key
-bindings in the game's options, set them back to the defaults.
+The controls work whatever key bindings your game settings hold (a `config.qvm`
+from a PC install, keys you changed in the options): each Vita control sends the
+key the game has bound to that action at that moment. An action left without a
+key or mouse button gets its default binding back.
 
 ## Optional settings
 
@@ -98,6 +102,8 @@ Create `ux0:data/igi/igi.cfg` (a text file, one setting per line):
 | `aspect=keep` | Original 4:3 picture with black bars (default: fill the 16:9 screen) |
 | `overlay=1` | Performance overlay (frame time, CPU time per frame) |
 | `update_check=0` | No check for a new version at start-up (default: on) |
+| `front_touch=0` | Front touchscreen off |
+| `rear_touch=0` | Rear touchpad off (if you rest your fingers on it) |
 
 ## Updates
 
@@ -109,6 +115,12 @@ the game closes, puts the new files in place of its own and starts again;
 wrong the installed game keeps working, and the details are in
 `ux0:data/igi/update/update.log`. The installed version is shown in the bottom
 right corner of the boot screen.
+
+Installing an update needs **Enable Unsafe Homebrew** on in Settings > HENkaku
+Settings (the installer writes the game's own folder in `ux0:app`). With it off
+the game only tells you that a new version is available and how to turn it on,
+then starts as usual. If the Vita refuses to start the installer, the game shows
+the error and closes when you press a button: start it again from the LiveArea.
 
 ## Known issues
 
