@@ -1,8 +1,9 @@
 /* PlayStation Vita implementation of the platform layer: vitaGL for video,
- * sceCtrl mapped onto IGI's default keyboard/mouse bindings, SDL for audio. */
+ * sceCtrl and the touch panels sent through IGI's key bindings, SDL for audio. */
 #if defined(__vita__)
 #include "platform.h"
 #include "bench.h"
+#include "pad_input.h"
 #include "runtime.h"
 #include "vita_bootui.h"
 
@@ -12,6 +13,7 @@
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/sysmem.h>
 #include <psp2/power.h>
+#include <psp2/touch.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -238,48 +240,73 @@ void platform_swap(void)
     }
 }
 
-/* ---- controls ----------------------------------------------------------- */
+/* ---- controls -----------------------------------------------------------
+ * Every control stands for one of IGI's actions and is sent as whatever key or
+ * mouse button the game has bound to it at that moment (pad_input.c), so the
+ * controls work with any saved bindings. In the menus the left stick and Square
+ * also press the arrow keys and Enter, which the menus read directly.
+ *
+ *   left stick  move / strafe          right stick  look (mouse)
+ *   R  fire                            L  crouch
+ *   X  jump                            O  activate
+ *   [] reload (menus: Enter)           /\ next weapon
+ *   up  binoculars                     down  walk / run
+ *   left  previous weapon              right  map computer
+ *   SELECT  peek                       START  Esc (menu)
+ *   front touch  drag to look; in the menus, tap to click
+ *   rear touch   upper half zoom in, lower half zoom out (scope, binoculars)
+ *
+ * igi.cfg: front_touch=0 / rear_touch=0 turn a touch panel off. */
 
-/* Pad buttons -> DirectInput keys (0 = none), following IGI's default bindings. */
 typedef struct ButtonMap {
     uint32_t button;
-    uint8_t dik;
-    int mouse_button;   /* -1 = none */
+    uint32_t action;   /* IGI_ACT_*, 0 = none */
+    uint8_t dik;       /* key pressed directly: always (action 0) or, with an action, in the menus */
 } ButtonMap;
 
 static const ButtonMap button_map[] = {
-    { SCE_CTRL_RTRIGGER, 0, 0 },          /* Fire (mouse 1) */
-    { SCE_CTRL_TRIANGLE, 0, 1 },          /* Next weapon (mouse 2) */
-    { SCE_CTRL_LTRIGGER, 0x9D, -1 },      /* Crouch (right ctrl) */
-    { SCE_CTRL_CROSS, 0x52, -1 },         /* Jump (numpad 0) */
-    { SCE_CTRL_CIRCLE, 0x36, -1 },        /* Activate (right shift) */
-    { SCE_CTRL_SQUARE, 0x1C, -1 },        /* Reload / menu confirm (enter) */
-    { SCE_CTRL_UP, 0x39, -1 },            /* Binoculars (space) */
-    { SCE_CTRL_DOWN, 0x11, -1 },          /* Toggle walk/run (W) */
-    { SCE_CTRL_LEFT, 0x18, -1 },          /* Previous weapon (O) */
-    { SCE_CTRL_RIGHT, 0x2E, -1 },         /* Map computer (C) */
-    { SCE_CTRL_START, 0x01, -1 },         /* Escape */
-    { SCE_CTRL_SELECT, 0x4F, -1 },        /* Peek (numpad 1) */
+    { SCE_CTRL_RTRIGGER, IGI_ACT_FIRE, 0 },
+    { SCE_CTRL_LTRIGGER, IGI_ACT_CROUCH, 0 },
+    { SCE_CTRL_CROSS, IGI_ACT_JUMP, 0 },
+    { SCE_CTRL_CIRCLE, IGI_ACT_ACTIVATE, 0 },
+    { SCE_CTRL_SQUARE, IGI_ACT_RELOAD, 0x1C },        /* Enter */
+    { SCE_CTRL_TRIANGLE, IGI_ACT_NEXT_WEAPON, 0 },
+    { SCE_CTRL_UP, IGI_ACT_BINOCULARS, 0 },
+    { SCE_CTRL_DOWN, IGI_ACT_TOGGLE_WALK_RUN, 0 },
+    { SCE_CTRL_LEFT, IGI_ACT_PREV_WEAPON, 0 },
+    { SCE_CTRL_RIGHT, IGI_ACT_MAP_COMPUTER, 0 },
+    { SCE_CTRL_SELECT, IGI_ACT_PEEK, 0 },
+    { SCE_CTRL_START, 0, 0x01 },                      /* Esc */
 };
+#define N_BUTTONS (sizeof(button_map) / sizeof(button_map[0]))
+
+/* Left stick directions: up, down, left, right. */
+static const uint32_t stick_actions[4] = { IGI_ACT_MOVE_UP, IGI_ACT_MOVE_DOWN, IGI_ACT_MOVE_LEFT, IGI_ACT_MOVE_RIGHT };
+static const uint8_t stick_arrows[4] = { 0xC8, 0xD0, 0xCB, 0xCD };
 
 static uint32_t prev_buttons;
-static uint8_t stick_keys[4];            /* up, down, left, right currently held by the stick */
+static uint8_t button_menu_key[N_BUTTONS];   /* the menu key a held button pressed */
+static uint8_t stick_held[4], stick_menu_key[4];
 
-static void set_key(uint8_t dik, int down)
+/* A control (button or stick direction) going down or up: its action, and its
+ * menu key when pressed in a menu. */
+static void control(uint32_t action, uint8_t dik, uint8_t *menu_key_held, int down)
 {
-    if (!dik || ((g_key_state[dik] != 0) == (down != 0)))
-        return;
-    platform_key(dik, down);
-}
-
-static void set_mouse_button(int b, int down)
-{
-    uint8_t v = down ? 0x80 : 0;
-    if (g_mouse.buttons[b] == v)
-        return;
-    g_mouse.buttons[b] = v;
-    static const uint32_t msgs[2][2] = { { 0x0202, 0x0201 }, { 0x0205, 0x0204 } };
-    user32_post_message(msgs[b][down ? 1 : 0], 0, ((uint32_t)g_mouse.y << 16) | ((uint32_t)g_mouse.x & 0xFFFFu));
+    if (down) {
+        if (action)
+            pad_action(action, 1);
+        if (dik && (!action || !pad_in_gameplay())) {
+            pad_key(dik, 1);
+            *menu_key_held = dik;
+        }
+    } else {
+        if (action)
+            pad_action(action, 0);
+        if (*menu_key_held) {
+            pad_key(*menu_key_held, 0);
+            *menu_key_held = 0;
+        }
+    }
 }
 
 static int deadzone(int v)
@@ -290,9 +317,151 @@ static int deadzone(int v)
     return v;
 }
 
+static void post_mouse_move(void)
+{
+    user32_post_message(0x0200, 0, ((uint32_t)g_mouse.y << 16) | ((uint32_t)g_mouse.x & 0xFFFFu));
+}
+
+/* Relative mouse motion (looking), the cursor kept on the screen. */
+static void mouse_motion(int32_t mx, int32_t my)
+{
+    if (!mx && !my)
+        return;
+    g_mouse.dx += mx;
+    g_mouse.dy += my;
+    g_mouse.x += mx;
+    g_mouse.y += my;
+    if (g_mouse.x < 0) g_mouse.x = 0;
+    if (g_mouse.y < 0) g_mouse.y = 0;
+    if (g_mouse.x >= mode_w) g_mouse.x = mode_w - 1;
+    if (g_mouse.y >= mode_h) g_mouse.y = mode_h - 1;
+    post_mouse_move();
+}
+
+/* ---- touch panels ---- */
+
+#define TOUCH_LOOK_SCALE 0.5f   /* mouse counts per front panel unit (1920 across) */
+
+static int front_touch_on = 1, rear_touch_on = 1, aspect_keep;
+static int rear_mid_y = 544;     /* rear panel: above = zoom in, below = zoom out */
+static int front_w = 1920, front_h = 1088;
+
+static void touch_init(void)
+{
+    FILE *f = fopen("ux0:data/igi/igi.cfg", "r");
+    if (f) {
+        char line[128];
+        while (fgets(line, sizeof(line), f)) {
+            if (!strncmp(line, "front_touch=", 12))
+                front_touch_on = line[12] != '0';
+            else if (!strncmp(line, "rear_touch=", 11))
+                rear_touch_on = line[11] != '0';
+            else if (!strncmp(line, "aspect=", 7))
+                aspect_keep = !strncmp(line + 7, "keep", 4);   /* as render_gl.c: fill unless keep */
+        }
+        fclose(f);
+    }
+    SceTouchPanelInfo info;
+    if (sceTouchGetPanelInfo(SCE_TOUCH_PORT_FRONT, &info) >= 0 && info.maxAaX > info.minAaX &&
+        info.maxAaY > info.minAaY) {
+        front_w = info.maxAaX + 1;
+        front_h = info.maxAaY + 1;
+    }
+    if (sceTouchGetPanelInfo(SCE_TOUCH_PORT_BACK, &info) >= 0 && info.maxAaY > info.minAaY)
+        rear_mid_y = (info.minAaY + info.maxAaY) / 2;
+    if (front_touch_on)
+        sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, SCE_TOUCH_SAMPLING_STATE_START);
+    if (rear_touch_on)
+        sceTouchSetSamplingState(SCE_TOUCH_PORT_BACK, SCE_TOUCH_SAMPLING_STATE_START);
+    rt_log("touch: front %s (%dx%d), rear %s (zoom in above y=%d)", front_touch_on ? "on" : "off", front_w, front_h,
+           rear_touch_on ? "on" : "off", rear_mid_y);
+}
+
+/* Front panel position -> game screen position, through the image's place on
+ * the display (stretched, or 4:3 with bars with aspect=keep). */
+static void touch_to_game(int tx, int ty, int32_t *gx, int32_t *gy)
+{
+    int x0 = 0, w = front_w;
+    if (aspect_keep) {
+        w = front_h * 4 / 3;
+        x0 = (front_w - w) / 2;
+    }
+    int x = (int)((int64_t)(tx - x0) * mode_w / w), y = (int)((int64_t)ty * mode_h / front_h);
+    *gx = x < 0 ? 0 : x >= mode_w ? mode_w - 1 : x;
+    *gy = y < 0 ? 0 : y >= mode_h ? mode_h - 1 : y;
+}
+
+/* Front: in play a drag turns the view like the mouse; in the menus the cursor
+ * goes where the finger is and a tap clicks (button down once the cursor is
+ * there, up when the finger lifts). */
+static void front_touch(void)
+{
+    static int active, menu, clicking, last_x, last_y;
+    static float acc_x, acc_y;
+    SceTouchData t;
+    int down = sceTouchPeek(SCE_TOUCH_PORT_FRONT, &t, 1) >= 0 && t.reportNum > 0;
+    if (!down) {
+        if (clicking)
+            pad_mouse_button(0, 0);
+        active = clicking = 0;
+        return;
+    }
+    int x = t.report[0].x, y = t.report[0].y;
+    if (!active) {
+        active = 1;
+        menu = !pad_in_gameplay();
+        last_x = x;
+        last_y = y;
+        acc_x = acc_y = 0.0f;
+        if (!menu)
+            return;
+    }
+    if (menu) {
+        int32_t gx, gy;
+        touch_to_game(x, y, &gx, &gy);
+        if (gx != g_mouse.x || gy != g_mouse.y) {
+            g_mouse.dx += gx - g_mouse.x;
+            g_mouse.dy += gy - g_mouse.y;
+            g_mouse.x = gx;
+            g_mouse.y = gy;
+            post_mouse_move();
+        } else if (!clicking) {
+            clicking = 1;
+            pad_mouse_button(0, 1);
+        }
+        return;
+    }
+    acc_x += (float)(x - last_x) * TOUCH_LOOK_SCALE;
+    acc_y += (float)(y - last_y) * TOUCH_LOOK_SCALE;
+    last_x = x;
+    last_y = y;
+    int32_t mx = (int32_t)acc_x, my = (int32_t)acc_y;
+    acc_x -= (float)mx;
+    acc_y -= (float)my;
+    mouse_motion(mx, my);
+}
+
+/* Rear: held in the upper half zooms in, in the lower half zooms out. */
+static void rear_touch(void)
+{
+    static uint32_t zoom_held;
+    SceTouchData t;
+    uint32_t want = 0;
+    if (sceTouchPeek(SCE_TOUCH_PORT_BACK, &t, 1) >= 0 && t.reportNum > 0)
+        want = t.report[0].y < rear_mid_y ? IGI_ACT_ZOOM_IN : IGI_ACT_ZOOM_OUT;
+    if (want == zoom_held)
+        return;
+    if (zoom_held)
+        pad_action(zoom_held, 0);
+    if (want)
+        pad_action(want, 1);
+    zoom_held = want;
+}
+
 void platform_pump(void)
 {
     static uint64_t last_look, last_pump;
+    static int touch_ready;
     platform_scripted_input();
     if (bench_enabled())
         return;   /* the benchmark drives the game; the pad would disturb it */
@@ -302,19 +471,19 @@ void platform_pump(void)
     if (t - last_pump < 2000u)
         return;
     last_pump = t;
+    if (!touch_ready) {
+        touch_ready = 1;
+        touch_init();
+    }
+    pad_tick((uint32_t)(t / 1000u));
     SceCtrlData pad;
     if (sceCtrlPeekBufferPositive(0, &pad, 1) < 0)
         return;
-    for (unsigned i = 0; i < sizeof(button_map) / sizeof(button_map[0]); i++) {
+    for (unsigned i = 0; i < N_BUTTONS; i++) {
         const ButtonMap *m = &button_map[i];
         int down = (pad.buttons & m->button) != 0;
-        int was = (prev_buttons & m->button) != 0;
-        if (down == was)
-            continue;
-        if (m->mouse_button >= 0)
-            set_mouse_button(m->mouse_button, down);
-        else
-            set_key(m->dik, down);
+        if (down != ((prev_buttons & m->button) != 0))
+            control(m->action, m->dik, &button_menu_key[i], down);
     }
     /* Debug combos, only with the performance overlay on (overlay=1 in igi.cfg). */
     const uint32_t diag = SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER | SCE_CTRL_SELECT;
@@ -326,16 +495,20 @@ void platform_pump(void)
         g_trace_next_frame = 1;   /* log the next frame's draws and save its image */
     prev_buttons = pad.buttons;
 
-    /* Left stick: arrow keys (move / strafe). */
+    /* Left stick: the move actions (and the arrow keys in the menus). */
     int lx = deadzone(pad.lx), ly = deadzone(pad.ly);
     uint8_t want[4] = { ly < -40, ly > 40, lx < -40, lx > 40 };
-    static const uint8_t arrows[4] = { 0xC8, 0xD0, 0xCB, 0xCD };
     for (int i = 0; i < 4; i++) {
-        if (want[i] != stick_keys[i]) {
-            stick_keys[i] = want[i];
-            set_key(arrows[i], want[i]);
+        if (want[i] != stick_held[i]) {
+            stick_held[i] = want[i];
+            control(stick_actions[i], stick_arrows[i], &stick_menu_key[i], want[i]);
         }
     }
+
+    if (front_touch_on)
+        front_touch();
+    if (rear_touch_on)
+        rear_touch();
 
     /* Right stick: relative mouse motion, scaled by elapsed time. */
     uint64_t now = sceKernelGetProcessTimeWide();
@@ -350,17 +523,7 @@ void platform_pump(void)
         int32_t mx = (int32_t)acc_x, my = (int32_t)acc_y;
         acc_x -= (float)mx;
         acc_y -= (float)my;
-        if (mx || my) {
-            g_mouse.dx += mx;
-            g_mouse.dy += my;
-            g_mouse.x += mx;
-            g_mouse.y += my;
-            if (g_mouse.x < 0) g_mouse.x = 0;
-            if (g_mouse.y < 0) g_mouse.y = 0;
-            if (g_mouse.x >= mode_w) g_mouse.x = mode_w - 1;
-            if (g_mouse.y >= mode_h) g_mouse.y = mode_h - 1;
-            user32_post_message(0x0200, 0, ((uint32_t)g_mouse.y << 16) | ((uint32_t)g_mouse.x & 0xFFFFu));
-        }
+        mouse_motion(mx, my);
     }
     last_look = now;
 }
