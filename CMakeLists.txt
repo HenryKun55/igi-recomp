@@ -17,7 +17,7 @@ endif()
 # IGI_UPDATE_REPO (docs/VITA_RELEASE.md); the update check installs a release only when
 # its version is higher, so raise it for every release. major.minor.patch, each 0-9 for
 # minor and patch (the Vita's APP_VER is NN.NN: 0.1.0 -> 00.10, 1.2.3 -> 01.23).
-set(IGI_PORT_VERSION "0.1.0")
+set(IGI_PORT_VERSION "0.3.0")
 set(IGI_UPDATE_REPO "HenryKun55/igi-vita" CACHE STRING "GitHub owner/repo whose releases the Vita update check reads")
 if(NOT IGI_PORT_VERSION MATCHES "^([0-9]+)\\.([0-9])\\.([0-9])$")
     message(FATAL_ERROR "IGI_PORT_VERSION must be major.minor.patch with one-digit minor and patch")
