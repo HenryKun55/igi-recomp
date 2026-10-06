@@ -55,6 +55,10 @@ int igi_controls_list(IgiControlsList *out);
 /* Scrolls the list so that it shows rows from `offset` on (clamped). */
 void igi_controls_list_scroll(int offset);
 
+/* With the pad scheme: the key capture that a click on a row starts next sets
+ * that action's second control instead of its first (Triangle on a row). */
+void igi_controls_request_second(void);
+
 /* Called once per presented frame. */
 void igi_controls_end_frame(void);
 

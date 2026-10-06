@@ -61,6 +61,7 @@ GAME_HOOKS = [
     0x004B8810,   # script constant registration (adds PORTUGUESE)
     0x004234E0,   # controls screen: per-frame update (key capture state)
     0x00423DB0,   # controls screen: load the bindings into the list
+    0x00423EB0,   # controls screen: the list into the player's bindings
     0x004ED5E0,   # input: bind the player's key bindings for play
 ]
 
@@ -89,6 +90,7 @@ PATCHES = {
     0x00406270: ('rt_controls_key_count', 6, 'd3a5597a866910ec0bf0e7dcd502b58cfa0f38c7'),
     0x00406240: ('rt_controls_key_entry', 45, 'e2532e8f9b6ceb77f82782f3956c5011518639a8'),
     0x00418EA0: ('rt_controls_text', 259, 'be0022c4fa8e0a1bfc505d384a8d8fd6099d69d9'),
+    0x00423770: ('rt_controls_set_key', 72, 'beaa584fb2c5f47b2b7c6eb04b286d781d9d0224'),
 }
 
 # Game functions with hand-decompiled native versions (runtime/src/native_*.c): entry ->

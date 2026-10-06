@@ -25,7 +25,18 @@
  * 0x406240 replaced), names them by the pad's controls (0x418EA0 replaced for
  * those names) and, with the pad scheme, makes them the defaults and replaces
  * keyboard bindings (useless on a Vita) by them once, keeping a copy of the
- * player's config.qvm. */
+ * player's config.qvm.
+ *
+ * With the pad scheme an action can also have a second control: the screen's
+ * list keeps the first one of each action ([obj+0x254], the key cell's text
+ * [obj+0x154]), the port keeps the second (second[], loaded with the list) and
+ * shows both in the key cell ("R / Rear touch Up", 0x423770 replaced). A click
+ * on a row (Cross) sets the first control as before; Triangle on a row starts
+ * the same key capture for the second one: a control already in that row
+ * removes the second, a control of another action is swapped with it (as the
+ * game swaps first controls). Applying the list (0x423EB0) writes the second
+ * controls as extra GOInRemap entries after the first ones, which play reads
+ * like any other entry; "Reset to Default" clears them. */
 #include "igi_controls.h"
 #include "recomp.h"
 #include "runtime.h"
@@ -67,32 +78,51 @@
 #define LIST_WINDOW 0x44u          /* its menu window */
 #define WINDOW_MOUSE 0x27CCu       /* a menu window's mouse state: +0xC x, +0x10 y */
 #define LIST_SEEN_FRAMES 2u
+#define LIST_KEY_TEXT 0x154u       /* per row: the key cell's text object */
+#define LIST_KEY 0x254u            /* per row: index of its key among the bindable keys */
+#define LIST_SELECTED 0x35Cu       /* the row whose key is being captured */
+#define MAX_ROWS 64u
+#define KEY_ENTRY_SIZE 36u
+#define KEY_STATE 0x00C28C62u      /* DirectInput keyboard state, by scan code */
+#define DIK_ESCAPE 0x01u
+#define GAME_SET_TEXT 0x004B6E90u  /* set_text(text object, const char *): copies it */
+#define GAME_MENU_TEXT 0x00418EA0u
+#define GAME_PLAY_SOUND 0x004E7180u
+#define GAME_MOUSE_RESET 0x0048A8C0u
+#define GAME_WINDOW_IDLE 0x00418FD0u   /* window(obj): back from capturing a key */
+#define TEXT_SELECT_KEY 0x0053B8D0u    /* "Select a key or button" */
+#define SOUND_SELECT 0x0053B5D8u       /* "menu_sel2" */
 
 typedef struct VKey {
     uint8_t code;
     const char *id;      /* constant name (config.qvm stores the number) */
     const char *label[2];   /* shown in the controls screen: English, Portuguese (cp1252) */
+    const char *brief[2];   /* the same, shorter, in a cell with two controls */
 } VKey;
 
 static const VKey vkeys[] = {
-    { IGI_VK_CROSS, "PAD_CROSS", { "Cross", "Xis" } },
-    { IGI_VK_CIRCLE, "PAD_CIRCLE", { "Circle", "C\xEDrculo" } },
-    { IGI_VK_SQUARE, "PAD_SQUARE", { "Square", "Quadrado" } },
-    { IGI_VK_TRIANGLE, "PAD_TRIANGLE", { "Triangle", "Tri\xE2ngulo" } },
-    { IGI_VK_L, "PAD_L", { "L", "L" } },
-    { IGI_VK_R, "PAD_R", { "R", "R" } },
-    { IGI_VK_SELECT, "PAD_SELECT", { "Select", "Select" } },
-    { IGI_VK_DPAD_UP, "PAD_DPAD_UP", { "D-pad Up", "Direcional cima" } },
-    { IGI_VK_DPAD_DOWN, "PAD_DPAD_DOWN", { "D-pad Down", "Direcional baixo" } },
-    { IGI_VK_DPAD_LEFT, "PAD_DPAD_LEFT", { "D-pad Left", "Direcional esquerda" } },
-    { IGI_VK_DPAD_RIGHT, "PAD_DPAD_RIGHT", { "D-pad Right", "Direcional direita" } },
-    { IGI_VK_LSTICK_UP, "PAD_LSTICK_UP", { "Left stick Up", "Anal\xF3gico esq. cima" } },
-    { IGI_VK_LSTICK_DOWN, "PAD_LSTICK_DOWN", { "Left stick Down", "Anal\xF3gico esq. baixo" } },
-    { IGI_VK_LSTICK_LEFT, "PAD_LSTICK_LEFT", { "Left stick Left", "Anal\xF3gico esq. esquerda" } },
-    { IGI_VK_LSTICK_RIGHT, "PAD_LSTICK_RIGHT", { "Left stick Right", "Anal\xF3gico esq. direita" } },
-    { IGI_VK_REAR_UP, "PAD_REAR_UP", { "Rear touch Up", "Touch traseiro cima" } },
-    { IGI_VK_REAR_DOWN, "PAD_REAR_DOWN", { "Rear touch Down", "Touch traseiro baixo" } },
-    { IGI_VK_NONE, "PAD_NONE", { "Not set", "Nenhum" } },
+    { IGI_VK_CROSS, "PAD_CROSS", { "Cross", "Xis" }, { "Cross", "Xis" } },
+    { IGI_VK_CIRCLE, "PAD_CIRCLE", { "Circle", "C\xEDrculo" }, { "Circle", "C\xEDrculo" } },
+    { IGI_VK_SQUARE, "PAD_SQUARE", { "Square", "Quadrado" }, { "Square", "Quadrado" } },
+    { IGI_VK_TRIANGLE, "PAD_TRIANGLE", { "Triangle", "Tri\xE2ngulo" }, { "Triangle", "Tri\xE2ngulo" } },
+    { IGI_VK_L, "PAD_L", { "L", "L" }, { "L", "L" } },
+    { IGI_VK_R, "PAD_R", { "R", "R" }, { "R", "R" } },
+    { IGI_VK_SELECT, "PAD_SELECT", { "Select", "Select" }, { "Select", "Select" } },
+    { IGI_VK_DPAD_UP, "PAD_DPAD_UP", { "D-pad Up", "Direcional cima" }, { "D-pad Up", "Dir. cima" } },
+    { IGI_VK_DPAD_DOWN, "PAD_DPAD_DOWN", { "D-pad Down", "Direcional baixo" }, { "D-pad Down", "Dir. baixo" } },
+    { IGI_VK_DPAD_LEFT, "PAD_DPAD_LEFT", { "D-pad Left", "Direcional esquerda" }, { "D-pad Left", "Dir. esq." } },
+    { IGI_VK_DPAD_RIGHT, "PAD_DPAD_RIGHT", { "D-pad Right", "Direcional direita" }, { "D-pad Right", "Dir. dir." } },
+    { IGI_VK_LSTICK_UP, "PAD_LSTICK_UP", { "Left stick Up", "Anal\xF3gico esq. cima" }, { "Stick Up", "Anal. cima" } },
+    { IGI_VK_LSTICK_DOWN, "PAD_LSTICK_DOWN", { "Left stick Down", "Anal\xF3gico esq. baixo" },
+      { "Stick Down", "Anal. baixo" } },
+    { IGI_VK_LSTICK_LEFT, "PAD_LSTICK_LEFT", { "Left stick Left", "Anal\xF3gico esq. esquerda" },
+      { "Stick Left", "Anal. esq." } },
+    { IGI_VK_LSTICK_RIGHT, "PAD_LSTICK_RIGHT", { "Left stick Right", "Anal\xF3gico esq. direita" },
+      { "Stick Right", "Anal. dir." } },
+    { IGI_VK_REAR_UP, "PAD_REAR_UP", { "Rear touch Up", "Touch traseiro cima" }, { "Rear Up", "Tras. cima" } },
+    { IGI_VK_REAR_DOWN, "PAD_REAR_DOWN", { "Rear touch Down", "Touch traseiro baixo" },
+      { "Rear Down", "Tras. baixo" } },
+    { IGI_VK_NONE, "PAD_NONE", { "Not set", "Nenhum" }, { "Not set", "Nenhum" } },
 };
 #define N_VKEYS (sizeof(vkeys) / sizeof(vkeys[0]))
 
@@ -133,6 +163,8 @@ static const struct {
 static int valid, scheme;
 static uint32_t id_ptr[N_VKEYS], label_ptr[N_VKEYS][2], text_ptr[N_PAD_TEXTS][2];
 static uint32_t list_obj, list_frames;   /* the screen's object, frames since its last update */
+static uint32_t text_buf;                /* guest copy of a key cell's text */
+#define TEXT_BUF_SIZE 160u
 
 int igi_controls_pad_scheme(void)
 {
@@ -184,6 +216,7 @@ void igi_controls_init(void)
     for (unsigned i = 0; i < N_PAD_TEXTS; i++)
         for (unsigned l = 0; l < 2; l++)
             text_ptr[i][l] = scratch_strdup(pad_texts[i].text[l]);
+    text_buf = scratch_alloc(TEXT_BUF_SIZE, 4);
     if (scheme) {
         /* The game copies these into new players and uses them for "Reset to Default". */
         for (uint32_t i = 0; i < DEFAULT_COUNT; i++) {
@@ -355,13 +388,317 @@ void igi_controls_list_scroll(int offset)
     WR32(list_obj + LIST_OFFSET, (uint32_t)offset);
 }
 
-/* The list's bindings into the player's table, as the screen's OK does. */
-static void apply_list(Ctx *c, uint32_t sp, uint32_t obj)
+/* A guest function called from a hook at a function's entry (sp: its stack pointer). */
+static uint32_t call_guest(Ctx *c, uint32_t sp, uint32_t fn, int nargs, const uint32_t *args)
 {
     const uint32_t saved_esp = c->r[4];
     c->r[4] = sp - 64u;   /* below the caller's frame */
-    guest_call(c, GAME_LIST_APPLY, 1, &obj);
+    uint32_t r = guest_call(c, fn, nargs, args);
     c->r[4] = saved_esp;
+    return r;
+}
+
+/* The list's bindings into the player's table, as the screen's OK does. */
+static void apply_list(Ctx *c, uint32_t sp, uint32_t obj)
+{
+    call_guest(c, sp, GAME_LIST_APPLY, 1, &obj);
+}
+
+/* ---- second controls ------------------------------------------------------------ */
+
+static uint32_t second_obj;        /* the list second[] belongs to */
+static uint8_t second[MAX_ROWS];   /* per row: key code of the action's second control, 0 none */
+static int second_request;         /* updates left for a requested second capture to start */
+static int second_row = -1;        /* row whose second control is being captured */
+
+static uint32_t row_count(void)
+{
+    uint32_t n = RD32(ACTION_COUNT_FUNC + 1u);
+    return n < MAX_ROWS ? n : MAX_ROWS;
+}
+
+static uint32_t row_action(uint32_t row)
+{
+    return RD32(ACTION_TABLE + row * KEY_ENTRY_SIZE + 32u);
+}
+
+/* Keyboard code of a bindable key (index into the key table, pad keys
+ * included); 0 for none or another device. */
+static uint8_t index_code(uint32_t idx)
+{
+    uint32_t v;
+    if (idx < KEY_COUNT)
+        v = RD32(KEY_TABLE + idx * KEY_ENTRY_SIZE + 32u);
+    else if (idx - KEY_COUNT < N_VKEYS)
+        v = DEVICE_KEYBOARD << 30 | vkeys[idx - KEY_COUNT].code;
+    else
+        return 0;
+    return v >> 30 == DEVICE_KEYBOARD && (v & 0x3FFFFFFFu) < 256u ? (uint8_t)v : 0u;
+}
+
+static int code_index(uint8_t code)
+{
+    for (unsigned i = 0; i < N_VKEYS; i++)
+        if (vkeys[i].code == code)
+            return (int)(KEY_COUNT + i);
+    for (uint32_t i = 0; i < KEY_COUNT; i++)
+        if (RD32(KEY_TABLE + i * KEY_ENTRY_SIZE + 32u) == (DEVICE_KEYBOARD << 30 | code))
+            return (int)i;
+    return -1;
+}
+
+static uint8_t row_first(uint32_t obj, uint32_t row)
+{
+    return index_code(RD32(obj + LIST_KEY + row * 4u));
+}
+
+static void set_row_first(uint32_t obj, uint32_t row, uint8_t code)
+{
+    int i = code_index(code);
+    if (i >= 0)
+        WR32(obj + LIST_KEY + row * 4u, (uint32_t)i);
+}
+
+/* A menu text (key: guest string) into out. */
+static void menu_text(Ctx *c, uint32_t sp, uint32_t window, uint32_t key, char *out, size_t n)
+{
+    const uint32_t args[2] = { window, key };
+    uint32_t t = key ? call_guest(c, sp, GAME_MENU_TEXT, 2, args) : 0u;
+    snprintf(out, n, "%.60s", t >= 0x10000u ? (const char *)(g_mem + t) : "");
+}
+
+static uint32_t index_name(uint32_t idx)
+{
+    if (idx < KEY_COUNT)
+        return KEY_TABLE + idx * KEY_ENTRY_SIZE;
+    return idx - KEY_COUNT < N_VKEYS ? id_ptr[idx - KEY_COUNT] : 0u;
+}
+
+/* A bindable key's name in a cell with two controls: the pad's brief ones. */
+static void brief_name(Ctx *c, uint32_t sp, uint32_t window, uint32_t idx, char *out, size_t n)
+{
+    if (idx >= KEY_COUNT && idx - KEY_COUNT < N_VKEYS) {
+        unsigned l = window && RD32(window + WINDOW_LANGUAGE) == LANG_PORTUGUESE ? 1u : 0u;
+        snprintf(out, n, "%s", vkeys[idx - KEY_COUNT].brief[l]);
+    } else {
+        menu_text(c, sp, window, index_name(idx), out, n);
+    }
+}
+
+/* The row's key cell: its first control and the second one after a slash, or
+ * "+ " and the prompt while the second one is captured. */
+static void show_row(Ctx *c, uint32_t sp, uint32_t obj, uint32_t row)
+{
+    uint32_t text = RD32(obj + LIST_KEY_TEXT + row * 4u), window = RD32(obj + LIST_WINDOW);
+    uint32_t first = RD32(obj + LIST_KEY + row * 4u);
+    if (!text || !text_buf)
+        return;
+    char a[64], b[64], s[TEXT_BUF_SIZE];
+    if ((int)row == second_row) {
+        menu_text(c, sp, window, TEXT_SELECT_KEY, b, sizeof(b));
+        snprintf(s, sizeof(s), "+ %s", b);
+    } else if (second[row] && code_index(second[row]) >= 0) {
+        brief_name(c, sp, window, first, a, sizeof(a));
+        brief_name(c, sp, window, (uint32_t)code_index(second[row]), b, sizeof(b));
+        snprintf(s, sizeof(s), "%s / %s", a, b);
+    } else {
+        menu_text(c, sp, window, index_name(first), s, sizeof(s));
+    }
+    memcpy(g_mem + text_buf, s, strlen(s) + 1u);
+    const uint32_t args[2] = { text, text_buf };
+    call_guest(c, sp, GAME_SET_TEXT, 2, args);
+}
+
+/* 0x423770: void set_key(obj, row, index): the row's key and its cell's text. */
+int rt_controls_set_key(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret)
+{
+    (void)eax;
+    uint32_t obj = RD32(esp + 4u), row = RD32(esp + 8u);
+    if (!valid || !scheme || obj != second_obj || row >= MAX_ROWS)
+        return 0;
+    if ((int)row == second_row)
+        second_row = -1;   /* the game ended that capture itself (Esc, a mouse button) */
+    if (!second[row])
+        return 0;
+    WR32(obj + LIST_KEY + row * 4u, RD32(esp + 12u));
+    show_row(c, esp, obj, row);
+    c->r[1] = ecx;
+    *ret = RET(esp + 4u, 0u);
+    return 1;
+}
+
+void igi_controls_request_second(void)
+{
+    if (scheme)
+        second_request = 30;   /* the click is seen within some ten updates */
+}
+
+static uint32_t player_table(uint32_t *count_at)
+{
+    uint32_t p = RD32(CURRENT_PLAYER);
+    if (p >= MAX_PLAYERS)
+        return 0;
+    *count_at = PLAYER_COUNT + p * PLAYER_STRIDE;
+    return PLAYER_BINDINGS + p * PLAYER_STRIDE;
+}
+
+/* The player's second controls, as the list gets loaded: an action's second
+ * keyboard entry, when it is a control used nowhere else. */
+static void load_second(uint32_t obj)
+{
+    second_obj = obj;
+    second_row = -1;
+    second_request = 0;
+    memset(second, 0, sizeof(second));
+    uint32_t count_at = 0, table = player_table(&count_at);
+    if (!table)
+        return;
+    uint32_t count = RD32(count_at), rows = row_count();
+    if (count > MAX_BINDINGS)
+        count = MAX_BINDINGS;
+    uint8_t first[MAX_ROWS] = { 0 };
+    for (uint32_t r = 0; r < rows; r++)
+        for (uint32_t i = 0; i < count; i++)
+            if (RD32(table + i * 12u) == row_action(r)) {
+                if (RD32(table + i * 12u + 4u) == DEVICE_KEYBOARD && RD32(table + i * 12u + 8u) < 256u)
+                    first[r] = (uint8_t)RD32(table + i * 12u + 8u);
+                break;
+            }
+    for (uint32_t r = 0; r < rows; r++) {
+        int seen_first = 0;
+        for (uint32_t i = 0; i < count && !second[r]; i++) {
+            uint32_t e = table + i * 12u, code = RD32(e + 8u);
+            if (RD32(e) != row_action(r))
+                continue;
+            if (!seen_first) {
+                seen_first = 1;
+                continue;
+            }
+            if (RD32(e + 4u) != DEVICE_KEYBOARD || code == 0u || code >= 256u || code == IGI_VK_NONE ||
+                code_index((uint8_t)code) < 0)
+                continue;
+            int used = 0;
+            for (uint32_t j = 0; j < rows && !used; j++)
+                used = first[j] == code || second[j] == code;
+            if (!used)
+                second[r] = (uint8_t)code;
+        }
+    }
+}
+
+/* Before the list goes into the player's table: an action's extra keyboard
+ * entries make way for its second control, written after all the first ones
+ * (the game updates each action's first entry, adding none: an action without
+ * one gets "Not set"). */
+static void write_second(uint32_t obj)
+{
+    uint32_t count_at = 0, table = player_table(&count_at);
+    if (obj != second_obj || !table)
+        return;
+    uint32_t count = RD32(count_at), rows = row_count(), n = 0, seen = 0;
+    if (count > MAX_BINDINGS)
+        count = MAX_BINDINGS;
+    uint32_t out[MAX_BINDINGS][3];
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t e = table + i * 12u, action = RD32(e);
+        if (RD32(e + 4u) == DEVICE_KEYBOARD && (seen & action))
+            continue;
+        seen |= action;
+        out[n][0] = action;
+        out[n][1] = RD32(e + 4u);
+        out[n][2] = RD32(e + 8u);
+        n++;
+    }
+    for (uint32_t r = 0; r < rows && n < MAX_BINDINGS; r++)
+        if (!(seen & row_action(r))) {
+            seen |= row_action(r);
+            out[n][0] = row_action(r);
+            out[n][1] = DEVICE_KEYBOARD;
+            out[n][2] = IGI_VK_NONE;
+            n++;
+        }
+    for (uint32_t r = 0; r < rows && n < MAX_BINDINGS; r++)
+        if (second[r]) {
+            out[n][0] = row_action(r);
+            out[n][1] = DEVICE_KEYBOARD;
+            out[n][2] = second[r];
+            n++;
+        }
+    for (uint32_t i = 0; i < n; i++)
+        for (uint32_t k = 0; k < 3u; k++)
+            WR32(table + i * 12u + k * 4u, out[i][k]);
+    WR32(count_at, n);
+}
+
+/* While the second control of second_row is captured: the first key down (Esc
+ * left to the game, which cancels). A control of that row clears the second
+ * one; a control of another action is swapped with this row's second (another
+ * action's first control left without one takes that action's second, or Not
+ * set). 1 if the capture ended. */
+static int capture_second(Ctx *c, uint32_t sp, uint32_t obj)
+{
+    uint32_t row = (uint32_t)second_row, rows = row_count();
+    uint8_t k = 0;
+    for (uint32_t i = 0; i < KEY_COUNT + N_VKEYS && !k; i++) {
+        uint8_t code = index_code(i);
+        if (code && code != DIK_ESCAPE && code != 0xDBu && code != 0xDCu && (g_mem[KEY_STATE + code] & 0x80u))
+            k = code;
+    }
+    if (!k || row >= rows)
+        return 0;
+    uint8_t old = second[row];
+    int other = -1;
+    if (k == row_first(obj, row) || k == old) {
+        second[row] = 0;
+    } else {
+        for (uint32_t j = 0; j < rows && other < 0; j++) {
+            if (j == row)
+                continue;
+            if (row_first(obj, j) == k) {
+                other = (int)j;
+                if (old) {
+                    set_row_first(obj, j, old);
+                } else if (second[j]) {
+                    set_row_first(obj, j, second[j]);
+                    second[j] = 0;
+                } else {
+                    set_row_first(obj, j, IGI_VK_NONE);
+                }
+            } else if (second[j] == k) {
+                other = (int)j;
+                second[j] = old;
+            }
+        }
+        second[row] = k;
+    }
+    second_row = -1;
+    g_mem[obj + LIST_CAPTURING] = 0;
+    WR32(obj + LIST_SELECTED, 0xFFFFFFFFu);
+    const uint32_t window = RD32(obj + LIST_WINDOW), sound[3] = { SOUND_SELECT, 0u, 0u };
+    call_guest(c, sp, GAME_MOUSE_RESET, 0, NULL);
+    if (window)
+        call_guest(c, sp, GAME_WINDOW_IDLE, 1, &window);
+    call_guest(c, sp, GAME_PLAY_SOUND, 3, sound);
+    show_row(c, sp, obj, row);
+    if (other >= 0)
+        show_row(c, sp, obj, (uint32_t)other);
+    rt_log("controls: row %u second control %02X", row, second[row]);
+    return 1;
+}
+
+/* A first control captured by the game: when it was another row's second, that
+ * row takes this row's old first control instead (as the game swaps first ones). */
+static void first_captured(Ctx *c, uint32_t sp, uint32_t obj, uint32_t row, uint8_t before)
+{
+    uint8_t k = row_first(obj, row);
+    if (!k || k == before)
+        return;
+    for (uint32_t j = 0; j < row_count(); j++)
+        if (second[j] == k) {
+            second[j] = before != IGI_VK_NONE ? before : 0u;
+            show_row(c, sp, obj, j);
+            break;
+        }
 }
 
 void igi_controls_end_frame(void)
@@ -378,10 +715,35 @@ void igi_controls_probe(Ctx *c, uint32_t func, uint32_t sp)
     switch (func) {
     case 0x004234E0u: { /* controls screen update(obj) */
         static int was_capturing, reset_done;
+        static uint32_t capture_row;
+        static uint8_t first_before;
         uint32_t obj = RD32(sp + 4u);
         int capturing = g_mem[obj + LIST_CAPTURING] != 0;
         if (obj != list_obj)
             was_capturing = reset_done = 0;
+        if (scheme && obj == second_obj) {
+            if (g_mem[obj + LIST_RESET]) {   /* "Reset to Default": single controls */
+                memset(second, 0, sizeof(second));
+                second_row = -1;
+            }
+            if (capturing && !was_capturing) {
+                capture_row = RD32(obj + LIST_SELECTED);
+                first_before = capture_row < row_count() ? row_first(obj, capture_row) : 0u;
+                if (second_request && capture_row < row_count()) {
+                    second_row = (int)capture_row;
+                    show_row(c, sp, obj, capture_row);
+                }
+                second_request = 0;
+            } else if (!capturing && second_request) {
+                second_request--;
+            }
+            if (capturing && second_row >= 0) {
+                if (capture_second(c, sp, obj))
+                    capturing = 0;
+            } else if (was_capturing && !capturing && capture_row < row_count()) {
+                first_captured(c, sp, obj, capture_row, first_before);
+            }
+        }
         /* With the pad scheme a change counts at once (the screen's Cancel
          * keeps it): Circle goes back like on a console, keeping the bindings. */
         if (scheme && ((was_capturing && !capturing) || reset_done))
@@ -393,8 +755,14 @@ void igi_controls_probe(Ctx *c, uint32_t func, uint32_t sp)
         break;
     }
     case 0x00423DB0u:   /* controls screen: bindings into the list(obj) */
-        if (scheme)
+        if (scheme) {
             replace_keyboard_bindings();
+            load_second(RD32(sp + 4u));
+        }
+        break;
+    case 0x00423EB0u:   /* controls screen: the list into the player's bindings(obj) */
+        if (scheme)
+            write_second(RD32(sp + 4u));
         break;
     case 0x004ED5E0u: { /* input: bind(port, count, table, ...) for play */
         if (!scheme)

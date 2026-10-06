@@ -113,11 +113,18 @@ static void list_point_row(const IgiControlsList *l, int row)
 
 /* Controls on the controls screen; 1 if handled. Cross clicks wherever the cursor
  * is (a row, or what the right stick or a tap put it on: Invert Look, Look
- * Sensitivity, Reset to Default, OK); the D-pad walks the rows, scrolling at the
- * ends, and brings a cursor that is elsewhere back to the list. */
+ * Sensitivity, Reset to Default, OK); Triangle on a row clicks it for the
+ * action's second control; the D-pad walks the rows, scrolling at the ends, and
+ * brings a cursor that is elsewhere back to the list. */
 static int list_control(const IgiControlsList *l, PadControl control, uint8_t *mouse_sent)
 {
-    if (control == PAD_CROSS) {
+    int32_t mx, my;
+    list_cursor(l, &mx, &my);
+    int visible = l->h / l->row_h;
+    int on_row = mx >= l->x && mx < l->x + l->w && my >= l->y && my < l->y + visible * l->row_h;
+    if (control == PAD_CROSS || (control == PAD_TRIANGLE && on_row)) {
+        if (control == PAD_TRIANGLE)
+            igi_controls_request_second();   /* the click's capture sets the second control */
         pad_mouse_button(0, 1);
         *mouse_sent = 1;
         return 1;
@@ -126,10 +133,7 @@ static int list_control(const IgiControlsList *l, PadControl control, uint8_t *m
     int down = control == PAD_DPAD_DOWN || control == PAD_LSTICK_DOWN;
     if (!up && !down)
         return 0;
-    int32_t mx, my;
-    list_cursor(l, &mx, &my);
-    int visible = l->h / l->row_h;
-    if (mx < l->x || mx >= l->x + l->w || my < l->y || my >= l->y + visible * l->row_h) {
+    if (!on_row) {
         list_point_row(l, my < l->y ? 0 : my >= l->y + visible * l->row_h ? visible - 1 : (my - l->y) / l->row_h);
         return 1;
     }

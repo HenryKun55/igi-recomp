@@ -180,6 +180,7 @@ void rt_probe(Ctx *c, uint32_t func)
         igi_controls_probe(c, func, sp);
         return;   /* every frame of the controls screen */
     case 0x00423DB0u:
+    case 0x00423EB0u:
     case 0x004ED5E0u:
         igi_controls_probe(c, func, sp);
         break;

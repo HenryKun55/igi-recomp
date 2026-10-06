@@ -483,6 +483,7 @@ void igi_language_probe(Ctx *c, uint32_t func, uint32_t sp);   /* its entry hook
 int rt_controls_key_count(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
 int rt_controls_key_entry(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
 int rt_controls_text(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
+int rt_controls_set_key(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
 
 /* Hand-decompiled game functions (runtime/src/native_*.c, NATIVE table in gen.py),
  * same convention. g_igi_native = 0 (IGI_NATIVE=0) makes them all decline. */
