@@ -10,7 +10,8 @@
  * The controls screen only answers the mouse in the game. With the pad scheme
  * the D-pad (or left stick) moves the cursor over the binding list's rows,
  * scrolling it at the ends, and Cross clicks under the cursor (the right stick
- * and the touchscreen reach the screen's other items). */
+ * and the touchscreen reach the screen's other items); Triangle on a row clicks
+ * it to capture the action's second control. */
 #include "pad_input.h"
 #include "igi_controls.h"
 #include "igi_fixes.h"

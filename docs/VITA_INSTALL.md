@@ -104,6 +104,22 @@ Controls; pause menu: Controls):
 3. Press the control you want for that action. A control already used by another
    action swaps with it, so no control does two things. **Start** cancels.
 
+Each action can also have a **second control**, so two buttons do the same
+thing: move to the action and press **Triangle** instead of Cross (the cell
+shows "+ Press a button"), then press the second control. The cell then shows
+both, e.g. "R / Square" (stick, D-pad and rear touch names are shortened there:
+"Stick Up", "D-pad Up", "Rear Up"). The rules:
+
+- **Cross** then a control always sets the first control; **Triangle** then a
+  control sets the second one.
+- Pressing a control the action already has (its first or its second) with
+  Triangle removes the second control.
+- A control used by another action is taken from it: that action gets the old
+  second control in its place (or, if there was none, keeps its own second
+  control as its only one, or shows "Not set"). Taking another action's second
+  control as a first control works the same way.
+- **Reset to Default Settings** removes every second control.
+
 Changes count at once; **Circle** goes back, keeping them. On this screen the
 right stick (or a tap) moves the cursor to the other items and Cross clicks
 them: **Reset to Default Settings** brings back the table above. Actions without a control show
