@@ -3,6 +3,7 @@
 #if defined(__vita__)
 #include "platform.h"
 #include "bench.h"
+#include "igi_fixes.h"
 #include "pad_input.h"
 #include "runtime.h"
 #include "vita_bootui.h"
@@ -170,6 +171,7 @@ void platform_init(void)
     scePowerSetGpuClockFrequency(222);
     scePowerSetGpuXbarClockFrequency(166);
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG_WIDE);
+    sceCtrlSetSamplingModeExt(SCE_CTRL_MODE_ANALOG_WIDE);   /* for L2/R2/L3/R3 (Ext2 buffer) */
     boot_picture_show();
     /* The version and the update check over the boot picture (vita_bootui.c). */
     vita_bootui_run(boot_fb_base);
@@ -293,10 +295,25 @@ static const struct {
 };
 #define N_BUTTONS (sizeof(button_map) / sizeof(button_map[0]))
 
+/* Spare external-controller buttons, read with sceCtrlPeekBufferPositiveExt2.
+ * On that buffer the Vita's own L/R triggers appear as L1/R1 (bits 0x400/0x800,
+ * already PAD_L/PAD_R above), so L2/R2/L3/R3 never fire on a handheld and only
+ * reach a player who plugs in a controller / uses a PS TV. Unbound by default. */
+static const struct {
+    uint32_t button;
+    PadControl control;
+} ext_button_map[] = {
+    { SCE_CTRL_L2, PAD_L2 },
+    { SCE_CTRL_R2, PAD_R2 },
+    { SCE_CTRL_L3, PAD_L3 },
+    { SCE_CTRL_R3, PAD_R3 },
+};
+#define N_EXT_BUTTONS (sizeof(ext_button_map) / sizeof(ext_button_map[0]))
+
 /* Left stick directions: up, down, left, right. */
 static const PadControl stick_controls[4] = { PAD_LSTICK_UP, PAD_LSTICK_DOWN, PAD_LSTICK_LEFT, PAD_LSTICK_RIGHT };
 
-static uint32_t prev_buttons;
+static uint32_t prev_buttons, prev_ext_buttons;
 static uint8_t stick_held[4];
 
 #define DEADZONE 28
@@ -335,6 +352,8 @@ static void mouse_motion(int32_t mx, int32_t my)
 
 static int front_touch_on = 1, rear_touch_on = 1, aspect_keep;
 static int rear_mid_y = 544;     /* rear panel: above = zoom in, below = zoom out */
+static int rear_mid_x = 960;     /* four-zone mode: left / right of this */
+static int rear_zones = 2;       /* igi.cfg rear_zones= (2 up/down, or 4 quadrants) */
 static int front_w = 1920, front_h = 1088;
 static float stick_sensitivity = 1.0f;   /* igi.cfg stick_sensitivity= */
 
@@ -348,6 +367,8 @@ static void touch_init(void)
                 front_touch_on = line[12] != '0';
             else if (!strncmp(line, "rear_touch=", 11))
                 rear_touch_on = line[11] != '0';
+            else if (!strncmp(line, "rear_zones=", 11))
+                rear_zones = line[11] == '4' ? 4 : 2;
             else if (!strncmp(line, "aspect=", 7))
                 aspect_keep = !strncmp(line + 7, "keep", 4);   /* as render_gl.c: fill unless keep */
             else if (!strncmp(line, "stick_sensitivity=", 18))
@@ -364,14 +385,17 @@ static void touch_init(void)
         front_w = info.maxAaX + 1;
         front_h = info.maxAaY + 1;
     }
-    if (sceTouchGetPanelInfo(SCE_TOUCH_PORT_BACK, &info) >= 0 && info.maxAaY > info.minAaY)
+    if (sceTouchGetPanelInfo(SCE_TOUCH_PORT_BACK, &info) >= 0 && info.maxAaY > info.minAaY) {
         rear_mid_y = (info.minAaY + info.maxAaY) / 2;
+        if (info.maxAaX > info.minAaX)
+            rear_mid_x = (info.minAaX + info.maxAaX) / 2;
+    }
     if (front_touch_on)
         sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, SCE_TOUCH_SAMPLING_STATE_START);
     if (rear_touch_on)
         sceTouchSetSamplingState(SCE_TOUCH_PORT_BACK, SCE_TOUCH_SAMPLING_STATE_START);
-    rt_log("touch: front %s (%dx%d), rear %s (zoom in above y=%d)", front_touch_on ? "on" : "off", front_w, front_h,
-           rear_touch_on ? "on" : "off", rear_mid_y);
+    rt_log("touch: front %s (%dx%d), rear %s (%d zones, split y=%d x=%d)", front_touch_on ? "on" : "off", front_w,
+           front_h, rear_touch_on ? "on" : "off", rear_zones, rear_mid_y, rear_mid_x);
 }
 
 /* Front panel position -> game screen position, through the image's place on
@@ -388,32 +412,54 @@ static void touch_to_game(int tx, int ty, int32_t *gx, int32_t *gy)
     *gy = y < 0 ? 0 : y >= mode_h ? mode_h - 1 : y;
 }
 
+/* How the finger drives the mouse while the touch is down. */
+enum FrontMode { FRONT_LOOK, FRONT_MENU, FRONT_COMPUTER };
+
 /* Front: in play a drag turns the view like the mouse; in the menus the cursor
  * goes where the finger is and a tap clicks (button down once the cursor is
- * there, up when the finger lifts). */
+ * there, up when the finger lifts). The map computer keeps its own cursor and
+ * moves it only by relative motion (igi_computer_active, igi_fixes.h), so there
+ * the finger works like a trackpad: a drag moves that cursor, a tap (a short
+ * touch that barely moved) clicks under it, landing on the computer's tabs. */
+#define TAP_MOVE 24          /* a touch that moves within this (panel units) is a tap */
+#define TAP_FRAMES 20        /* ... and lasts at most this many input polls */
+#define TAP_CLICK_HOLD 4     /* input polls the tap click is held down (the game must poll it) */
+static int tap_click;        /* > 0: a computer tap click is held, released after this many polls */
 static void front_touch(void)
 {
-    static int active, menu, clicking, last_x, last_y;
+    static int active, clicking, last_x, last_y, moved, frames;
+    static enum FrontMode mode;
     static float acc_x, acc_y;
+    /* Release a held computer tap click once the game has had polls to see it. */
+    if (tap_click && --tap_click == 0)
+        pad_mouse_button(0, 0);
     SceTouchData t;
     int down = sceTouchPeek(SCE_TOUCH_PORT_FRONT, &t, 1) >= 0 && t.reportNum > 0;
     if (!down) {
         if (clicking)
             pad_mouse_button(0, 0);
+        /* A tap in the computer clicks on release, where the cursor ended up; the
+         * button is held a few polls so the game's own input poll catches it. */
+        if (active && mode == FRONT_COMPUTER && !clicking && !tap_click && moved <= TAP_MOVE &&
+            frames <= TAP_FRAMES && igi_computer_active()) {
+            pad_mouse_button(0, 1);
+            tap_click = TAP_CLICK_HOLD;
+        }
         active = clicking = 0;
         return;
     }
     int x = t.report[0].x, y = t.report[0].y;
     if (!active) {
         active = 1;
-        menu = !pad_in_gameplay();
+        mode = igi_computer_active() ? FRONT_COMPUTER : pad_in_gameplay() ? FRONT_LOOK : FRONT_MENU;
         last_x = x;
         last_y = y;
+        moved = frames = 0;
         acc_x = acc_y = 0.0f;
-        if (!menu)
+        if (mode == FRONT_LOOK)
             return;
     }
-    if (menu) {
+    if (mode == FRONT_MENU) {
         int32_t gx, gy;
         touch_to_game(x, y, &gx, &gy);
         if (gx != g_mouse.x || gy != g_mouse.y) {
@@ -430,8 +476,12 @@ static void front_touch(void)
         }
         return;
     }
-    acc_x += (float)(x - last_x) * TOUCH_LOOK_SCALE;
-    acc_y += (float)(y - last_y) * TOUCH_LOOK_SCALE;
+    /* FRONT_LOOK and FRONT_COMPUTER: relative motion from the finger's drag. */
+    int dx = x - last_x, dy = y - last_y;
+    moved += (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
+    frames++;
+    acc_x += (float)dx * TOUCH_LOOK_SCALE;
+    acc_y += (float)dy * TOUCH_LOOK_SCALE;
     last_x = x;
     last_y = y;
     int32_t mx = (int32_t)acc_x, my = (int32_t)acc_y;
@@ -440,14 +490,22 @@ static void front_touch(void)
     mouse_motion(mx, my);
 }
 
-/* Rear: the upper and lower halves are two controls (defaults: zoom in, zoom out). */
+/* Rear: two zones (upper/lower halves, defaults zoom in / zoom out) or, with
+ * rear_zones=4, four quadrant controls (unbound by default, see igi_controls.h). */
 static void rear_touch(void)
 {
     static int held = -1;
     SceTouchData t;
     int want = -1;
-    if (sceTouchPeek(SCE_TOUCH_PORT_BACK, &t, 1) >= 0 && t.reportNum > 0)
-        want = t.report[0].y < rear_mid_y ? PAD_REAR_UP : PAD_REAR_DOWN;
+    if (sceTouchPeek(SCE_TOUCH_PORT_BACK, &t, 1) >= 0 && t.reportNum > 0) {
+        int up = t.report[0].y < rear_mid_y;
+        if (rear_zones == 4) {
+            int left = t.report[0].x < rear_mid_x;
+            want = up ? (left ? PAD_REAR_UL : PAD_REAR_UR) : (left ? PAD_REAR_DL : PAD_REAR_DR);
+        } else {
+            want = up ? PAD_REAR_UP : PAD_REAR_DOWN;
+        }
+    }
     if (want == held)
         return;
     if (held >= 0)
@@ -514,6 +572,18 @@ void platform_pump(void)
     if (debug && (pad.buttons & trace) == trace && (prev_buttons & trace) != trace && !g_trace_next_frame)
         g_trace_next_frame = 1;   /* log the next frame's draws and save its image */
     prev_buttons = pad.buttons;
+
+    /* Spare external-controller buttons (L2/R2/L3/R3), from the extended buffer. */
+    SceCtrlData ext;
+    if (sceCtrlPeekBufferPositiveExt2(0, &ext, 1) >= 0) {
+        for (unsigned i = 0; i < N_EXT_BUTTONS; i++) {
+            uint32_t b = ext_button_map[i].button;
+            int down = (ext.buttons & b) != 0;
+            if (down != ((prev_ext_buttons & b) != 0))
+                pad_control(ext_button_map[i].control, down);
+        }
+        prev_ext_buttons = ext.buttons;
+    }
 
     /* Left stick: four controls, one per direction. */
     int lx = deadzone(pad.lx), ly = deadzone(pad.ly);

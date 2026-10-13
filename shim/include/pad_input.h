@@ -30,6 +30,16 @@ typedef enum PadControl {
     PAD_LSTICK_RIGHT,
     PAD_REAR_UP,
     PAD_REAR_DOWN,
+    /* Spare inputs, unbound by default (see igi_controls.h): external pad
+     * buttons and the four rear-touch zones (rear_zones=4). */
+    PAD_L2,
+    PAD_R2,
+    PAD_L3,
+    PAD_R3,
+    PAD_REAR_UL,
+    PAD_REAR_UR,
+    PAD_REAR_DL,
+    PAD_REAR_DR,
     PAD_CONTROL_COUNT
 } PadControl;
 

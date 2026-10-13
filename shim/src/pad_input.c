@@ -45,6 +45,14 @@ static const uint8_t control_key[PAD_CONTROL_COUNT] = {
     [PAD_LSTICK_RIGHT] = IGI_VK_LSTICK_RIGHT,
     [PAD_REAR_UP] = IGI_VK_REAR_UP,
     [PAD_REAR_DOWN] = IGI_VK_REAR_DOWN,
+    [PAD_L2] = IGI_VK_L2,
+    [PAD_R2] = IGI_VK_R2,
+    [PAD_L3] = IGI_VK_L3,
+    [PAD_R3] = IGI_VK_R3,
+    [PAD_REAR_UL] = IGI_VK_REAR_UL,
+    [PAD_REAR_UR] = IGI_VK_REAR_UR,
+    [PAD_REAR_DL] = IGI_VK_REAR_DL,
+    [PAD_REAR_DR] = IGI_VK_REAR_DR,
 };
 
 /* ---- output: keys and mouse buttons, reference counted -------------------- */

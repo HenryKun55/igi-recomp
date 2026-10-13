@@ -29,6 +29,20 @@
 #define IGI_VK_REAR_UP 0x6Cu
 #define IGI_VK_REAR_DOWN 0x6Du
 #define IGI_VK_NONE 0x6Eu   /* "Not set": what actions without a pad control are bound to */
+/* Spare inputs, UNBOUND by default: a player gives an action a second control
+ * with one of these without stealing a control from another action (every
+ * default control is used once, so any other control would be moved). External
+ * pad buttons read with sceCtrlPeekBufferPositiveExt2 (L2/R2/L3/R3 never fire on
+ * a handheld, only on a PS TV / DualShock) and the extra rear-touch zones of the
+ * four-zone mode (rear_zones=4 in igi.cfg; see shim/src/platform_vita.c). */
+#define IGI_VK_L2 0x6Fu
+#define IGI_VK_R2 0x70u
+#define IGI_VK_L3 0x71u
+#define IGI_VK_R3 0x72u
+#define IGI_VK_REAR_UL 0x73u
+#define IGI_VK_REAR_UR 0x74u
+#define IGI_VK_REAR_DL 0x75u
+#define IGI_VK_REAR_DR 0x76u
 
 /* 1 when the pad's virtual keys are the default bindings and keyboard bindings
  * get replaced (the Vita; IGI_PAD_CONTROLS=1 elsewhere, for testing). */

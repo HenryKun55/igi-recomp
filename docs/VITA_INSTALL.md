@@ -97,7 +97,13 @@ right stick to move the cursor, tap the front touchscreen to click.
 
 Every button, the D-pad, the left stick's four directions and the rear touchpad's
 two halves can be bound to any action in **Controls** (main menu: Configuration →
-Controls; pause menu: Controls):
+Controls; pause menu: Controls). A few **spare inputs** are also listed, unbound
+by default, so you can give an action a second control without taking one away
+from another action (see below): the external-controller buttons **L2, R2, L3,
+R3** (they do nothing on a handheld Vita; they reach the list only from a
+DualShock or on a PS TV) and, with `rear_zones=4` in `igi.cfg`, the four
+rear-touch quadrants (**Rear up-left**, **Rear up-right**, **Rear down-left**,
+**Rear down-right**) in place of the two halves.
 
 1. Move to an action with the D-pad (the list scrolls), or tap it.
 2. Press **Cross**: the game asks for a button.
@@ -108,7 +114,9 @@ Each action can also have a **second control**, so two buttons do the same
 thing: move to the action and press **Triangle** instead of Cross (the cell
 shows "+ Press a button"), then press the second control. The cell then shows
 both, e.g. "R / Square" (stick, D-pad and rear touch names are shortened there:
-"Stick Up", "D-pad Up", "Rear Up"). The rules:
+"Stick Up", "D-pad Up", "Rear Up"). To add a second control without disturbing
+another action, use one of the spare inputs (L2/R2/L3/R3 or, with
+`rear_zones=4`, a rear quadrant). The rules:
 
 - **Cross** then a control always sets the first control; **Triangle** then a
   control sets the second one.
@@ -145,6 +153,7 @@ Create `ux0:data/igi/igi.cfg` (a text file, one setting per line):
 | `update_check=0` | No check for a new version at start-up (default: on) |
 | `front_touch=0` | Front touchscreen off |
 | `rear_touch=0` | Rear touchpad off (if you rest your fingers on it) |
+| `rear_zones=4` | Split the rear touchpad into four quadrants (four bindable controls) instead of the two halves. The quadrants are unbound by default, so bind them in Controls; the two-half default (zoom in / zoom out) is `rear_zones=2` |
 | `stick_sensitivity=0.7` | Right stick look speed in gameplay, as a multiplier (default 1.0; the game's Look Sensitivity applies on top). The menu cursor speed is fixed |
 
 ## Updates

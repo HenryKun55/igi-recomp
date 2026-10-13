@@ -122,6 +122,19 @@ static const VKey vkeys[] = {
     { IGI_VK_REAR_UP, "PAD_REAR_UP", { "Rear touch Up", "Touch traseiro cima" }, { "Rear Up", "Tras. cima" } },
     { IGI_VK_REAR_DOWN, "PAD_REAR_DOWN", { "Rear touch Down", "Touch traseiro baixo" },
       { "Rear Down", "Tras. baixo" } },
+    /* Spare inputs (unbound by default). */
+    { IGI_VK_L2, "PAD_L2", { "L2", "L2" }, { "L2", "L2" } },
+    { IGI_VK_R2, "PAD_R2", { "R2", "R2" }, { "R2", "R2" } },
+    { IGI_VK_L3, "PAD_L3", { "L3", "L3" }, { "L3", "L3" } },
+    { IGI_VK_R3, "PAD_R3", { "R3", "R3" }, { "R3", "R3" } },
+    { IGI_VK_REAR_UL, "PAD_REAR_UL", { "Rear touch up-left", "Touch tras. sup. esq." },
+      { "Rear up-left", "Tras. sup. esq." } },
+    { IGI_VK_REAR_UR, "PAD_REAR_UR", { "Rear touch up-right", "Touch tras. sup. dir." },
+      { "Rear up-right", "Tras. sup. dir." } },
+    { IGI_VK_REAR_DL, "PAD_REAR_DL", { "Rear touch down-left", "Touch tras. inf. esq." },
+      { "Rear down-left", "Tras. inf. esq." } },
+    { IGI_VK_REAR_DR, "PAD_REAR_DR", { "Rear touch down-right", "Touch tras. inf. dir." },
+      { "Rear down-right", "Tras. inf. dir." } },
     { IGI_VK_NONE, "PAD_NONE", { "Not set", "Nenhum" }, { "Not set", "Nenhum" } },
 };
 #define N_VKEYS (sizeof(vkeys) / sizeof(vkeys[0]))
