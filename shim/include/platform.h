@@ -10,6 +10,9 @@ void platform_show_window(int show);
 void platform_set_title(const char *title);
 /* Stop audio before exiting; on the Vita this also ends the process. */
 void platform_shutdown(void);
+/* Pause (1) or resume (0) the audio device (dsound.c). Used by the Vita suspend
+ * handler to stop feeding the audio hardware while the system is asleep. */
+void dsound_audio_pause(int pause);
 
 /* Switch the game's back-buffer resolution; creates the GL context on first use. */
 void platform_set_video_mode(int w, int h);

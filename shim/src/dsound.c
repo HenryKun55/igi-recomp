@@ -243,6 +243,15 @@ static int audio_open(void)
     return 1;
 }
 
+/* Stop (pause == 1) or resume (0) the SDL audio callback. Used by the Vita
+ * suspend handler so the mixer stops feeding sceAudioOut while the system is
+ * asleep or the app is in the background. No-op before the device is open. */
+void dsound_audio_pause(int pause)
+{
+    if (dev)
+        SDL_PauseAudioDevice(dev, pause ? 1 : 0);
+}
+
 /* ---- IDirectSoundBuffer ------------------------------------------------- */
 
 static SoundBuffer *buf(uint32_t obj) { return (SoundBuffer *)com_host(obj); }
