@@ -16,6 +16,7 @@
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/power.h>
 #include <psp2/touch.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -164,6 +165,97 @@ static void boot_picture_show(void)
     boot_fb_base = base;
 }
 
+/* ---- suspend / resume ----------------------------------------------------
+ * The PS button (background the app) and sleep (power button or auto-sleep)
+ * suspend the process. While suspended the system tears down the GXM pipeline
+ * and takes the display away; a render thread that keeps submitting GPU scenes
+ * and calling sceDisplaySetFrameBuf into that dead context hangs the GPU and can
+ * force a reboot. We register a ScePower callback to learn about it.
+ *
+ * On SUSPEND we park the game loop at its input checkpoint and pause audio, so
+ * no new GPU or audio work is issued around the suspend window.
+ *
+ * On RESUME we exit the process cleanly. The private vitaGL fork has no
+ * teardown/reinit entry point (no vglEnd), so the lost GXM context, render
+ * target, shader patcher and every GPU-resident texture/buffer cannot be
+ * rebuilt in place; attempting to draw with them is exactly what hangs the
+ * system. A clean sceKernelExitProcess drops the user back to the LiveArea to
+ * relaunch -- far better than a hard reboot. See the final notes for why an
+ * in-place resume is not attempted with this vitaGL build.
+ *
+ * The callback is a kernel callback: it only runs while a thread sits in a
+ * *CB syscall, so a dedicated thread loops on sceKernelDelayThreadCB. */
+
+static _Atomic int g_suspended;      /* 1 while the app is backgrounded/asleep */
+static _Atomic int g_resume_exit;    /* 1 once a resume was seen: exit the process */
+static SceUID power_cb_id = -1;
+
+/* Bits that mean "going away" and "coming back" in the ScePower callback arg. */
+#define PWR_SUSPEND_BITS (SCE_POWER_CB_APP_SUSPEND | SCE_POWER_CB_SYSTEM_SUSPEND)
+#define PWR_RESUME_BITS \
+    (SCE_POWER_CB_APP_RESUME | SCE_POWER_CB_SYSTEM_RESUME | SCE_POWER_CB_AFTER_SYSTEM_RESUME | \
+     SCE_POWER_CB_APP_RESUMING | SCE_POWER_CB_SYSTEM_RESUMING)
+
+static int power_callback(int notify_id, int notify_count, int arg, void *user)
+{
+    (void)notify_id;
+    (void)notify_count;
+    (void)user;
+    if (arg & PWR_SUSPEND_BITS) {
+        if (!atomic_exchange(&g_suspended, 1)) {
+            rt_log("power: suspend (arg %08X) -- pausing", (unsigned)arg);
+            dsound_audio_pause(1);
+        }
+    }
+    if (arg & PWR_RESUME_BITS) {
+        /* Note only; the exit happens on the game thread (see vita_power_checkpoint),
+         * so GPU/audio teardown runs on the right thread, not in the callback. */
+        atomic_store(&g_suspended, 0);
+        if (!atomic_exchange(&g_resume_exit, 1))
+            rt_log("power: resume (arg %08X) -- exiting to relaunch", (unsigned)arg);
+    }
+    return 0;
+}
+
+static int power_cb_thread(SceSize args, void *argp)
+{
+    (void)args;
+    (void)argp;
+    power_cb_id = sceKernelCreateCallback("igi_power_cb", 0, power_callback, NULL);
+    if (power_cb_id < 0 || scePowerRegisterCallback(power_cb_id) < 0) {
+        rt_log("power: could not register callback (%08X)", (unsigned)power_cb_id);
+        return 0;
+    }
+    rt_log("power: suspend/resume callback registered");
+    for (;;)
+        sceKernelDelayThreadCB(1000 * 1000);   /* pump callbacks; wakes to run them */
+    return 0;
+}
+
+static void power_init(void)
+{
+    SceUID t = sceKernelCreateThread("igi_power", power_cb_thread, 0x10000100, 0x2000, 0,
+                                     SCE_KERNEL_CPU_MASK_USER_2, NULL);
+    if (t >= 0)
+        sceKernelStartThread(t, 0, NULL);
+    else
+        rt_log("power: could not start callback thread (%08X)", (unsigned)t);
+}
+
+/* Called from the game thread's input pump. If a resume happened, end the
+ * process cleanly here (the loop is quiescent and audio already paused). While
+ * merely suspended -- no resume yet -- idle without issuing work. */
+static void vita_power_checkpoint(void)
+{
+    /* Idle without issuing work while merely suspended (no resume yet). */
+    while (atomic_load(&g_suspended) && !atomic_load(&g_resume_exit))
+        sceKernelDelayThread(50 * 1000);
+    if (atomic_load(&g_resume_exit)) {
+        rt_log("power: clean exit after resume");
+        platform_shutdown();   /* stops the render thread, then exits the process */
+    }
+}
+
 void platform_init(void)
 {
     scePowerSetArmClockFrequency(444);
@@ -177,6 +269,7 @@ void platform_init(void)
     vita_bootui_run(boot_fb_base);
     if (SDL_Init(SDL_INIT_AUDIO | SDL_INIT_TIMER) != 0)
         rt_fatal(NULL, "SDL_Init: %s", SDL_GetError());
+    power_init();
 }
 
 void platform_create_window(int w, int h, const char *title)
@@ -541,6 +634,7 @@ void platform_pump(void)
 {
     static uint64_t last_look, last_pump;
     static int touch_ready;
+    vita_power_checkpoint();   /* park the loop while suspended; exit after a resume */
     platform_scripted_input();
     if (bench_enabled())
         return;   /* the benchmark drives the game; the pad would disturb it */
