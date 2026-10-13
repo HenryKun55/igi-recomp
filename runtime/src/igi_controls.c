@@ -60,10 +60,37 @@
 #define MAX_PLAYERS 8u
 #define MAX_BINDINGS 64u
 #define DEVICE_KEYBOARD 1u
-#define LANG_ENGLISH 0u              /* language indices (runtime/src/igi_language.c) */
+/* The game's language ids (runtime/src/igi_language.c): ENGLISH GERMAN FRENCH
+ * ITALIAN SPANISH USA, 0..5, plus the port's PORTUGUESE at 6. */
+#define LANG_ENGLISH 0u
+#define LANG_GERMAN 1u
+#define LANG_FRENCH 2u
+#define LANG_ITALIAN 3u
+#define LANG_SPANISH 4u
 #define LANG_USA 5u
 #define LANG_PORTUGUESE 6u
 #define WINDOW_LANGUAGE 0x27E4u     /* language index in a menu window */
+
+/* Column of the name tables below for each game language (USA shares English). */
+#define L_EN 0
+#define L_PT 1
+#define L_FR 2
+#define L_DE 3
+#define L_IT 4
+#define L_ES 5
+#define N_LANGS 6
+
+static unsigned lang_col(uint32_t lang)
+{
+    switch (lang) {
+    case LANG_PORTUGUESE: return L_PT;
+    case LANG_FRENCH:     return L_FR;
+    case LANG_GERMAN:     return L_DE;
+    case LANG_ITALIAN:    return L_IT;
+    case LANG_SPANISH:    return L_ES;
+    default:              return L_EN;   /* ENGLISH, USA, anything else */
+    }
+}
 
 /* Controls screen object. */
 #define LIST_X 0x20u
@@ -93,49 +120,102 @@
 #define TEXT_SELECT_KEY 0x0053B8D0u    /* "Select a key or button" */
 #define SOUND_SELECT 0x0053B5D8u       /* "menu_sel2" */
 
+/* Each name has a column per language (L_EN L_PT L_FR L_DE L_IT L_ES); accented
+ * letters are cp1252, the encoding of the game's menu fonts. */
 typedef struct VKey {
     uint8_t code;
-    const char *id;      /* constant name (config.qvm stores the number) */
-    const char *label[2];   /* shown in the controls screen: English, Portuguese (cp1252) */
-    const char *brief[2];   /* the same, shorter, in a cell with two controls */
+    const char *id;             /* constant name (config.qvm stores the number) */
+    const char *label[N_LANGS]; /* shown in the controls screen */
+    const char *brief[N_LANGS]; /* the same, shorter, in a cell with two controls */
 } VKey;
 
 static const VKey vkeys[] = {
-    { IGI_VK_CROSS, "PAD_CROSS", { "Cross", "Xis" }, { "Cross", "Xis" } },
-    { IGI_VK_CIRCLE, "PAD_CIRCLE", { "Circle", "C\xEDrculo" }, { "Circle", "C\xEDrculo" } },
-    { IGI_VK_SQUARE, "PAD_SQUARE", { "Square", "Quadrado" }, { "Square", "Quadrado" } },
-    { IGI_VK_TRIANGLE, "PAD_TRIANGLE", { "Triangle", "Tri\xE2ngulo" }, { "Triangle", "Tri\xE2ngulo" } },
-    { IGI_VK_L, "PAD_L", { "L", "L" }, { "L", "L" } },
-    { IGI_VK_R, "PAD_R", { "R", "R" }, { "R", "R" } },
-    { IGI_VK_SELECT, "PAD_SELECT", { "Select", "Select" }, { "Select", "Select" } },
-    { IGI_VK_DPAD_UP, "PAD_DPAD_UP", { "D-pad Up", "Direcional cima" }, { "D-pad Up", "Dir. cima" } },
-    { IGI_VK_DPAD_DOWN, "PAD_DPAD_DOWN", { "D-pad Down", "Direcional baixo" }, { "D-pad Down", "Dir. baixo" } },
-    { IGI_VK_DPAD_LEFT, "PAD_DPAD_LEFT", { "D-pad Left", "Direcional esquerda" }, { "D-pad Left", "Dir. esq." } },
-    { IGI_VK_DPAD_RIGHT, "PAD_DPAD_RIGHT", { "D-pad Right", "Direcional direita" }, { "D-pad Right", "Dir. dir." } },
-    { IGI_VK_LSTICK_UP, "PAD_LSTICK_UP", { "Left stick Up", "Anal\xF3gico esq. cima" }, { "Stick Up", "Anal. cima" } },
-    { IGI_VK_LSTICK_DOWN, "PAD_LSTICK_DOWN", { "Left stick Down", "Anal\xF3gico esq. baixo" },
-      { "Stick Down", "Anal. baixo" } },
-    { IGI_VK_LSTICK_LEFT, "PAD_LSTICK_LEFT", { "Left stick Left", "Anal\xF3gico esq. esquerda" },
-      { "Stick Left", "Anal. esq." } },
-    { IGI_VK_LSTICK_RIGHT, "PAD_LSTICK_RIGHT", { "Left stick Right", "Anal\xF3gico esq. direita" },
-      { "Stick Right", "Anal. dir." } },
-    { IGI_VK_REAR_UP, "PAD_REAR_UP", { "Rear touch Up", "Touch traseiro cima" }, { "Rear Up", "Tras. cima" } },
-    { IGI_VK_REAR_DOWN, "PAD_REAR_DOWN", { "Rear touch Down", "Touch traseiro baixo" },
-      { "Rear Down", "Tras. baixo" } },
+    { IGI_VK_CROSS, "PAD_CROSS",
+      { "Cross", "Xis", "Croix", "Kreuz", "Croce", "Cruz" },
+      { "Cross", "Xis", "Croix", "Kreuz", "Croce", "Cruz" } },
+    { IGI_VK_CIRCLE, "PAD_CIRCLE",
+      { "Circle", "C\xEDrculo", "Rond", "Kreis", "Cerchio", "C\xEDrculo" },
+      { "Circle", "C\xEDrculo", "Rond", "Kreis", "Cerchio", "C\xEDrculo" } },
+    { IGI_VK_SQUARE, "PAD_SQUARE",
+      { "Square", "Quadrado", "Carr\xE9", "Viereck", "Quadrato", "Cuadrado" },
+      { "Square", "Quadrado", "Carr\xE9", "Viereck", "Quadrato", "Cuadrado" } },
+    { IGI_VK_TRIANGLE, "PAD_TRIANGLE",
+      { "Triangle", "Tri\xE2ngulo", "Triangle", "Dreieck", "Triangolo", "Tri\xE1ngulo" },
+      { "Triangle", "Tri\xE2ngulo", "Triangle", "Dreieck", "Triangolo", "Tri\xE1ngulo" } },
+    { IGI_VK_L, "PAD_L",
+      { "L", "L", "L", "L", "L", "L" }, { "L", "L", "L", "L", "L", "L" } },
+    { IGI_VK_R, "PAD_R",
+      { "R", "R", "R", "R", "R", "R" }, { "R", "R", "R", "R", "R", "R" } },
+    { IGI_VK_SELECT, "PAD_SELECT",
+      { "Select", "Select", "Select", "Select", "Select", "Select" },
+      { "Select", "Select", "Select", "Select", "Select", "Select" } },
+    { IGI_VK_DPAD_UP, "PAD_DPAD_UP",
+      { "D-pad Up", "Direcional cima", "Pad dir. haut", "Steuerkreuz hoch", "Freccia su", "Cruceta arriba" },
+      { "D-pad Up", "Dir. cima", "Pad haut", "Kreuz hoch", "Freccia su", "Cruceta arr." } },
+    { IGI_VK_DPAD_DOWN, "PAD_DPAD_DOWN",
+      { "D-pad Down", "Direcional baixo", "Pad dir. bas", "Steuerkreuz runter", "Freccia gi\xF9",
+        "Cruceta abajo" },
+      { "D-pad Down", "Dir. baixo", "Pad bas", "Kreuz runter", "Freccia gi\xF9", "Cruceta ab." } },
+    { IGI_VK_DPAD_LEFT, "PAD_DPAD_LEFT",
+      { "D-pad Left", "Direcional esquerda", "Pad dir. gauche", "Steuerkreuz links", "Freccia sinistra",
+        "Cruceta izquierda" },
+      { "D-pad Left", "Dir. esq.", "Pad gauche", "Kreuz links", "Freccia sin.", "Cruceta izq." } },
+    { IGI_VK_DPAD_RIGHT, "PAD_DPAD_RIGHT",
+      { "D-pad Right", "Direcional direita", "Pad dir. droite", "Steuerkreuz rechts", "Freccia destra",
+        "Cruceta derecha" },
+      { "D-pad Right", "Dir. dir.", "Pad droite", "Kreuz rechts", "Freccia des.", "Cruceta der." } },
+    { IGI_VK_LSTICK_UP, "PAD_LSTICK_UP",
+      { "Left stick Up", "Anal\xF3gico esq. cima", "Stick gauche haut", "Linker Stick hoch",
+        "Levetta sin. su", "Stick izq. arriba" },
+      { "Stick Up", "Anal. cima", "Stick haut", "Stick hoch", "Lev. su", "Stick arr." } },
+    { IGI_VK_LSTICK_DOWN, "PAD_LSTICK_DOWN",
+      { "Left stick Down", "Anal\xF3gico esq. baixo", "Stick gauche bas", "Linker Stick runter",
+        "Levetta sin. gi\xF9", "Stick izq. abajo" },
+      { "Stick Down", "Anal. baixo", "Stick bas", "Stick runter", "Lev. gi\xF9", "Stick ab." } },
+    { IGI_VK_LSTICK_LEFT, "PAD_LSTICK_LEFT",
+      { "Left stick Left", "Anal\xF3gico esq. esquerda", "Stick gauche gauche", "Linker Stick links",
+        "Levetta sin. sinistra", "Stick izq. izquierda" },
+      { "Stick Left", "Anal. esq.", "Stick gauche", "Stick links", "Lev. sin.", "Stick izq." } },
+    { IGI_VK_LSTICK_RIGHT, "PAD_LSTICK_RIGHT",
+      { "Left stick Right", "Anal\xF3gico esq. direita", "Stick gauche droite", "Linker Stick rechts",
+        "Levetta sin. destra", "Stick izq. derecha" },
+      { "Stick Right", "Anal. dir.", "Stick droite", "Stick rechts", "Lev. des.", "Stick der." } },
+    { IGI_VK_REAR_UP, "PAD_REAR_UP",
+      { "Rear touch Up", "Touch traseiro cima", "Toucher arri\xE8re haut", "R\xFC\x63kseite hoch",
+        "Touch post. su", "T\xE1\x63til tras. arriba" },
+      { "Rear Up", "Tras. cima", "Arr. haut", "R\xFC\x63k. hoch", "Post. su", "Tras. arr." } },
+    { IGI_VK_REAR_DOWN, "PAD_REAR_DOWN",
+      { "Rear touch Down", "Touch traseiro baixo", "Toucher arri\xE8re bas", "R\xFC\x63kseite runter",
+        "Touch post. gi\xF9", "T\xE1\x63til tras. abajo" },
+      { "Rear Down", "Tras. baixo", "Arr. bas", "R\xFC\x63k. runter", "Post. gi\xF9", "Tras. ab." } },
     /* Spare inputs (unbound by default). */
-    { IGI_VK_L2, "PAD_L2", { "L2", "L2" }, { "L2", "L2" } },
-    { IGI_VK_R2, "PAD_R2", { "R2", "R2" }, { "R2", "R2" } },
-    { IGI_VK_L3, "PAD_L3", { "L3", "L3" }, { "L3", "L3" } },
-    { IGI_VK_R3, "PAD_R3", { "R3", "R3" }, { "R3", "R3" } },
-    { IGI_VK_REAR_UL, "PAD_REAR_UL", { "Rear touch up-left", "Touch tras. sup. esq." },
-      { "Rear up-left", "Tras. sup. esq." } },
-    { IGI_VK_REAR_UR, "PAD_REAR_UR", { "Rear touch up-right", "Touch tras. sup. dir." },
-      { "Rear up-right", "Tras. sup. dir." } },
-    { IGI_VK_REAR_DL, "PAD_REAR_DL", { "Rear touch down-left", "Touch tras. inf. esq." },
-      { "Rear down-left", "Tras. inf. esq." } },
-    { IGI_VK_REAR_DR, "PAD_REAR_DR", { "Rear touch down-right", "Touch tras. inf. dir." },
-      { "Rear down-right", "Tras. inf. dir." } },
-    { IGI_VK_NONE, "PAD_NONE", { "Not set", "Nenhum" }, { "Not set", "Nenhum" } },
+    { IGI_VK_L2, "PAD_L2",
+      { "L2", "L2", "L2", "L2", "L2", "L2" }, { "L2", "L2", "L2", "L2", "L2", "L2" } },
+    { IGI_VK_R2, "PAD_R2",
+      { "R2", "R2", "R2", "R2", "R2", "R2" }, { "R2", "R2", "R2", "R2", "R2", "R2" } },
+    { IGI_VK_L3, "PAD_L3",
+      { "L3", "L3", "L3", "L3", "L3", "L3" }, { "L3", "L3", "L3", "L3", "L3", "L3" } },
+    { IGI_VK_R3, "PAD_R3",
+      { "R3", "R3", "R3", "R3", "R3", "R3" }, { "R3", "R3", "R3", "R3", "R3", "R3" } },
+    { IGI_VK_REAR_UL, "PAD_REAR_UL",
+      { "Rear touch up-left", "Touch tras. sup. esq.", "Arri\xE8re haut-gauche", "R\xFC\x63kseite oben links",
+        "Post. alto-sin.", "T\xE1\x63til tras. sup. izq." },
+      { "Rear up-left", "Tras. sup. esq.", "Arr. h-g.", "R\xFC\x63k. o-li.", "Post. a-si.", "Tras. sup. izq." } },
+    { IGI_VK_REAR_UR, "PAD_REAR_UR",
+      { "Rear touch up-right", "Touch tras. sup. dir.", "Arri\xE8re haut-droite", "R\xFC\x63kseite oben rechts",
+        "Post. alto-des.", "T\xE1\x63til tras. sup. der." },
+      { "Rear up-right", "Tras. sup. dir.", "Arr. h-d.", "R\xFC\x63k. o-re.", "Post. a-de.", "Tras. sup. der." } },
+    { IGI_VK_REAR_DL, "PAD_REAR_DL",
+      { "Rear touch down-left", "Touch tras. inf. esq.", "Arri\xE8re bas-gauche", "R\xFC\x63kseite unten links",
+        "Post. basso-sin.", "T\xE1\x63til tras. inf. izq." },
+      { "Rear down-left", "Tras. inf. esq.", "Arr. b-g.", "R\xFC\x63k. u-li.", "Post. b-si.", "Tras. inf. izq." } },
+    { IGI_VK_REAR_DR, "PAD_REAR_DR",
+      { "Rear touch down-right", "Touch tras. inf. dir.", "Arri\xE8re bas-droite", "R\xFC\x63kseite unten rechts",
+        "Post. basso-des.", "T\xE1\x63til tras. inf. der." },
+      { "Rear down-right", "Tras. inf. dir.", "Arr. b-d.", "R\xFC\x63k. u-re.", "Post. b-de.", "Tras. inf. der." } },
+    { IGI_VK_NONE, "PAD_NONE",
+      { "Not set", "Nenhum", "Aucun", "Nicht belegt", "Nessuno", "Sin asignar" },
+      { "Not set", "Nenhum", "Aucun", "Nicht belegt", "Nessuno", "Sin asig." } },
 };
 #define N_VKEYS (sizeof(vkeys) / sizeof(vkeys[0]))
 
@@ -163,18 +243,25 @@ static const struct {
     { 0x00200000u, IGI_VK_REAR_DOWN },     /* ZoomOut */
 };
 
-/* Menu texts the pad scheme renames: English, Portuguese (other languages keep theirs). */
+/* Menu texts the pad scheme renames (a column per language, cp1252): the pad has
+ * no mouse, so the game's mouse wording becomes the pad's (aim/look, a button). */
 static const struct {
-    const char *key, *text[2];
+    const char *key, *text[N_LANGS];
 } pad_texts[] = {
-    { "Invert Mouse", { "Invert Look", "Inverter mira" } },
-    { "Mouse Sensitivity", { "Look Sensitivity", "Sensibilidade da mira" } },
-    { "Select a key or button", { "Press a button", "Pressione um bot\xE3o" } },
+    { "Invert Mouse",
+      { "Invert Look", "Inverter mira", "Inversion de la vis\xE9\x65", "Zielen umkehren", "Inverti mira",
+        "Invertir visi\xF3n" } },
+    { "Mouse Sensitivity",
+      { "Look Sensitivity", "Sensibilidade da mira", "Sensibilit\xE9 de la vis\xE9\x65", "Ziel-Empfindlichkeit",
+        "Sensibilit\xE0 mira", "Sensibilidad de visi\xF3n" } },
+    { "Select a key or button",
+      { "Press a button", "Pressione um bot\xE3o", "Appuyez sur un bouton", "Taste dr\xFC\x63ken",
+        "Premi un pulsante", "Pulsa un bot\xF3n" } },
 };
 #define N_PAD_TEXTS (sizeof(pad_texts) / sizeof(pad_texts[0]))
 
 static int valid, scheme;
-static uint32_t id_ptr[N_VKEYS], label_ptr[N_VKEYS][2], text_ptr[N_PAD_TEXTS][2];
+static uint32_t id_ptr[N_VKEYS], label_ptr[N_VKEYS][N_LANGS], text_ptr[N_PAD_TEXTS][N_LANGS];
 static uint32_t list_obj, list_frames;   /* the screen's object, frames since its last update */
 static uint32_t text_buf;                /* guest copy of a key cell's text */
 #define TEXT_BUF_SIZE 160u
@@ -223,11 +310,11 @@ void igi_controls_init(void)
 #endif
     for (unsigned i = 0; i < N_VKEYS; i++) {
         id_ptr[i] = scratch_strdup(vkeys[i].id);
-        label_ptr[i][0] = scratch_strdup(vkeys[i].label[0]);
-        label_ptr[i][1] = scratch_strdup(vkeys[i].label[1]);
+        for (unsigned l = 0; l < N_LANGS; l++)
+            label_ptr[i][l] = scratch_strdup(vkeys[i].label[l]);
     }
     for (unsigned i = 0; i < N_PAD_TEXTS; i++)
-        for (unsigned l = 0; l < 2; l++)
+        for (unsigned l = 0; l < N_LANGS; l++)
             text_ptr[i][l] = scratch_strdup(pad_texts[i].text[l]);
     text_buf = scratch_alloc(TEXT_BUF_SIZE, 4);
     if (scheme) {
@@ -284,11 +371,11 @@ int rt_controls_text(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t 
         return 0;
     uint32_t key = RD32(esp + 8u), window = RD32(esp + 4u), text = 0;
     uint32_t lang = window ? RD32(window + WINDOW_LANGUAGE) : 0u;
-    unsigned l = lang == LANG_PORTUGUESE ? 1u : 0u;
+    unsigned l = lang_col(lang);
     for (unsigned i = 0; i < N_VKEYS && !text; i++)
         if (key == id_ptr[i])
             text = label_ptr[i][l];
-    if (!text && scheme && (lang == LANG_ENGLISH || lang == LANG_USA || lang == LANG_PORTUGUESE)) {
+    if (!text && scheme) {
         for (unsigned i = 0; i < N_PAD_TEXTS && !text; i++)
             if (guest_streq(key, pad_texts[i].key))
                 text = text_ptr[i][l];
@@ -491,7 +578,7 @@ static uint32_t index_name(uint32_t idx)
 static void brief_name(Ctx *c, uint32_t sp, uint32_t window, uint32_t idx, char *out, size_t n)
 {
     if (idx >= KEY_COUNT && idx - KEY_COUNT < N_VKEYS) {
-        unsigned l = window && RD32(window + WINDOW_LANGUAGE) == LANG_PORTUGUESE ? 1u : 0u;
+        unsigned l = lang_col(window ? RD32(window + WINDOW_LANGUAGE) : 0u);
         snprintf(out, n, "%s", vkeys[idx - KEY_COUNT].brief[l]);
     } else {
         menu_text(c, sp, window, index_name(idx), out, n);
