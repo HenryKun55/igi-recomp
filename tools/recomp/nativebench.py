@@ -71,6 +71,16 @@ void rt_probe(Ctx *c, uint32_t f) { (void)c; (void)f; }
 void rt_log(const char *fmt, ...) { (void)fmt; }
 void rt_missing_import(Ctx *c, const char *n) { (void)c; (void)n; __asm__ volatile("udf #2"); }
 int *__errno(void) { static int e; return &e; }
+/* Controls-screen hooks (igi_controls.c, GAME_HOOKS PATCHES): left to the
+ * generated code so the game-hooked functions still link in the ARM build. */
+int rt_controls_key_count(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret)
+{ (void)c; (void)esp; (void)ecx; (void)eax; (void)ret; return 0; }
+int rt_controls_key_entry(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret)
+{ (void)c; (void)esp; (void)ecx; (void)eax; (void)ret; return 0; }
+int rt_controls_text(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret)
+{ (void)c; (void)esp; (void)ecx; (void)eax; (void)ret; return 0; }
+int rt_controls_set_key(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret)
+{ (void)c; (void)esp; (void)ecx; (void)eax; (void)ret; return 0; }
 /* The guest memory size and the language hooks come with armbench's TICK_STUB. */
 ''' + terrainbench.STUB[terrainbench.STUB.index('/* On the Vita memcpy'):]
 
