@@ -43,6 +43,12 @@ typedef enum PadControl {
     PAD_CONTROL_COUNT
 } PadControl;
 
+/* Front-touch aim mode (igi.cfg touch_mode=): DRAG = a drag anywhere aims
+ * (default, the original behaviour); SPLIT = the right half of the screen is a
+ * relative aim pad and the left half is a virtual movement stick. Menus and the
+ * map computer behave the same in both modes. */
+typedef enum PadTouchMode { PAD_TOUCH_DRAG, PAD_TOUCH_SPLIT } PadTouchMode;
+
 /* A control going down or up. A release lets go of what the press sent, even
  * if the game moved between play and the menus in between. */
 void pad_control(PadControl control, int down);

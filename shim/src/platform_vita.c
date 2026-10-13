@@ -22,6 +22,8 @@
 #include <string.h>
 #include <vitaGL.h>
 
+#include "render_backend.h"   /* ButtonsCmd (after the GL header) */
+
 #define SCREEN_W 960
 #define SCREEN_H 544
 
@@ -367,7 +369,19 @@ void platform_swap(void)
  *
  * igi.cfg: front_touch=0 / rear_touch=0 turn a touch panel off;
  * stick_sensitivity=<multiplier> scales the right stick in gameplay (default 1.0;
- * the menu cursor speed is fixed). */
+ * the menu cursor speed is fixed).
+ *
+ * Opt-in touch helpers (both off/default, nothing changes for current players):
+ *   touch_mode=drag   (default) a drag anywhere on the front screen aims.
+ *   touch_mode=split  CS 1.6 style: the RIGHT half of the front screen is a
+ *                     relative aim pad (like a right thumb), the LEFT half is a
+ *                     virtual movement stick driving the Move actions. Both halves
+ *                     work at once (multi-touch); menus and the map computer are
+ *                     unchanged (absolute cursor + tap, trackpad).
+ *   onscreen_buttons=1  draw a small set of semi-transparent touch buttons over the
+ *                     HUD in gameplay (Jump/Crouch/Use/Reload/next Weapon bottom-left,
+ *                     Fire bottom-right). They press the same actions the pad does, so
+ *                     Options -> Controls bindings apply. Default 0. */
 
 static const struct {
     uint32_t button;
@@ -449,6 +463,37 @@ static int rear_mid_x = 960;     /* four-zone mode: left / right of this */
 static int rear_zones = 2;       /* igi.cfg rear_zones= (2 up/down, or 4 quadrants) */
 static int front_w = 1920, front_h = 1088;
 static float stick_sensitivity = 1.0f;   /* igi.cfg stick_sensitivity= */
+static int touch_mode = PAD_TOUCH_DRAG;   /* igi.cfg touch_mode= (drag/split) */
+static int onscreen_buttons_on;           /* igi.cfg onscreen_buttons= */
+
+/* ---- on-screen touch buttons ----
+ * A fixed layout along the bottom of the screen, clear of the crosshair (centre)
+ * and the HUD, and clear of the right-half aim pad: Jump/Crouch/Use/Reload/
+ * Next-weapon are a row at the bottom-left, Fire is a larger pad at the bottom
+ * right corner (still inside the aim half, but hit-tested before aiming). Each
+ * button presses the same control the pad uses, so remapping still applies.
+ * Rects are in drawable pixels (960x544); the touch panel maps 2:1 to them. */
+typedef struct VitaButton {
+    float x, y, w, h;   /* drawable pixels */
+    char label;
+    PadControl control;
+} VitaButton;
+
+#define BTN_H 70.0f
+#define BTN_W 70.0f
+#define BTN_GAP 10.0f
+#define BTN_MARGIN 14.0f
+static const VitaButton onscreen_layout[] = {
+    /* bottom-left cluster (clear of the right-half aim pad) */
+    { BTN_MARGIN + 0 * (BTN_W + BTN_GAP), SCREEN_H - BTN_MARGIN - BTN_H, BTN_W, BTN_H, 'J', PAD_CROSS },     /* Jump */
+    { BTN_MARGIN + 1 * (BTN_W + BTN_GAP), SCREEN_H - BTN_MARGIN - BTN_H, BTN_W, BTN_H, 'C', PAD_L },         /* Crouch */
+    { BTN_MARGIN + 2 * (BTN_W + BTN_GAP), SCREEN_H - BTN_MARGIN - BTN_H, BTN_W, BTN_H, 'U', PAD_CIRCLE },    /* Use */
+    { BTN_MARGIN + 0 * (BTN_W + BTN_GAP), SCREEN_H - BTN_MARGIN - 2 * (BTN_H + BTN_GAP) + BTN_GAP, BTN_W, BTN_H, 'R', PAD_SQUARE },   /* Reload */
+    { BTN_MARGIN + 1 * (BTN_W + BTN_GAP), SCREEN_H - BTN_MARGIN - 2 * (BTN_H + BTN_GAP) + BTN_GAP, BTN_W, BTN_H, 'W', PAD_TRIANGLE }, /* next Weapon */
+    /* bottom-right: Fire, a larger pad */
+    { SCREEN_W - BTN_MARGIN - 100.0f, SCREEN_H - BTN_MARGIN - 100.0f, 100.0f, 100.0f, 'F', PAD_R },          /* Fire */
+};
+#define N_ONSCREEN (int)(sizeof(onscreen_layout) / sizeof(onscreen_layout[0]))
 
 static void touch_init(void)
 {
@@ -466,12 +511,18 @@ static void touch_init(void)
                 aspect_keep = !strncmp(line + 7, "keep", 4);   /* as render_gl.c: fill unless keep */
             else if (!strncmp(line, "stick_sensitivity=", 18))
                 stick_sensitivity = strtof(line + 18, NULL);
+            else if (!strncmp(line, "touch_mode=", 11))
+                touch_mode = !strncmp(line + 11, "split", 5) ? PAD_TOUCH_SPLIT : PAD_TOUCH_DRAG;
+            else if (!strncmp(line, "onscreen_buttons=", 17))
+                onscreen_buttons_on = line[17] != '0';
         }
         fclose(f);
     }
     if (!(stick_sensitivity >= 0.1f && stick_sensitivity <= 10.0f))
         stick_sensitivity = 1.0f;
     rt_log("right stick: sensitivity x%.2f", (double)stick_sensitivity);
+    rt_log("front touch: mode %s, on-screen buttons %s", touch_mode == PAD_TOUCH_SPLIT ? "split" : "drag",
+           onscreen_buttons_on ? "on" : "off");
     SceTouchPanelInfo info;
     if (sceTouchGetPanelInfo(SCE_TOUCH_PORT_FRONT, &info) >= 0 && info.maxAaX > info.minAaX &&
         info.maxAaY > info.minAaY) {
@@ -508,51 +559,76 @@ static void touch_to_game(int tx, int ty, int32_t *gx, int32_t *gy)
 /* How the finger drives the mouse while the touch is down. */
 enum FrontMode { FRONT_LOOK, FRONT_MENU, FRONT_COMPUTER };
 
-/* Front: in play a drag turns the view like the mouse; in the menus the cursor
- * goes where the finger is and a tap clicks (button down once the cursor is
- * there, up when the finger lifts). The map computer keeps its own cursor and
- * moves it only by relative motion (igi_computer_active, igi_fixes.h), so there
- * the finger works like a trackpad: a drag moves that cursor, a tap (a short
- * touch that barely moved) clicks under it, landing on the computer's tabs. */
+/* Front panel position -> drawable (960x544) pixels: the panel is twice the
+ * drawable in each axis (1920x1088), so the on-screen buttons and the split line
+ * are placed in drawable pixels and hit-tested there, independent of the game
+ * image's letterbox. */
+static void touch_to_screen(int tx, int ty, int *sx, int *sy)
+{
+    *sx = (int)((int64_t)tx * SCREEN_W / front_w);
+    *sy = (int)((int64_t)ty * SCREEN_H / front_h);
+}
+
+/* The on-screen button a drawable point is inside, or -1. */
+static int onscreen_hit(int sx, int sy)
+{
+    for (int i = 0; i < N_ONSCREEN; i++) {
+        const VitaButton *b = &onscreen_layout[i];
+        if ((float)sx >= b->x && (float)sx < b->x + b->w && (float)sy >= b->y && (float)sy < b->y + b->h)
+            return i;
+    }
+    return -1;
+}
+
+/* Which buttons are held this frame (for the overlay highlight). */
+static uint8_t onscreen_pressed[N_ONSCREEN > 0 ? N_ONSCREEN : 1];
+
+/* Menus and the map computer: the first touch only, as before. In the menus the
+ * cursor goes where the finger is and a tap clicks; the map computer keeps its
+ * own cursor and the finger works like a trackpad (a drag moves it, a short tap
+ * clicks under it). On-screen buttons and the split stick never apply here. */
 #define TAP_MOVE 24          /* a touch that moves within this (panel units) is a tap */
 #define TAP_FRAMES 20        /* ... and lasts at most this many input polls */
 #define TAP_CLICK_HOLD 4     /* input polls the tap click is held down (the game must poll it) */
 static int tap_click;        /* > 0: a computer tap click is held, released after this many polls */
-static void front_touch(void)
+
+/* Menu/computer touch state (file scope so a mode flip mid-touch can reset it). */
+static int menu_active, menu_clicking, menu_last_x, menu_last_y, menu_moved, menu_frames;
+static float menu_acc_x, menu_acc_y;
+
+/* Release a held menu click and forget the touch, so a later menu touch starts
+ * fresh (used when the game leaves the menus while a finger is still down). */
+static void front_menu_reset(void)
 {
-    static int active, clicking, last_x, last_y, moved, frames;
-    static enum FrontMode mode;
-    static float acc_x, acc_y;
-    /* Release a held computer tap click once the game has had polls to see it. */
-    if (tap_click && --tap_click == 0)
+    if (menu_clicking)
         pad_mouse_button(0, 0);
-    SceTouchData t;
-    int down = sceTouchPeek(SCE_TOUCH_PORT_FRONT, &t, 1) >= 0 && t.reportNum > 0;
+    menu_active = menu_clicking = menu_moved = menu_frames = 0;
+    menu_acc_x = menu_acc_y = 0.0f;
+}
+
+static void front_menu_touch(const SceTouchData *t, int computer)
+{
+    int down = t->reportNum > 0;
     if (!down) {
-        if (clicking)
+        if (menu_clicking)
             pad_mouse_button(0, 0);
-        /* A tap in the computer clicks on release, where the cursor ended up; the
-         * button is held a few polls so the game's own input poll catches it. */
-        if (active && mode == FRONT_COMPUTER && !clicking && !tap_click && moved <= TAP_MOVE &&
-            frames <= TAP_FRAMES && igi_computer_active()) {
+        if (menu_active && computer && !menu_clicking && !tap_click && menu_moved <= TAP_MOVE &&
+            menu_frames <= TAP_FRAMES && igi_computer_active()) {
             pad_mouse_button(0, 1);
             tap_click = TAP_CLICK_HOLD;
         }
-        active = clicking = 0;
+        menu_active = menu_clicking = 0;
         return;
     }
-    int x = t.report[0].x, y = t.report[0].y;
-    if (!active) {
-        active = 1;
-        mode = igi_computer_active() ? FRONT_COMPUTER : pad_in_gameplay() ? FRONT_LOOK : FRONT_MENU;
-        last_x = x;
-        last_y = y;
-        moved = frames = 0;
-        acc_x = acc_y = 0.0f;
-        if (mode == FRONT_LOOK)
-            return;
+    int x = t->report[0].x, y = t->report[0].y;
+    if (!menu_active) {
+        menu_active = 1;
+        menu_last_x = x;
+        menu_last_y = y;
+        menu_moved = menu_frames = 0;
+        menu_acc_x = menu_acc_y = 0.0f;
     }
-    if (mode == FRONT_MENU) {
+    if (!computer) {
         int32_t gx, gy;
         touch_to_game(x, y, &gx, &gy);
         if (gx != g_mouse.x || gy != g_mouse.y) {
@@ -561,26 +637,209 @@ static void front_touch(void)
             g_mouse.x = gx;
             g_mouse.y = gy;
             post_mouse_move();
-        } else if (!clicking && !pad_capturing_key()) {
+        } else if (!menu_clicking && !pad_capturing_key()) {
             /* (no click while the controls screen waits for a key: it would
              * bind the mouse button, which the pad has not in play) */
-            clicking = 1;
+            menu_clicking = 1;
             pad_mouse_button(0, 1);
         }
         return;
     }
-    /* FRONT_LOOK and FRONT_COMPUTER: relative motion from the finger's drag. */
-    int dx = x - last_x, dy = y - last_y;
-    moved += (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
-    frames++;
-    acc_x += (float)dx * TOUCH_LOOK_SCALE;
-    acc_y += (float)dy * TOUCH_LOOK_SCALE;
-    last_x = x;
-    last_y = y;
-    int32_t mx = (int32_t)acc_x, my = (int32_t)acc_y;
-    acc_x -= (float)mx;
-    acc_y -= (float)my;
+    /* Map computer: relative motion from the finger's drag (trackpad). */
+    int dx = x - menu_last_x, dy = y - menu_last_y;
+    menu_moved += (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
+    menu_frames++;
+    menu_acc_x += (float)dx * TOUCH_LOOK_SCALE;
+    menu_acc_y += (float)dy * TOUCH_LOOK_SCALE;
+    menu_last_x = x;
+    menu_last_y = y;
+    int32_t mx = (int32_t)menu_acc_x, my = (int32_t)menu_acc_y;
+    menu_acc_x -= (float)mx;
+    menu_acc_y -= (float)my;
     mouse_motion(mx, my);
+}
+
+/* Gameplay: multi-touch. Each finger is classified by where it is (tracked by
+ * its stable touch id across frames):
+ *   - inside an on-screen button (if enabled): presses that button's control;
+ *   - SPLIT mode, left half: a virtual movement stick anchored where it landed;
+ *   - otherwise (DRAG mode anywhere, or SPLIT right half): relative aim, reusing
+ *     the look path (TOUCH_LOOK_SCALE, then the game's Look Sensitivity).
+ * Aim stays with whichever finger already owned it, so adding a second finger
+ * (stick or button) never jumps the view. */
+#define STICK_RADIUS 90.0f   /* drawable px from the anchor for full deflection */
+/* The virtual stick's desired per-direction state (up/down/left/right), merged
+ * with the physical left stick in platform_pump so both drive the Move controls
+ * through a single, non-conflicting press (pad_control is not reference counted). */
+static uint8_t vstick_want[4];
+/* Gameplay touch state (file scope so a mode flip mid-touch can reset it). */
+static int gp_aim_id = -1, gp_aim_active, gp_aim_x, gp_aim_y;  /* the finger that drives the view */
+static int gp_stick_id = -1, gp_stick_ax, gp_stick_ay;         /* the virtual-stick finger + its anchor */
+static float gp_acc_x, gp_acc_y;
+
+/* Forget the gameplay touch so re-entry re-anchors fresh; releases the stick. */
+static void front_gameplay_reset(void)
+{
+    gp_aim_id = -1;
+    gp_aim_active = 0;
+    gp_stick_id = -1;
+    gp_acc_x = gp_acc_y = 0.0f;
+    vstick_want[0] = vstick_want[1] = vstick_want[2] = vstick_want[3] = 0;
+}
+
+static void front_gameplay_touch(const SceTouchData *t)
+{
+    int n = t->reportNum;
+
+    /* 1) On-screen buttons: pressed if any finger is inside this frame. */
+    if (onscreen_buttons_on) {
+        uint8_t want[N_ONSCREEN > 0 ? N_ONSCREEN : 1] = { 0 };
+        for (int i = 0; i < n; i++) {
+            int sx, sy;
+            touch_to_screen(t->report[i].x, t->report[i].y, &sx, &sy);
+            int hit = onscreen_hit(sx, sy);
+            if (hit >= 0)
+                want[hit] = 1;
+        }
+        for (int i = 0; i < N_ONSCREEN; i++) {
+            if (want[i] != onscreen_pressed[i]) {
+                onscreen_pressed[i] = want[i];
+                pad_control(onscreen_layout[i].control, want[i]);
+            }
+        }
+    }
+
+    /* 2) Find this frame's aim finger (prefer the previous one) and stick finger,
+     *    skipping fingers that are on a button. */
+    int new_aim_id = -1, new_aim_x = 0, new_aim_y = 0;
+    int new_stick_id = -1, stick_x = 0, stick_y = 0;
+    int have_stick = 0;
+    for (int i = 0; i < n; i++) {
+        int px = t->report[i].x, py = t->report[i].y, id = t->report[i].id;
+        int sx, sy;
+        touch_to_screen(px, py, &sx, &sy);
+        if (onscreen_buttons_on && onscreen_hit(sx, sy) >= 0)
+            continue;
+        int left = touch_mode == PAD_TOUCH_SPLIT && sx < SCREEN_W / 2;
+        if (left) {
+            if (new_stick_id < 0 || id == gp_stick_id) {
+                new_stick_id = id;
+                stick_x = sx;
+                stick_y = sy;
+                have_stick = 1;
+            }
+        } else {
+            if (id == gp_aim_id) {   /* keep the existing aim finger */
+                new_aim_id = id;
+                new_aim_x = px;
+                new_aim_y = py;
+            } else if (new_aim_id < 0) {
+                new_aim_id = id;
+                new_aim_x = px;
+                new_aim_y = py;
+            }
+        }
+    }
+
+    /* 3) Aim: relative motion of the aim finger. Motion is applied only when the
+     *    SAME finger drove the view last frame too (gp_aim_active); a finger newly
+     *    promoted to aim just re-anchors, so recycled touch ids can never make the
+     *    view jump against a stale anchor. */
+    if (new_aim_id >= 0 && gp_aim_active && new_aim_id == gp_aim_id) {
+        int dx = new_aim_x - gp_aim_x, dy = new_aim_y - gp_aim_y;
+        gp_acc_x += (float)dx * TOUCH_LOOK_SCALE;
+        gp_acc_y += (float)dy * TOUCH_LOOK_SCALE;
+        int32_t mx = (int32_t)gp_acc_x, my = (int32_t)gp_acc_y;
+        gp_acc_x -= (float)mx;
+        gp_acc_y -= (float)my;
+        mouse_motion(mx, my);
+    } else {
+        gp_acc_x = gp_acc_y = 0.0f;
+    }
+    gp_aim_active = new_aim_id >= 0;
+    gp_aim_id = new_aim_id;
+    gp_aim_x = new_aim_x;
+    gp_aim_y = new_aim_y;
+
+    /* 4) Virtual movement stick (SPLIT left half): publish the wanted directions;
+     *    platform_pump merges them with the physical stick. */
+    if (have_stick) {
+        if (new_stick_id != gp_stick_id) {   /* a fresh finger: anchor it here */
+            gp_stick_ax = stick_x;
+            gp_stick_ay = stick_y;
+        }
+        gp_stick_id = new_stick_id;
+        int ox = stick_x - gp_stick_ax, oy = stick_y - gp_stick_ay;
+        int thr = (int)(STICK_RADIUS * 0.4f);   /* ~40% deflection, as the pad's 40/128 */
+        vstick_want[0] = oy < -thr;
+        vstick_want[1] = oy > thr;
+        vstick_want[2] = ox < -thr;
+        vstick_want[3] = ox > thr;
+    } else {
+        gp_stick_id = -1;
+        vstick_want[0] = vstick_want[1] = vstick_want[2] = vstick_want[3] = 0;
+    }
+}
+
+static void front_touch(void)
+{
+    /* Release a held map-computer tap click once the game has had polls to see
+     * it -- every frame, in any mode, so a pending click is never orphaned if
+     * the game leaves the menus right after a tap. */
+    if (tap_click && --tap_click == 0)
+        pad_mouse_button(0, 0);
+    SceTouchData t;
+    if (sceTouchPeek(SCE_TOUCH_PORT_FRONT, &t, 1) < 0)
+        t.reportNum = 0;
+    int computer = igi_computer_active();
+    int gameplay = !computer && pad_in_gameplay();
+    /* On a change of mode, let go of anything the old mode held and forget its
+     * touch, so nothing sticks and the new mode starts fresh. */
+    static int was_gameplay = -1;
+    if (gameplay != was_gameplay) {
+        if (was_gameplay == 1) {   /* was gameplay: release buttons + stick */
+            for (int i = 0; i < N_ONSCREEN; i++)
+                if (onscreen_pressed[i]) {
+                    onscreen_pressed[i] = 0;
+                    pad_control(onscreen_layout[i].control, 0);
+                }
+            front_gameplay_reset();
+        } else if (was_gameplay == 0) {   /* was menu/computer: release a held click */
+            front_menu_reset();
+        }
+        was_gameplay = gameplay;
+    }
+    if (gameplay)
+        front_gameplay_touch(&t);
+    else
+        front_menu_touch(&t, computer);
+}
+
+/* Build the on-screen button overlay for this frame (drawable pixels + pressed
+ * state). Returns 0 when nothing should be drawn. */
+static int onscreen_buttons_build(ButtonsCmd *c)
+{
+    if (!onscreen_buttons_on || !pad_in_gameplay() || igi_computer_active())
+        return 0;
+    c->n = N_ONSCREEN < BUTTONS_MAX ? N_ONSCREEN : BUTTONS_MAX;
+    for (int i = 0; i < c->n; i++) {
+        c->b[i].x = onscreen_layout[i].x;
+        c->b[i].y = onscreen_layout[i].y;
+        c->b[i].w = onscreen_layout[i].w;
+        c->b[i].h = onscreen_layout[i].h;
+        c->b[i].label = onscreen_layout[i].label;
+        c->b[i].pressed = onscreen_pressed[i];
+    }
+    return 1;
+}
+
+/* Called once per presented frame (platform_vita_draw_overlays). */
+void platform_vita_draw_overlays(void)
+{
+    ButtonsCmd c;
+    memset(&c, 0, sizeof(c));
+    if (onscreen_buttons_build(&c))
+        render_onscreen_buttons(&c);
 }
 
 /* Rear: two zones (upper/lower halves, defaults zoom in / zoom out) or, with
@@ -679,20 +938,26 @@ void platform_pump(void)
         prev_ext_buttons = ext.buttons;
     }
 
-    /* Left stick: four controls, one per direction. */
-    int lx = deadzone(pad.lx), ly = deadzone(pad.ly);
-    uint8_t want[4] = { ly < -40, ly > 40, lx < -40, lx > 40 };
-    for (int i = 0; i < 4; i++) {
-        if (want[i] != stick_held[i]) {
-            stick_held[i] = want[i];
-            pad_control(stick_controls[i], want[i]);
-        }
-    }
-
+    /* Front/rear touch first: the split-mode virtual stick (vstick_want) is set
+     * here, then merged with the physical left stick below. */
     if (front_touch_on)
         front_touch();
     if (rear_touch_on)
         rear_touch();
+
+    /* Left stick: four controls, one per direction. The physical stick and the
+     * split-mode virtual stick drive the same controls, so they are OR'd into a
+     * single press per direction (pad_control is not reference counted; two
+     * independent sources pressing it would otherwise fight over the key). */
+    int lx = deadzone(pad.lx), ly = deadzone(pad.ly);
+    uint8_t want[4] = { ly < -40, ly > 40, lx < -40, lx > 40 };
+    for (int i = 0; i < 4; i++) {
+        uint8_t w = want[i] || vstick_want[i];
+        if (w != stick_held[i]) {
+            stick_held[i] = w;
+            pad_control(stick_controls[i], w);
+        }
+    }
 
     /* Right stick: relative mouse motion, scaled by elapsed time. */
     uint64_t now = sceKernelGetProcessTimeWide();
