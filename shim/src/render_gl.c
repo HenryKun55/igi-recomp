@@ -35,6 +35,9 @@ uint32_t g_light_serial;
 uint32_t g_frame_serial;
 static uint32_t perf_gpu_draws;   /* draws actually submitted to GL this frame */
 static void perf_frame_begin_swap(void);
+#if !defined(__vita__)
+static void onscreen_buttons_debug(void);
+#endif
 static void perf_swap(void);
 
 extern uint64_t win32_perf_counter(void);   /* microseconds */
@@ -538,6 +541,9 @@ void render_present(void)
     platform_scripted_input();   /* cutscenes present frames without pumping messages */
     igi_end_frame();
     draw_bars();
+#if !defined(__vita__)
+    onscreen_buttons_debug();   /* IGI_ONSCREEN_BUTTONS=1: preview the layout (before the screenshot) */
+#endif
     maybe_screenshot();   /* before the trace state advances: saves the traced frame */
     if (g_trace_next_frame == 2) {
         g_trace_next_frame = 0;
@@ -546,6 +552,9 @@ void render_present(void)
         g_trace_next_frame = 2;
         rt_log("---- frame trace begin ----");
     }
+#if defined(__vita__)
+    platform_vita_draw_overlays();   /* on-screen touch buttons, if enabled */
+#endif
     perf_frame_begin_swap();
     perf_swap();
 #if defined(__vita__)
@@ -3021,6 +3030,61 @@ int render_overlay_enabled(void)
 {
     return perf.enabled > 0;
 }
+
+/* On-screen touch buttons: the platform layer builds the layout (in drawable
+ * pixels) and their pressed state; the renderer draws them over the HUD. */
+void render_onscreen_buttons(const ButtonsCmd *c)
+{
+    if (!c || c->n <= 0)
+        return;
+    send_params();
+    rq_exec(bk_buttons, c, sizeof(*c));
+}
+
+#if !defined(__vita__)
+/* Desktop debug (IGI_ONSCREEN_BUTTONS=1): draw the same button layout the Vita
+ * uses, scaled to this drawable, so the overlay can be seen and screenshotted on
+ * Mac. The Vita layout is authored in a 960x544 space; it is scaled uniformly to
+ * fit and anchored to the bottom, matching how it looks on the handheld. */
+static void onscreen_buttons_debug(void)
+{
+    static int checked, on;
+    if (!checked) {
+        checked = 1;
+        const char *e = getenv("IGI_ONSCREEN_BUTTONS");
+        on = e && e[0] == '1';
+    }
+    if (!on)
+        return;
+    const float sw = 960.0f, sh = 544.0f;
+    float s = (float)fb_w / sw < (float)fb_h / sh ? (float)fb_w / sw : (float)fb_h / sh;
+    float ox = ((float)fb_w - sw * s) * 0.5f, oy = (float)fb_h - sh * s;
+    /* Same rects and letters as platform_vita.c's onscreen_layout. */
+    const float H = 70.0f, W = 70.0f, G = 10.0f, M = 14.0f;
+    const struct { float x, y, w, h; char l; } L[] = {
+        { M + 0 * (W + G), sh - M - H, W, H, 'J' },
+        { M + 1 * (W + G), sh - M - H, W, H, 'C' },
+        { M + 2 * (W + G), sh - M - H, W, H, 'U' },
+        { M + 0 * (W + G), sh - M - 2 * (H + G) + G, W, H, 'R' },
+        { M + 1 * (W + G), sh - M - 2 * (H + G) + G, W, H, 'W' },
+        { sw - M - 100.0f, sh - M - 100.0f, 100.0f, 100.0f, 'F' },
+    };
+    ButtonsCmd c;
+    memset(&c, 0, sizeof(c));
+    c.n = (int)(sizeof(L) / sizeof(L[0]));
+    if (c.n > BUTTONS_MAX)
+        c.n = BUTTONS_MAX;
+    for (int i = 0; i < c.n; i++) {
+        c.b[i].x = ox + L[i].x * s;
+        c.b[i].y = oy + L[i].y * s;
+        c.b[i].w = L[i].w * s;
+        c.b[i].h = L[i].h * s;
+        c.b[i].label = L[i].l;
+        c.b[i].pressed = (i == 5);   /* show Fire highlighted so the pressed look is visible */
+    }
+    render_onscreen_buttons(&c);
+}
+#endif
 
 static void perf_frame_begin_swap(void)
 {

@@ -1426,3 +1426,124 @@ void bk_overlay(const void *p)
         glDrawArrays(GL_QUADS, 4, ov_count - 4);
     glColor4f(1, 1, 1, 1);
 }
+
+/* ---- on-screen touch buttons ---------------------------------------------- */
+
+/* The buttons use the same untextured quad path as the overlay, but blended, so
+ * they are semi-transparent over the HUD. Three groups, each a glDrawArrays:
+ * bodies (filled, dark), labels (bright glyphs), and a thin border per button.
+ * A separate vertex buffer keeps the overlay's cached geometry intact. */
+#define BTN_MAX_VERTS 4096
+static float btn_verts[BTN_MAX_VERTS * 2];
+static int btn_count;
+
+static void btn_quad(float x0, float y0, float x1, float y1)
+{
+    if (btn_count + 4 > BTN_MAX_VERTS)
+        return;
+    float *v = &btn_verts[btn_count * 2];
+    v[0] = x0; v[1] = y0; v[2] = x1; v[3] = y0; v[4] = x1; v[5] = y1; v[6] = x0; v[7] = y1;
+    btn_count += 4;
+}
+
+/* A label glyph centred in the button (px = font-pixel size). */
+static void btn_label(char ch, float cx, float cy, float px)
+{
+    const uint16_t *g = glyph(ch);
+    if (!g)
+        return;
+    float x = cx - 1.5f * px, y = cy - 2.5f * px;   /* 3x5 glyph centred */
+    for (int row = 0; row < 5; row++)
+        for (int col = 0; col < 3; col++)
+            if (g[row] & (4u >> col)) {
+                float x0 = x + (float)col * px, y0 = y + (float)row * px;
+                btn_quad(x0, y0, x0 + px, y0 + px);
+            }
+}
+
+void bk_buttons(const void *p)
+{
+    const ButtonsCmd *c = p;
+    if (c->n <= 0)
+        return;
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_ALPHA_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_LIGHTING);
+    glDisable(GL_FOG);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glActiveTexture(GL_TEXTURE1);
+    glDisable(GL_TEXTURE_2D);
+    glActiveTexture(GL_TEXTURE0);
+    glDisable(GL_TEXTURE_2D);
+    glDisableClientState(GL_COLOR_ARRAY);
+    glDisableClientState(GL_NORMAL_ARRAY);
+    glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    c_viewport(0, 0, B.fb_w, B.fb_h);
+    float m[16];
+    ortho_matrix(0, B.fb_w, B.fb_h, 0, -1, 1, m);
+    c_load_matrix(GL_PROJECTION, m);
+    c_load_matrix(GL_MODELVIEW, identity_matrix);
+    float px = (float)B.fb_h / 181.0f;   /* same glyph scale as the overlay */
+    float bw = px;                        /* border thickness */
+
+    /* All vertices are built once into btn_verts in four contiguous groups and
+     * drawn with a `first` offset (like bk_overlay): the client array is never
+     * mutated between draws, so it stays correct even if vitaGL defers it. */
+    btn_count = 0;
+    /* Group 1: filled bodies. */
+    int g1_first = btn_count;
+    for (int i = 0; i < c->n; i++) {
+        const OnscreenButton *b = &c->b[i];
+        btn_quad(b->x, b->y, b->x + b->w, b->y + b->h);
+    }
+    int g1_n = btn_count - g1_first;
+    /* Groups 2a/2b: a 1-wide frame per button, idle (grey) then pressed (yellow). */
+    int g2_first[2], g2_n[2];
+    for (int pass = 0; pass < 2; pass++) {
+        g2_first[pass] = btn_count;
+        for (int i = 0; i < c->n; i++) {
+            const OnscreenButton *b = &c->b[i];
+            if ((int)b->pressed != pass)
+                continue;
+            float x0 = b->x, y0 = b->y, x1 = b->x + b->w, y1 = b->y + b->h;
+            btn_quad(x0, y0, x1, y0 + bw);          /* top */
+            btn_quad(x0, y1 - bw, x1, y1);          /* bottom */
+            btn_quad(x0, y0, x0 + bw, y1);          /* left */
+            btn_quad(x1 - bw, y0, x1, y1);          /* right */
+        }
+        g2_n[pass] = btn_count - g2_first[pass];
+    }
+    /* Group 3: labels. */
+    int g3_first = btn_count;
+    for (int i = 0; i < c->n; i++) {
+        const OnscreenButton *b = &c->b[i];
+        if (b->label)
+            btn_label(b->label, b->x + b->w * 0.5f, b->y + b->h * 0.5f, px);
+    }
+    int g3_n = btn_count - g3_first;
+
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glVertexPointer(2, GL_FLOAT, 0, btn_verts);
+    ptr_cache_reset();
+    if (g1_n) {
+        glColor4f(0.08f, 0.08f, 0.10f, 0.42f);
+        glDrawArrays(GL_QUADS, g1_first, g1_n);
+    }
+    if (g2_n[0]) {
+        glColor4f(0.9f, 0.9f, 0.9f, 0.6f);        /* idle: light grey */
+        glDrawArrays(GL_QUADS, g2_first[0], g2_n[0]);
+    }
+    if (g2_n[1]) {
+        glColor4f(1.0f, 0.9f, 0.2f, 0.95f);       /* pressed: yellow */
+        glDrawArrays(GL_QUADS, g2_first[1], g2_n[1]);
+    }
+    if (g3_n) {
+        glColor4f(1.0f, 1.0f, 1.0f, 0.95f);
+        glDrawArrays(GL_QUADS, g3_first, g3_n);
+    }
+    glDisable(GL_BLEND);   /* leave blend off, as every 2D path here expects on entry */
+    glColor4f(1, 1, 1, 1);
+}

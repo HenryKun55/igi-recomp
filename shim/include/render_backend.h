@@ -111,6 +111,20 @@ typedef struct OverlayCmd {
     char lines[OVERLAY_LINES][40];
 } OverlayCmd;
 
+/* On-screen touch buttons (Vita onscreen_buttons=1): semi-transparent rounded
+ * rects with a one-letter label, given in drawable (fb) pixels with y down.
+ * Drawn over the HUD in gameplay; the touch code hit-tests the same rectangles. */
+#define BUTTONS_MAX 8
+typedef struct OnscreenButton {
+    float x, y, w, h;   /* drawable pixels */
+    char label;         /* 'A'..'Z' / '0'..'9', 0 = none */
+    uint8_t pressed;    /* highlight while held */
+} OnscreenButton;
+typedef struct ButtonsCmd {
+    int n;
+    OnscreenButton b[BUTTONS_MAX];
+} ButtonsCmd;
+
 void bk_params(const void *frame_params);
 void bk_init(const void *unused);       /* viewport and clear after a mode set */
 void bk_bars(const void *unused);       /* black bars around the game image */
@@ -121,6 +135,8 @@ void bk_draw(const void *draw_cmd);
 /* Sends a texture stage's sampler state on its own (normally part of bk_draw). */
 void bk_sampler(const void *draw_stage);
 void bk_overlay(const void *overlay_cmd);
+/* On-screen touch buttons (semi-transparent rounded rects with a letter). */
+void bk_buttons(const void *buttons_cmd);
 /* Single-thread mode with timing on: state setup and draw-call microseconds since the last call. */
 void bk_take_timing(uint64_t *state_us, uint64_t *gl_us);
 

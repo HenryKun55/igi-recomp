@@ -36,6 +36,13 @@ void platform_pump(void);
 /* Renderer: step to the next live diagnostic mode. */
 void render_diag_cycle(void);
 int render_overlay_enabled(void);
+/* Draw the on-screen touch buttons (Vita onscreen_buttons=1); see render_backend.h. */
+struct ButtonsCmd;
+void render_onscreen_buttons(const struct ButtonsCmd *buttons);
+#if defined(__vita__)
+/* Draws the Vita on-screen touch buttons for this frame (no-op unless enabled). */
+void platform_vita_draw_overlays(void);
+#endif
 /* Block until at least one event is available, then pump. */
 void platform_wait(void);
 void platform_show_cursor(int show);
