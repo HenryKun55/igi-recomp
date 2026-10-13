@@ -26,6 +26,8 @@ static uint32_t cutscene_window;     /* window object seen in the cutscene state
 static uint32_t ui_window, ui_state = IGI_UI_NONE;   /* last UI window rendered and its state */
 static uint32_t ui_frames;           /* frames presented since a UI window was last rendered */
 static uint32_t flushing_state;      /* node state of the 2D queue entry being drawn */
+static uint32_t computer_frames = 3; /* frames presented since the map computer last updated */
+#define COMPUTER_SEEN_FRAMES 2u
 
 int igi_skip_untextured_2d(void)
 {
@@ -42,11 +44,18 @@ void igi_end_frame(void)
     igi_controls_end_frame();
     if (++ui_frames > 2u)
         ui_state = IGI_UI_NONE;   /* no UI window drawn lately (videos, loading) */
+    if (computer_frames <= COMPUTER_SEEN_FRAMES)
+        computer_frames++;
 }
 
 uint32_t igi_ui_state(void)
 {
     return ui_state;
+}
+
+int igi_computer_active(void)
+{
+    return computer_frames <= COMPUTER_SEEN_FRAMES;
 }
 
 /* ---- saving the options ---------------------------------------------------
@@ -175,6 +184,9 @@ void rt_probe(Ctx *c, uint32_t func)
     case 0x0048A620u:
     case 0x0048A5D0u:
         loading_screen(func, sp);
+        break;
+    case 0x0046AC30u:
+        computer_frames = 0;   /* the map computer screen is updating */
         break;
     case 0x004234E0u:
         igi_controls_probe(c, func, sp);

@@ -14,4 +14,11 @@ void igi_end_frame(void);
 #define IGI_UI_NONE 0xFFFFFFFFu
 uint32_t igi_ui_state(void);
 
+/* 1 while the map computer screen is up. That screen keeps its own mouse cursor,
+ * which it moves only by the relative mouse motion from DirectInput (it ignores
+ * the absolute position and WM_MOUSEMOVE); its tabs are clicked with that cursor.
+ * The front touch panel must therefore drive it by relative motion, not by
+ * jumping the cursor to the finger (shim/src/platform_vita.c). */
+int igi_computer_active(void);
+
 #endif
