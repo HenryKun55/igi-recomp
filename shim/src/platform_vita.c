@@ -170,27 +170,22 @@ static void boot_picture_show(void)
 
 /* ---- suspend / resume ----------------------------------------------------
  * The PS button (background the app) and sleep (power button or auto-sleep)
- * suspend the process. While suspended the system tears down the GXM pipeline
- * and takes the display away; a render thread that keeps submitting GPU scenes
- * and calling sceDisplaySetFrameBuf into that dead context hangs the GPU and can
- * force a reboot. We register a ScePower callback to learn about it.
+ * suspend the process. The game breaks only if its render thread keeps
+ * submitting GPU scenes (sceGxmBeginScene/EndScene, sceDisplaySetFrameBuf) while
+ * the system has the display suspended -- that can hang the GPU and force a
+ * reboot. The GXM context and GPU resources themselves live in RAM, which is
+ * preserved across background/sleep, so there is nothing to rebuild.
  *
- * On SUSPEND we park the game loop at its input checkpoint and pause audio, so
- * no new GPU or audio work is issued around the suspend window.
- *
- * On RESUME we exit the process cleanly. The private vitaGL fork has no
- * teardown/reinit entry point (no vglEnd), so the lost GXM context, render
- * target, shader patcher and every GPU-resident texture/buffer cannot be
- * rebuilt in place; attempting to draw with them is exactly what hangs the
- * system. A clean sceKernelExitProcess drops the user back to the LiveArea to
- * relaunch -- far better than a hard reboot. See the final notes for why an
- * in-place resume is not attempted with this vitaGL build.
+ * So we treat it as a plain pause: on SUSPEND we park the game loop at its input
+ * checkpoint (the game thread stops producing frames, so the render thread drains
+ * its queue and idles -- no new GPU work) and pause audio. On RESUME we unpark
+ * the loop and resume audio, and the game continues exactly where it was. No
+ * process exit, no context recreation.
  *
  * The callback is a kernel callback: it only runs while a thread sits in a
  * *CB syscall, so a dedicated thread loops on sceKernelDelayThreadCB. */
 
 static _Atomic int g_suspended;      /* 1 while the app is backgrounded/asleep */
-static _Atomic int g_resume_exit;    /* 1 once a resume was seen: exit the process */
 static SceUID power_cb_id = -1;
 
 /* Bits that mean "going away" and "coming back" in the ScePower callback arg. */
@@ -214,12 +209,11 @@ static int power_callback(int notify_id, int notify_count, int arg, void *user)
         /* A resume only counts if we were actually suspended first. scePowerRegisterCallback
          * fires once at registration with the current power state (resume bits set), and the
          * system sends resume notifications at other times too; treating those as a real
-         * resume made the game exit a few seconds after launch. Only exit when a suspend
-         * we observed is now ending. The exit itself happens on the game thread (see
-         * vita_power_checkpoint), so GPU/audio teardown runs on the right thread. */
+         * resume used to make the game react at launch. Only act when a suspend we observed
+         * is now ending: unpark the game loop and resume audio, continuing where we were. */
         if (atomic_exchange(&g_suspended, 0)) {
-            if (!atomic_exchange(&g_resume_exit, 1))
-                rt_log("power: resume (arg %08X) -- exiting to relaunch", (unsigned)arg);
+            rt_log("power: resume (arg %08X) -- continuing", (unsigned)arg);
+            dsound_audio_pause(0);
         }
     }
     return 0;
@@ -250,18 +244,13 @@ static void power_init(void)
         rt_log("power: could not start callback thread (%08X)", (unsigned)t);
 }
 
-/* Called from the game thread's input pump. If a resume happened, end the
- * process cleanly here (the loop is quiescent and audio already paused). While
- * merely suspended -- no resume yet -- idle without issuing work. */
+/* Called from the game thread's input pump: while the app is suspended, park
+ * here so the game thread stops producing frames (no new GPU work is queued).
+ * On resume the flag clears and the loop simply continues where it was. */
 static void vita_power_checkpoint(void)
 {
-    /* Idle without issuing work while merely suspended (no resume yet). */
-    while (atomic_load(&g_suspended) && !atomic_load(&g_resume_exit))
+    while (atomic_load(&g_suspended))
         sceKernelDelayThread(50 * 1000);
-    if (atomic_load(&g_resume_exit)) {
-        rt_log("power: clean exit after resume");
-        platform_shutdown();   /* stops the render thread, then exits the process */
-    }
 }
 
 void platform_init(void)
