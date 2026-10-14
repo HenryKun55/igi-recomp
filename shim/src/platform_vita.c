@@ -7,6 +7,7 @@
 #include "pad_input.h"
 #include "runtime.h"
 #include "vita_bootui.h"
+#include "vita_settings.h"
 
 #include <SDL.h>
 #include <psp2/ctrl.h>
@@ -495,31 +496,32 @@ static const VitaButton onscreen_layout[] = {
 };
 #define N_ONSCREEN (int)(sizeof(onscreen_layout) / sizeof(onscreen_layout[0]))
 
+/* Pull the touch/aim settings from the central store (vita_settings.c), which
+ * owns igi.cfg. Called at start-up and again whenever the in-game options
+ * screen changes one, so a change applies without a relaunch. */
+void platform_vita_apply_settings(void)
+{
+    vita_settings_init();
+    front_touch_on = vita_settings_front_touch();
+    rear_touch_on = vita_settings_rear_touch();
+    rear_zones = vita_settings_rear_zones();
+    aspect_keep = vita_settings_aspect_keep();
+    stick_sensitivity = vita_settings_stick_sensitivity();
+    touch_mode = vita_settings_touch_mode();
+    onscreen_buttons_on = vita_settings_onscreen_buttons();
+    if (front_touch_on)
+        sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, SCE_TOUCH_SAMPLING_STATE_START);
+    else
+        sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, SCE_TOUCH_SAMPLING_STATE_STOP);
+    if (rear_touch_on)
+        sceTouchSetSamplingState(SCE_TOUCH_PORT_BACK, SCE_TOUCH_SAMPLING_STATE_START);
+    else
+        sceTouchSetSamplingState(SCE_TOUCH_PORT_BACK, SCE_TOUCH_SAMPLING_STATE_STOP);
+}
+
 static void touch_init(void)
 {
-    FILE *f = fopen("ux0:data/igi/igi.cfg", "r");
-    if (f) {
-        char line[128];
-        while (fgets(line, sizeof(line), f)) {
-            if (!strncmp(line, "front_touch=", 12))
-                front_touch_on = line[12] != '0';
-            else if (!strncmp(line, "rear_touch=", 11))
-                rear_touch_on = line[11] != '0';
-            else if (!strncmp(line, "rear_zones=", 11))
-                rear_zones = line[11] == '4' ? 4 : 2;
-            else if (!strncmp(line, "aspect=", 7))
-                aspect_keep = !strncmp(line + 7, "keep", 4);   /* as render_gl.c: fill unless keep */
-            else if (!strncmp(line, "stick_sensitivity=", 18))
-                stick_sensitivity = strtof(line + 18, NULL);
-            else if (!strncmp(line, "touch_mode=", 11))
-                touch_mode = !strncmp(line + 11, "split", 5) ? PAD_TOUCH_SPLIT : PAD_TOUCH_DRAG;
-            else if (!strncmp(line, "onscreen_buttons=", 17))
-                onscreen_buttons_on = line[17] != '0';
-        }
-        fclose(f);
-    }
-    if (!(stick_sensitivity >= 0.1f && stick_sensitivity <= 10.0f))
-        stick_sensitivity = 1.0f;
+    platform_vita_apply_settings();
     rt_log("right stick: sensitivity x%.2f", (double)stick_sensitivity);
     rt_log("front touch: mode %s, on-screen buttons %s", touch_mode == PAD_TOUCH_SPLIT ? "split" : "drag",
            onscreen_buttons_on ? "on" : "off");
@@ -534,10 +536,6 @@ static void touch_init(void)
         if (info.maxAaX > info.minAaX)
             rear_mid_x = (info.minAaX + info.maxAaX) / 2;
     }
-    if (front_touch_on)
-        sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, SCE_TOUCH_SAMPLING_STATE_START);
-    if (rear_touch_on)
-        sceTouchSetSamplingState(SCE_TOUCH_PORT_BACK, SCE_TOUCH_SAMPLING_STATE_START);
     rt_log("touch: front %s (%dx%d), rear %s (%d zones, split y=%d x=%d)", front_touch_on ? "on" : "off", front_w,
            front_h, rear_touch_on ? "on" : "off", rear_zones, rear_mid_y, rear_mid_x);
 }

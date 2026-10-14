@@ -22,6 +22,7 @@
 #if defined(__vita__)
 #include "vita_bootui.h"
 #include "vita_update.h"
+#include "vita_settings.h"
 #include "runtime.h"
 
 #include <psp2/ctrl.h>
@@ -430,7 +431,6 @@ static void run_check(void)
 
 void vita_bootui_run(uint32_t *framebuffer)
 {
-    char enabled[16];
     if (!framebuffer)
         return;
     if (!font_load(&s_big, "app0:font/boot.font") || !font_load(&s_small, "app0:font/boot_small.font")) {
@@ -452,8 +452,7 @@ void vita_bootui_run(uint32_t *framebuffer)
     memcpy(s_bg, s_screen, (size_t)FB_W * FB_H * 4);
 
     show_install_result();
-    cfg_value("update_check", enabled, sizeof(enabled), "1");
-    if (atoi(enabled) != 0)
+    if (vita_settings_update_check())
         run_check();
     else
         rt_log("update: check off (update_check=0)");

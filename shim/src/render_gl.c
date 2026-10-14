@@ -6,6 +6,7 @@
 #include "tick_test.h"
 #include "igi_fixes.h"
 #include "render.h"
+#include "vita_settings.h"
 
 #include <stdatomic.h>
 #include <stddef.h>
@@ -239,19 +240,21 @@ static int z_remap = 1;
 
 static void load_aspect_setting(void)
 {
+    /* Aspect comes from the central settings store (vita_settings.c), which owns
+     * igi.cfg: keep = 4:3 with bars, fill = stretch to the display. IGI_ASPECT
+     * on the desktop still overrides it for quick tests. The diagnostic-only
+     * zremap/cull keys are read here from the file directly (they are not part
+     * of the options screen). */
+    aspect_fill = !vita_settings_aspect_keep();
     const char *v = getenv("IGI_ASPECT");
     const char *cv = getenv("IGI_CULL");
 #if defined(__vita__)
-    aspect_fill = 1;
-    static char line[128], cline[128];
+    static char cline[128];
     FILE *f = fopen("ux0:data/igi/igi.cfg", "r");
     if (f) {
         char buf[128];
         while (fgets(buf, sizeof(buf), f)) {
-            if (strncmp(buf, "aspect=", 7) == 0) {
-                memcpy(line, buf, sizeof(line));
-                v = line + 7;
-            } else if (strncmp(buf, "zremap=", 7) == 0) {
+            if (strncmp(buf, "zremap=", 7) == 0) {
                 z_remap = buf[7] != '0';
                 rt_log("zremap=%d", z_remap);
             } else if (strncmp(buf, "cull=", 5) == 0) {
@@ -261,8 +264,6 @@ static void load_aspect_setting(void)
         }
         fclose(f);
     }
-#else
-    aspect_fill = 0;
 #endif
     if (v)
         aspect_fill = strncmp(v, "fill", 4) == 0;
@@ -3031,6 +3032,18 @@ int render_overlay_enabled(void)
     return perf.enabled > 0;
 }
 
+/* Re-read aspect and the performance overlay from the central settings store
+ * (vita_settings.c) and apply them live: the in-game options screen calls this
+ * when it changes one, so the display reflows and the overlay appears/vanishes
+ * without a relaunch. */
+void render_apply_settings(void)
+{
+    vita_settings_init();
+    load_aspect_setting();
+    update_letterbox();
+    perf.enabled = vita_settings_overlay();
+}
+
 /* On-screen touch buttons: the platform layer builds the layout (in drawable
  * pixels) and their pressed state; the renderer draws them over the HUD. */
 void render_onscreen_buttons(const ButtonsCmd *c)
@@ -3090,19 +3103,9 @@ static void perf_frame_begin_swap(void)
 {
     if (perf.enabled < 0) {
         const char *e = getenv("IGI_OVERLAY");
-#if defined(__vita__)
-        perf.enabled = e && e[0] == '1';
-        FILE *f = fopen("ux0:data/igi/igi.cfg", "r");   /* overlay=1 shows it */
-        if (f) {
-            char buf[128];
-            while (fgets(buf, sizeof(buf), f))
-                if (strncmp(buf, "overlay=", 8) == 0)
-                    perf.enabled = buf[8] != '0';
-            fclose(f);
-        }
-#else
-        perf.enabled = e && e[0] == '1';
-#endif
+        /* The overlay setting lives in the central store (igi.cfg overlay=);
+         * IGI_OVERLAY=1 forces it on for a quick desktop test. */
+        perf.enabled = (e && e[0] == '1') || vita_settings_overlay();
     }
     uint64_t now = win32_perf_counter();
     if (!perf.frame_start) {
