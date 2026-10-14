@@ -332,17 +332,33 @@ static int menu_side_widget(const IgiMenuWidget *v, int n, int at, int right)
 static int menu_nav(PadControl control, uint8_t *mouse_sent)
 {
     if (control == PAD_CROSS || control == PAD_R) {
-        menu_goal_x = MENU_GOAL_NONE;   /* stop steering */
         if (control == PAD_CROSS && menu_cur_widget) {
-            /* Cross presses the widget the D-pad walked to, by its command field,
-             * exactly as the game's keyboard focus does -- no dependence on the
-             * cursor sitting pixel-perfect on a small button (Yes/No, OK/Cancel). */
-            igi_menu_activate_widget(menu_cur_widget);
-            menu_cur_widget = 0;
-            return 1;
+            /* The D-pad steered the cursor onto the walked-to widget, so press it
+             * with a click: that works on every screen, popup dialogs (Sim/Não,
+             * OK/Cancelar) included, whose buttons ignore the command field. Only if
+             * the steer has not landed the cursor on it yet (a very quick press) fall
+             * back to the command field, which needs no cursor but does not drive
+             * the dialogs. */
+            IgiMenuWidget v[32];
+            int focus, n = igi_menu_widgets(v, (int)(sizeof(v) / sizeof(v[0])), &focus);
+            int32_t cx, cy;
+            int on = 0;
+            if (n > 0 && igi_menu_cursor(&cx, &cy))
+                for (int i = 0; i < n; i++)
+                    if (v[i].widget == menu_cur_widget) {
+                        on = cx >= v[i].x && cx < v[i].x + v[i].w && cy >= v[i].y && cy < v[i].y + v[i].h;
+                        break;
+                    }
+            if (!on) {
+                igi_menu_activate_widget(menu_cur_widget);
+                menu_cur_widget = 0;
+                menu_goal_x = MENU_GOAL_NONE;
+                return 1;
+            }
         }
-        /* R (and Cross with nothing walked to) clicks where the cursor rests: the
-         * mission the right stick or touch put it on, or any hovered item. */
+        /* Click where the cursor rests: the walked-to widget the D-pad steered onto,
+         * the mission the right stick or touch put it on, or any hovered item. */
+        menu_goal_x = MENU_GOAL_NONE;
         menu_cur_widget = 0;
         pad_mouse_button(0, 1);
         *mouse_sent = 1;
