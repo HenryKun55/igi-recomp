@@ -306,6 +306,29 @@ static int menu_widget_at(const IgiMenuWidget *v, int n, int32_t cx, int32_t cy)
  * (arrow keys a value widget consumes). When nothing has been walked to, the step
  * starts from the widget the cursor sits on, else the one in focus, else the
  * first, so a first press always lands somewhere sensible. */
+/* The nearest widget to the left/right of widget `at` whose vertical span overlaps
+ * it (the same row); -1 if none. Lets left/right step between side-by-side buttons
+ * (Sim/Não, OK/Cancelar) but fall through on a lone value widget (a ListBox). */
+static int menu_side_widget(const IgiMenuWidget *v, int n, int at, int right)
+{
+    int32_t ay0 = v[at].y, ay1 = v[at].y + v[at].h, acx = v[at].x + v[at].w / 2;
+    int best = -1;
+    int32_t best_d = 0;
+    for (int i = 0; i < n; i++) {
+        if (i == at || v[i].y + v[i].h <= ay0 || v[i].y >= ay1)
+            continue;   /* same widget, or a different row (no vertical overlap) */
+        int32_t cx = v[i].x + v[i].w / 2;
+        if (right ? cx <= acx : cx >= acx)
+            continue;
+        int32_t d = right ? cx - acx : acx - cx;
+        if (best < 0 || d < best_d) {
+            best = i;
+            best_d = d;
+        }
+    }
+    return best;
+}
+
 static int menu_nav(PadControl control, uint8_t *mouse_sent)
 {
     if (control == PAD_CROSS || control == PAD_R) {
@@ -327,8 +350,10 @@ static int menu_nav(PadControl control, uint8_t *mouse_sent)
     }
     int up = control == PAD_DPAD_UP || control == PAD_LSTICK_UP;
     int down = control == PAD_DPAD_DOWN || control == PAD_LSTICK_DOWN;
-    if (!up && !down)
-        return 0;   /* left/right/others: fall through to the game's arrow keys */
+    int left = control == PAD_DPAD_LEFT || control == PAD_LSTICK_LEFT;
+    int right = control == PAD_DPAD_RIGHT || control == PAD_LSTICK_RIGHT;
+    if (!up && !down && !left && !right)
+        return 0;   /* other controls: fall through */
     IgiMenuWidget v[32];
     int focus = 0;
     int n = igi_menu_widgets(v, (int)(sizeof(v) / sizeof(v[0])), &focus);
@@ -360,12 +385,20 @@ static int menu_nav(PadControl control, uint8_t *mouse_sent)
                 target = i;
                 break;
             }
-    } else {
+    } else if (up || down) {
         target = at + (down ? 1 : -1);
         if (target < 0)
             target = n - 1;
         else if (target >= n)
             target = 0;
+    } else {
+        /* Left/right: step to the nearest widget on that side of the same row, so
+         * side-by-side buttons (Sim/Não, OK/Cancelar) move horizontally; if there
+         * is none (a lone value widget like a ListBox), let the arrow key through so
+         * that widget changes its value instead. */
+        target = menu_side_widget(v, n, at, right);
+        if (target < 0)
+            return 0;
     }
     menu_cur_widget = v[target].widget;
     menu_cursor_to(&v[target]);
