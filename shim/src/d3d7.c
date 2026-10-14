@@ -912,10 +912,11 @@ static void set_range_bounds(uint32_t first, uint32_t count)
     render_set_bounds(e->lo, e->hi);
 }
 
-/* Pre-transformed draws without a texture the game wants hidden (igi_fixes). */
+/* Pre-transformed 2D draws the game wants hidden: the whole 2D queue of the
+ * in-engine cutscene window (the stray "Game Paused" menu overlay), see igi_fixes. */
 static int skip_untextured_2d(uint32_t fvf)
 {
-    return (fvf & 0x0Eu) == 0x4u && !g_rs.stage[0].texture && igi_skip_untextured_2d();
+    return (fvf & 0x0Eu) == 0x4u && igi_skip_cutscene_2d();
 }
 
 /* `cache`, when set, is the decoded copy of the vertices at `verts` (with `cd` its format). */

@@ -4,8 +4,10 @@
 
 #include <stdint.h>
 
-/* True while the 2D queue is drawing the cutscene window that must stay hidden. */
-int igi_skip_untextured_2d(void);
+/* True while the 2D queue of the in-engine cutscene window (state 16) is being
+ * drawn: its whole queue holds the stray in-game "Game Paused" menu overlay and
+ * must stay hidden (the scene, letterbox and subtitles come through other paths). */
+int igi_skip_cutscene_2d(void);
 /* Called once per presented frame. */
 void igi_end_frame(void);
 

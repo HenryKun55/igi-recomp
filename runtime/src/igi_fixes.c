@@ -12,11 +12,20 @@
 #include <string.h>
 
 /* ---- cutscene window ------------------------------------------------------
- * During in-engine cutscenes a UI window (render function 0x418970) sits in
- * state 16 and its background (dark translucent fill, green gradient, title
- * line) is drawn over the whole letterboxed scene. It does not show up in the
- * original game; until the reason is understood, the port skips that window's
- * pre-transformed, untextured geometry while it is in that state. */
+ * During an in-engine cutscene (the mission 1/2 ANYA fly-over briefing and the
+ * end-of-mission scene) a UI window (render function 0x418970) sits in state 16.
+ * Its render walks the window's embedded 2D queue node (window+0x266c), which in
+ * the original game is empty while the scene plays. In the port that node still
+ * holds the in-game menu's "Game Paused" screen (menusystem/ingamemenu.qvm): the
+ * dark translucent fill and green gradient band (untextured) plus the "Game
+ * Paused"/menu item glyphs (textured, font3.fnt), all drawn as pre-transformed
+ * 2D over the letterboxed scene. None of this shows in the original game.
+ *
+ * The scene itself, the letterbox bars and the subtitle line are drawn through
+ * other paths, so the whole 2D queue node of the cutscene window is suppressed
+ * while it is in that state -- not just the untextured part, which left the menu
+ * text visible. igi_skip_cutscene_2d() is the single authority; the draw backend
+ * (shim/src/d3d7.c) calls it for every pre-transformed 2D draw. */
 
 #define WINDOW_STATE_CUTSCENE 16u
 #define WINDOW_NODE_OFFSET 0x266Cu   /* 2D queue node embedded in the window */
@@ -29,7 +38,7 @@ static uint32_t flushing_state;      /* node state of the 2D queue entry being d
 static uint32_t computer_frames = 3; /* frames presented since the map computer last updated */
 #define COMPUTER_SEEN_FRAMES 2u
 
-int igi_skip_untextured_2d(void)
+int igi_skip_cutscene_2d(void)
 {
     if (!cutscene_window || !flushing_state)
         return 0;
