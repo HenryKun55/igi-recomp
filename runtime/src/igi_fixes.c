@@ -45,6 +45,26 @@
 #define WINDOW_MOUSE_X 0xCu
 #define WINDOW_MOUSE_Y 0x10u
 
+/* Every menu window holds its focusable widgets as an inline array of object
+ * pointers at window+0x3C, with the count at window+0xBC and the index of the
+ * widget in focus at window+0xC0 (confirmed in IGI.exe: FUN_004186e0 sets focus
+ * via *(window+0x3C+index*4), FUN_004187f0 clears the array and count on reset,
+ * FUN_00418fe0 finds a widget's index to focus it when the cursor enters it).
+ * Each widget keeps its screen rectangle at +0x20 x, +0x24 y, +0x28 w, +0x2C h
+ * (the same fields the controls list uses) and a back-pointer to its window at
+ * +0x44; the shared hit-test FUN_004248A0 flags it hovered (+0x4b)/focused
+ * (+0x4d) when the window cursor is inside that rect. So moving the window
+ * cursor onto a widget's centre focuses it and a click there presses it -- the
+ * port drives D-pad menu navigation this way (shim/src/pad_input.c). */
+#define WINDOW_WIDGETS 0x3Cu       /* inline array of widget object pointers */
+#define WINDOW_WIDGET_COUNT 0xBCu  /* number of focusable widgets */
+#define WINDOW_FOCUS_INDEX 0xC0u   /* index of the widget in focus */
+#define WIDGET_X 0x20u
+#define WIDGET_Y 0x24u
+#define WIDGET_W 0x28u
+#define WIDGET_H 0x2Cu
+#define WIDGET_MAX 64u             /* a sane cap on a window's widget array */
+
 static uint32_t cutscene_window;     /* window object seen in the cutscene state */
 static uint32_t ui_window, ui_state = IGI_UI_NONE;   /* last UI window rendered and its state */
 static uint32_t ui_frames;           /* frames presented since a UI window was last rendered */
@@ -95,6 +115,103 @@ int igi_menu_cursor(int32_t *x, int32_t *y)
     *x = (int32_t)RD32(ui_window + WINDOW_MOUSE + WINDOW_MOUSE_X);
     *y = (int32_t)RD32(ui_window + WINDOW_MOUSE + WINDOW_MOUSE_Y);
     return 1;
+}
+
+/* Press a focusable widget by its index in the window's widget array, the way the
+ * game's own keyboard focus does: a widget fires when its command field (+0x50) is
+ * -7 on the next update (FUN_00421070 checks exactly that, and FUN_00418580 sets
+ * it when Enter/Space activates the focused widget). Used for the mission-select
+ * OK button: that screen does not move its cursor from the mouse, so the shared
+ * cursor hit-test cannot reach OK; setting its command presses it directly. 1 on
+ * success. */
+#define WIDGET_COMMAND 0x50u
+#define WIDGET_CMD_ACTIVATE 0xFFFFFFF9u   /* -7: "activate this widget" */
+int igi_menu_activate_widget(int index)
+{
+    int32_t cx, cy;
+    if (!igi_menu_cursor(&cx, &cy))
+        return 0;
+    uint32_t count = RD32(ui_window + WINDOW_WIDGET_COUNT);
+    if (index < 0 || (uint32_t)index >= count || count > WIDGET_MAX)
+        return 0;
+    uint32_t w = RD32(ui_window + WINDOW_WIDGETS + (uint32_t)index * 4u);
+    if (!w)
+        return 0;
+    WR32(w + WIDGET_COMMAND, WIDGET_CMD_ACTIVATE);
+    return 1;
+}
+
+/* The current menu window's focusable widgets and their screen rectangles, for
+ * the pad's D-pad navigation (shim/src/pad_input.c). Fills up to `max` rects in
+ * document order (the window's own order, top to bottom on every stock screen),
+ * returns the number of widgets, and reports the window's current focus index.
+ * 0 when no menu window is up. A widget with a zero or negative size is skipped
+ * (a hidden or placeholder entry), so the pad only lands on real, clickable
+ * items. */
+int igi_menu_widgets(IgiMenuWidget *out, int max, int *focus)
+{
+    int32_t cx, cy;
+    if (!igi_menu_cursor(&cx, &cy))
+        return 0;
+    uint32_t count = RD32(ui_window + WINDOW_WIDGET_COUNT);
+    if (count == 0u || count > WIDGET_MAX)
+        return 0;
+    int focus_idx = (int)RD32(ui_window + WINDOW_FOCUS_INDEX);
+    int n = 0;
+    for (uint32_t i = 0; i < count && n < max; i++) {
+        uint32_t w = RD32(ui_window + WINDOW_WIDGETS + i * 4u);
+        if (!w)
+            continue;
+        int32_t ww = (int32_t)RD32(w + WIDGET_W), wh = (int32_t)RD32(w + WIDGET_H);
+        if (ww <= 0 || wh <= 0)
+            continue;   /* hidden / placeholder */
+        out[n].widget = w;
+        out[n].index = (int)i;
+        out[n].x = (int32_t)RD32(w + WIDGET_X);
+        out[n].y = (int32_t)RD32(w + WIDGET_Y);
+        out[n].w = ww;
+        out[n].h = wh;
+        n++;
+    }
+    if (focus)
+        *focus = focus_idx;
+    return n;
+}
+
+/* 1 when the current menu screen is a "list dialog" -- a screen whose focusable
+ * widgets are only a small cluster of buttons near the bottom (OK/Cancel), with
+ * the main content a NON-focusable list the game scrolls with the arrow keys
+ * (the mission select; its ScrollListBox is not in window+0x3C). On such a screen
+ * the pad sends the arrow keys so the list moves, instead of walking the cursor
+ * between the bottom buttons (which could land Cross on Cancel). A normal menu
+ * (main menu, Options, the Vita settings) has its items as focusable widgets
+ * spread down the window, so its topmost focusable widget sits in the upper part
+ * and this returns 0 -> the cursor walks the items as usual. Measured against
+ * the window's own rectangle, so it holds at any menu resolution. */
+int igi_menu_is_list_screen(void)
+{
+    int32_t cx, cy;
+    if (!igi_menu_cursor(&cx, &cy))
+        return 0;
+    uint32_t count = RD32(ui_window + WINDOW_WIDGET_COUNT);
+    if (count == 0u || count > 3u)
+        return 0;   /* a real menu stack has more items than a dialog's buttons */
+    /* The menus render in a fixed 640x480 virtual space (the window cursor and
+     * the widget rects live in it). A focusable widget above three fifths down
+     * (y < 288) is a menu item; only below it is the bottom button strip. */
+    const int32_t top_cut = 288;
+    int any = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t w = RD32(ui_window + WINDOW_WIDGETS + i * 4u);
+        if (!w)
+            continue;
+        if ((int32_t)RD32(w + WIDGET_W) <= 0 || (int32_t)RD32(w + WIDGET_H) <= 0)
+            continue;
+        any = 1;
+        if ((int32_t)RD32(w + WIDGET_Y) < top_cut)
+            return 0;   /* a focusable widget sits in the content area: a normal menu */
+    }
+    return any;   /* all (few) focusable widgets are in the bottom button strip */
 }
 
 /* ---- saving the options ---------------------------------------------------

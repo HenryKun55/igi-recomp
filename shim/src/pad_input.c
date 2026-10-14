@@ -158,6 +158,125 @@ static int list_control(const IgiControlsList *l, PadControl control, uint8_t *m
     return 1;
 }
 
+/* ---- general menu navigation --------------------------------------------------
+ *
+ * Most menu screens (main menu, Options, the Vita settings, the in-game menu)
+ * work like the controls screen but over the whole window instead of one list:
+ * the window keeps its focusable widgets with their screen rectangles
+ * (runtime/src/igi_fixes.c igi_menu_widgets), the shared hit-test focuses
+ * whichever widget the window cursor is inside, and a click presses it. So the
+ * D-pad moves the window cursor between the widgets' centres (relative deltas,
+ * like the controls list), Cross clicks under it, and left/right fall through to
+ * the game as arrow keys for a value widget (a ListBox) to consume.
+ *
+ * The mission select is different: its mission list is a ScrollListBox that the
+ * game scrolls with the arrow keys and that is NOT one of the window's focusable
+ * widgets, and that screen does not move its cursor from the mouse at all (only
+ * OK and Cancel are focusable, in a bottom strip). igi_menu_is_list_screen spots
+ * it; there the D-pad sends the arrow keys so the list moves, and Cross presses
+ * OK by its command field (igi_menu_activate_widget), as the game's own keyboard
+ * focus does, which starts the mission the list has selected.
+ *
+ * The controls screen keeps its own path (list_control). */
+
+/* Where the window cursor effectively is: the game's own cursor plus the motion
+ * posted but not yet read (dx/dy), as the controls list reckons it. */
+static void menu_cursor(int32_t cursor_x, int32_t cursor_y, int32_t *x, int32_t *y)
+{
+    *x = cursor_x + g_mouse.dx;
+    *y = cursor_y + g_mouse.dy;
+}
+
+/* Move the window cursor to (x, y) by posting the relative delta that takes it
+ * there from where it effectively is, exactly as list_cursor_to does. */
+static void menu_cursor_to(int32_t cursor_x, int32_t cursor_y, int32_t x, int32_t y)
+{
+    int32_t cx, cy;
+    menu_cursor(cursor_x, cursor_y, &cx, &cy);
+    g_mouse.dx += x - cx;
+    g_mouse.dy += y - cy;
+    g_mouse.x = x;
+    g_mouse.y = y;
+    user32_post_message(0x0200, 0, ((uint32_t)y << 16) | ((uint32_t)x & 0xFFFFu));
+}
+
+/* The widget (index into v) the cursor is inside, else -1. */
+static int menu_widget_at(const IgiMenuWidget *v, int n, int32_t cx, int32_t cy)
+{
+    for (int i = 0; i < n; i++)
+        if (cx >= v[i].x && cx < v[i].x + v[i].w && cy >= v[i].y && cy < v[i].y + v[i].h)
+            return i;
+    return -1;
+}
+
+/* A control on a menu screen other than the controls screen; 1 if handled.
+ * Cross clicks wherever the cursor is (an item, OK/Cancel, a tap target). The
+ * D-pad walks the window's widgets: up/down to the previous/next one, wrapping,
+ * snapping the cursor to its centre. Left/right are left to the game (arrow keys
+ * a value widget consumes). A cursor on no widget is brought to the item in
+ * focus (or the first) so a first press always lands somewhere sensible. */
+static int menu_nav(PadControl control, uint8_t *mouse_sent)
+{
+    int list_screen = igi_menu_is_list_screen();
+    if (control == PAD_CROSS) {
+        if (list_screen) {
+            /* The mission screen does not move its cursor, so OK cannot be reached
+             * by hovering it; press it the way the game's keyboard focus does, by
+             * setting its command field (igi_menu_activate_widget). OK is the
+             * topmost focusable widget (above Cancel). */
+            IgiMenuWidget v[32];
+            int n = igi_menu_widgets(v, (int)(sizeof(v) / sizeof(v[0])), NULL);
+            if (n <= 0)
+                return 0;
+            int ok = 0;
+            for (int i = 1; i < n; i++)
+                if (v[i].y < v[ok].y)
+                    ok = i;
+            igi_menu_activate_widget(v[ok].index);
+            return 1;
+        }
+        pad_mouse_button(0, 1);
+        *mouse_sent = 1;
+        return 1;
+    }
+    int up = control == PAD_DPAD_UP || control == PAD_LSTICK_UP;
+    int down = control == PAD_DPAD_DOWN || control == PAD_LSTICK_DOWN;
+    if (!up && !down)
+        return 0;   /* left/right/others: fall through to the game's arrow keys */
+    if (list_screen)
+        return 0;   /* mission select: let the arrow key scroll the list (it is not
+                     * a focusable widget, so the cursor cannot reach its rows);
+                     * Cross then clicks OK, which starts the selected mission */
+    IgiMenuWidget v[32];
+    int focus = 0;
+    int n = igi_menu_widgets(v, (int)(sizeof(v) / sizeof(v[0])), &focus);
+    if (n <= 0)
+        return 0;   /* no menu window: let menu_key send arrow keys as before */
+    int32_t cx, cy, cur_x, cur_y;
+    if (!igi_menu_cursor(&cur_x, &cur_y))
+        return 0;
+    menu_cursor(cur_x, cur_y, &cx, &cy);
+    int at = menu_widget_at(v, n, cx, cy);
+    int target;
+    if (at < 0) {
+        /* Not on any widget: go to the one in focus, else the first. */
+        target = 0;
+        for (int i = 0; i < n; i++)
+            if (v[i].index == focus) {
+                target = i;
+                break;
+            }
+    } else {
+        target = at + (down ? 1 : -1);
+        if (target < 0)
+            target = n - 1;
+        else if (target >= n)
+            target = 0;
+    }
+    menu_cursor_to(cur_x, cur_y, v[target].x + v[target].w / 2, v[target].y + v[target].h / 2);
+    return 1;
+}
+
 /* ---- controls ----------------------------------------------------------------- */
 
 typedef struct Sent {
@@ -201,8 +320,12 @@ void pad_control(PadControl control, int down)
         IgiControlsList l;
         int list = igi_controls_list(&l);
         if (!(list && l.capturing)) {
-            if (list && igi_controls_pad_scheme() && list_control(&l, control, &s->mouse))
-                return;
+            if (list && igi_controls_pad_scheme()) {
+                if (list_control(&l, control, &s->mouse))
+                    return;
+            } else if (menu_nav(control, &s->mouse)) {
+                return;   /* any other menu screen: the cursor walked its widgets */
+            }
             key = menu_key(control);
         }
     }
@@ -212,6 +335,9 @@ void pad_control(PadControl control, int down)
 
 void pad_tick(void)
 {
+    /* A deferred OK click on the mission-select screen: fire it once the game has
+     * had a frame or two to move its cursor onto OK (see menu_nav). Held until
+     * Cross is released (pad_control's release frees it through s->mouse). */
     /* The controls screen opening: the cursor on its first row, for the D-pad. */
     static int list_up;
     IgiControlsList l;

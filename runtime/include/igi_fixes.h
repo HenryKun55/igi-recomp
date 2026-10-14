@@ -31,4 +31,33 @@ int igi_computer_active(void);
  * exactly on the touched point, with no accumulated drift (platform_vita.c). */
 int igi_menu_cursor(int32_t *x, int32_t *y);
 
+/* One focusable widget of the current menu window, with its screen rectangle
+ * (game-screen coordinates, the space of the menu cursor). */
+typedef struct IgiMenuWidget {
+    uint32_t widget;      /* the widget object */
+    int index;            /* its index in the window's widget array */
+    int32_t x, y, w, h;   /* its screen rectangle */
+} IgiMenuWidget;
+
+/* The current menu window's focusable widgets, in the window's own order (top to
+ * bottom on the stock screens), with their screen rectangles. Fills up to `max`
+ * entries, returns the count and stores the window's current focus index in
+ * *focus (may be NULL). 0 when no live menu window is up. The pad's D-pad walks
+ * these to move the game's own menu cursor between items, exactly as the
+ * controls screen walks its binding rows (shim/src/pad_input.c). */
+int igi_menu_widgets(IgiMenuWidget *out, int max, int *focus);
+
+/* 1 when the current menu screen is a list dialog (the mission select): its only
+ * focusable widgets are a small bottom button strip (OK/Cancel) and the content
+ * is a non-focusable list the game scrolls with the arrow keys. On such a screen
+ * the pad sends arrow keys for the list instead of walking the cursor between
+ * the buttons. A normal menu (items spread down the window) returns 0. */
+int igi_menu_is_list_screen(void);
+
+/* Press a focusable widget by its index in the window's widget array, as the
+ * game's keyboard focus does (sets the widget's command field so it fires on the
+ * next update). Used for the mission-select OK button, which the shared cursor
+ * hit-test cannot reach on that screen. 1 on success. */
+int igi_menu_activate_widget(int index);
+
 #endif
