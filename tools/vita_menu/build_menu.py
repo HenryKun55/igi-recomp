@@ -91,7 +91,16 @@ def menutext(key, click="", font="font3.fnt", colour=2, sound=""):
 
 
 def row(kind, title_key, fn, wid, y):
-    """A label + widget row (a selectable MenuFrame), matching the Controls rows."""
+    """A label + widget row (a selectable MenuFrame), matching the Controls rows.
+
+    The game runs a widget's value-change script from different slots:
+      - a ListBox runs its Modify Data Script (the last param) on every change
+        (the select handler 0x41EC70 calls [obj+0xCE8]); its Set Data Script
+        (0x41F140) only runs when the screen commits. The port applies and
+        persists a setting the instant it changes, so Vita_Set goes in Modify;
+      - a ToggleBox has only Get and Set, and its Set Data Script (0x41E500)
+        runs when the screen commits (there is no per-change slot), so Vita_Set
+        goes in Set and the screen's OK/escape commit (see vita_screen)."""
     label = menutext(title_key)
     if kind == "toggle":
         widget = qvm.Call("Task_New", [wid, S("ToggleBox"), S(""),
@@ -99,13 +108,18 @@ def row(kind, title_key, fn, wid, y):
     else:
         widget = qvm.Call("Task_New", [wid, S("ListBox"), S(""), S("slide"), S("font1.fnt"), 150,
                                        S("Vita_Fill%s()" % fn), S("Vita_Get%s()" % fn),
-                                       S("Vita_Set%s(this.nActiveID)" % fn), S("")])
+                                       S(""), S("Vita_Set%s(this.nActiveID)" % fn)])
     return qvm.Call("Task_New", [-1, S("MenuFrame"), S(title_key), S(""), 95, y, 454, 25, 8, 40, 4,
                                  I("TRUE"), label, widget])
 
 
-def vita_screen(escape_action):
-    """The MenuScreen with every setting row."""
+def vita_screen(commit_action):
+    """The MenuScreen with every setting row.
+
+    `commit_action` leaves the screen committing the widgets (the TRUE variant
+    of the game's screen transitions), so a ToggleBox's Set Data Script runs; it
+    is used both for the OK button and for On Press Escape (Circle), so a change
+    is kept whichever way the player leaves, like a console settings screen."""
     title = menuframe("", 95, 161, 455, 26, 0, 4, 4, False,
                       menutext("Vita Settings", "", "font3.fnt", 1))
     rows = []
@@ -117,9 +131,9 @@ def vita_screen(escape_action):
         wid += 1
     rows_frame = menuframe("", 95, 185, 455, 26, 1, 4, 2, False, *rows)
     okcancel = menuframe("OK/Cancel", 555, 400, 80, 80, 1, 4, 4, False,
-                         menutext("OK", escape_action, "font3.fnt", 2, "menu_ok"))
+                         menutext("OK", commit_action, "font3.fnt", 2, "menu_ok"))
     return qvm.Call("Task_New", [VITA_SCREEN, S("MenuScreen"), S("Vita Settings"), S("mainmenu.pic"),
-                                 100, 163, 540, 470, S(escape_action), S(""), S(""),
+                                 100, 163, 540, 470, S(commit_action), S(""), S(""),
                                  title, rows_frame, okcancel])
 
 
@@ -174,7 +188,8 @@ def patch_main_menu(script):
     add_entry(rows_frame_of(conf), "MenuManager_RequestScreen(%d, FALSE)" % VITA_SCREEN)
     mgr = manager_of(script)
     if not screen_of(script, VITA_SCREEN):
-        mgr.args.append(vita_screen("MenuManager_RequestScreen(904, FALSE)"))
+        # TRUE: commit the widgets on leaving, so a ToggleBox's Set runs.
+        mgr.args.append(vita_screen("MenuManager_RequestScreen(904, TRUE)"))
 
 
 def patch_ingame_menu(script):
@@ -185,7 +200,8 @@ def patch_ingame_menu(script):
     add_entry(rows_frame_of(pause), "MenuManager_PushScreen(%d)\n" % VITA_SCREEN)
     mgr = manager_of(script)
     if not screen_of(script, VITA_SCREEN):
-        mgr.args.append(vita_screen("MenuManager_PopScreen(FALSE)"))
+        # TRUE: commit the widgets on leaving, so a ToggleBox's Set runs.
+        mgr.args.append(vita_screen("MenuManager_PopScreen(TRUE)"))
 
 
 # ---- .res helpers (row titles) ---------------------------------------------
