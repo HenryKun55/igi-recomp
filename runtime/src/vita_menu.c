@@ -66,19 +66,41 @@ typedef struct Row {
     VitaSetting setting;
     RowKind kind;
     const char *get_name, *set_name, *fill_name;   /* fill_name NULL for a toggle */
+    const char *title_key;                          /* the row's MenuText key */
 } Row;
 
 static const Row rows[] = {
-    { VS_ASPECT,           ROW_LIST,   "Vita_GetAspect",      "Vita_SetAspect",      "Vita_FillAspect" },
-    { VS_TOUCH_MODE,       ROW_LIST,   "Vita_GetTouchAim",    "Vita_SetTouchAim",    "Vita_FillTouchAim" },
-    { VS_ONSCREEN_BUTTONS, ROW_TOGGLE, "Vita_GetButtons",     "Vita_SetButtons",     NULL },
-    { VS_REAR,             ROW_LIST,   "Vita_GetRear",        "Vita_SetRear",        "Vita_FillRear" },
-    { VS_FRONT_TOUCH,      ROW_TOGGLE, "Vita_GetFrontTouch",  "Vita_SetFrontTouch",  NULL },
-    { VS_SENSITIVITY,      ROW_LIST,   "Vita_GetSensitivity", "Vita_SetSensitivity", "Vita_FillSensitivity" },
-    { VS_OVERLAY,          ROW_TOGGLE, "Vita_GetOverlay",     "Vita_SetOverlay",     NULL },
-    { VS_UPDATE_CHECK,     ROW_TOGGLE, "Vita_GetUpdateCheck", "Vita_SetUpdateCheck", NULL },
+    { VS_ASPECT,           ROW_LIST,   "Vita_GetAspect",      "Vita_SetAspect",      "Vita_FillAspect",      "Vita_Aspect" },
+    { VS_TOUCH_MODE,       ROW_LIST,   "Vita_GetTouchAim",    "Vita_SetTouchAim",    "Vita_FillTouchAim",    "Vita_TouchAim" },
+    { VS_ONSCREEN_BUTTONS, ROW_TOGGLE, "Vita_GetButtons",     "Vita_SetButtons",     NULL,                   "Vita_Buttons" },
+    { VS_REAR,             ROW_LIST,   "Vita_GetRear",        "Vita_SetRear",        "Vita_FillRear",        "Vita_Rear" },
+    { VS_FRONT_TOUCH,      ROW_TOGGLE, "Vita_GetFrontTouch",  "Vita_SetFrontTouch",  NULL,                   "Vita_FrontTouch" },
+    { VS_SENSITIVITY,      ROW_LIST,   "Vita_GetSensitivity", "Vita_SetSensitivity", "Vita_FillSensitivity", "Vita_Sensitivity" },
+    { VS_OVERLAY,          ROW_TOGGLE, "Vita_GetOverlay",     "Vita_SetOverlay",     NULL,                   "Vita_Overlay" },
+    { VS_UPDATE_CHECK,     ROW_TOGGLE, "Vita_GetUpdateCheck", "Vita_SetUpdateCheck", NULL,                   "Vita_UpdateCheck" },
 };
 #define N_ROWS (int)(sizeof(rows) / sizeof(rows[0]))
+
+/* The screen's own title and the Options-menu entry (keys the menu scripts use;
+ * their text, like the row titles, comes from the port, not menusystem.res, so
+ * no language file needs editing to ship the screen). cp1252, English (the
+ * fallback) then Portuguese (the menu-text hook picks the column by language). */
+#define N_MENU_LANGS 2   /* English, Portuguese (other languages fall back to English) */
+static const struct {
+    const char *key;
+    const char *text[N_MENU_LANGS];   /* [0] English (and the fallback), [1] Portuguese */
+} fixed_titles[] = {
+    { "Vita",          { "Vita",          "Vita" } },
+    { "Vita Settings", { "Vita Settings", "Ajustes do Vita" } },
+};
+#define N_FIXED_TITLES (int)(sizeof(fixed_titles) / sizeof(fixed_titles[0]))
+
+/* Guest copies of the row titles (per language) and the fixed titles, so the
+ * menu-text hook (0x418EA0, runtime/src/igi_controls.c) can answer the Vita
+ * keys from here instead of menusystem.res. */
+static uint32_t row_title_ptr[N_ROWS][N_MENU_LANGS];
+static uint32_t fixed_title_ptr[N_FIXED_TITLES][N_MENU_LANGS];
+static int titles_ready;
 
 /* thunk address -> which row and which operation. */
 static struct {
@@ -193,6 +215,50 @@ static uint32_t register_func(Ctx *c, uint32_t sp, const char *name, uint32_t ar
     return thunk;
 }
 
+/* The game language ids for the two columns the port keeps (igi_language.c:
+ * ENGLISH is 0, the port's PORTUGUESE is 6); everything else falls back to the
+ * English column, matching vita_settings.c and igi_controls.c. */
+#define VITA_LANG_ENGLISH 0u
+#define VITA_LANG_PORTUGUESE 6u
+
+static unsigned menu_lang_col(uint32_t lang)
+{
+    return lang == VITA_LANG_PORTUGUESE ? 1u : 0u;   /* else English */
+}
+
+/* Guest copies of the Vita row titles and the fixed titles, so the menu-text
+ * hook can serve them without a menusystem.res edit. Run once, at probe time,
+ * before the menus are built (strings never change afterwards). */
+static void register_titles(void)
+{
+    static const uint32_t lang_id[N_MENU_LANGS] = { VITA_LANG_ENGLISH, VITA_LANG_PORTUGUESE };
+    for (int r = 0; r < N_ROWS; r++)
+        for (int l = 0; l < N_MENU_LANGS; l++)
+            row_title_ptr[r][l] = scratch_strdup(vita_setting_name(rows[r].setting, lang_id[l]));
+    for (int t = 0; t < N_FIXED_TITLES; t++)
+        for (int l = 0; l < N_MENU_LANGS; l++)
+            fixed_title_ptr[t][l] = scratch_strdup(fixed_titles[t].text[l]);
+    titles_ready = 1;
+}
+
+/* The menu-text hook (0x418EA0, runtime/src/igi_controls.c) calls this for a
+ * key it did not recognise: if `key` (a guest string) is one of the Vita screen
+ * texts, return a guest pointer to its text for `lang`, else 0. */
+uint32_t vita_menu_text(uint32_t key, uint32_t lang)
+{
+    if (!titles_ready || key < 0x10000u)
+        return 0;
+    const char *s = (const char *)(g_mem + key);
+    unsigned l = menu_lang_col(lang);
+    for (int r = 0; r < N_ROWS; r++)
+        if (strcmp(s, rows[r].title_key) == 0)
+            return row_title_ptr[r][l];
+    for (int t = 0; t < N_FIXED_TITLES; t++)
+        if (strcmp(s, fixed_titles[t].key) == 0)
+            return fixed_title_ptr[t][l];
+    return 0;
+}
+
 void vita_menu_probe(Ctx *c, uint32_t func, uint32_t sp)
 {
     if (func != DEFINE_GAME_OPTIONS || registered)
@@ -215,5 +281,6 @@ void vita_menu_probe(Ctx *c, uint32_t func, uint32_t sp)
                 choice_label_ptr[r][i] = scratch_strdup(vita_setting_choice_label(rows[r].setting, i));
         }
     }
+    register_titles();
     rt_log("vita_menu: %d option rows registered", N_ROWS);
 }

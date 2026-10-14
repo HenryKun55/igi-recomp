@@ -40,6 +40,7 @@
 #include "igi_controls.h"
 #include "recomp.h"
 #include "runtime.h"
+#include "vita_menu.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -380,6 +381,8 @@ int rt_controls_text(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t 
             if (guest_streq(key, pad_texts[i].key))
                 text = text_ptr[i][l];
     }
+    if (!text)
+        text = vita_menu_text(key, lang);   /* the Vita options screen's own texts */
     if (!text)
         return 0;
     c->r[1] = ecx;
