@@ -1348,18 +1348,20 @@ static const uint16_t *glyph(char ch)
 }
 
 /* Overlay quads as a vertex array (immediate mode is a call per vertex in vitaGL),
- * rebuilt only when the text changes. */
-#define OVERLAY_MAX_VERTS 32768
+ * rebuilt only when the text changes. Each quad is two triangles: GL_TRIANGLES is
+ * a native sceGxm primitive, unlike the emulated GL_QUADS (see bk_buttons). */
+#define OVERLAY_MAX_VERTS 49152
 static float ov_verts[OVERLAY_MAX_VERTS * 2];
 static int ov_count;
 
 static void ov_quad(float x0, float y0, float x1, float y1)
 {
-    if (ov_count + 4 > OVERLAY_MAX_VERTS)
+    if (ov_count + 6 > OVERLAY_MAX_VERTS)
         return;
     float *v = &ov_verts[ov_count * 2];
-    v[0] = x0; v[1] = y0; v[2] = x1; v[3] = y0; v[4] = x1; v[5] = y1; v[6] = x0; v[7] = y1;
-    ov_count += 4;
+    v[0] = x0; v[1] = y0; v[2] = x1; v[3] = y0; v[4] = x1; v[5] = y1;   /* tri 1 */
+    v[6] = x0; v[7] = y0; v[8] = x1; v[9] = y1; v[10] = x0; v[11] = y1; /* tri 2 */
+    ov_count += 6;
 }
 
 static void overlay_text(float x, float y, float px, const char *s)
@@ -1416,34 +1418,46 @@ void bk_overlay(const void *p)
         for (int i = 0; i < OVERLAY_LINES; i++)
             overlay_text(px, px * (1.0f + 6.0f * (float)i), px, o->lines[i]);
     }
+    /* Background (first quad = 6 verts) in black, then the glyphs in yellow, each
+     * group from the start of its own vertex pointer (first = 0). */
     glEnableClientState(GL_VERTEX_ARRAY);
     glVertexPointer(2, GL_FLOAT, 0, ov_verts);
     ptr_cache_reset();
     glColor4f(0, 0, 0, 1);
-    glDrawArrays(GL_QUADS, 0, 4);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
     glColor4f(1, 1, 0, 1);
-    if (ov_count > 4)
-        glDrawArrays(GL_QUADS, 4, ov_count - 4);
+    if (ov_count > 6) {
+        glVertexPointer(2, GL_FLOAT, 0, &ov_verts[6 * 2]);
+        ptr_cache_reset();
+        glDrawArrays(GL_TRIANGLES, 0, ov_count - 6);
+    }
     glColor4f(1, 1, 1, 1);
 }
 
 /* ---- on-screen touch buttons ---------------------------------------------- */
 
-/* The buttons use the same untextured quad path as the overlay, but blended, so
- * they are semi-transparent over the HUD. Three groups, each a glDrawArrays:
- * bodies (filled, dark), labels (bright glyphs), and a thin border per button.
- * A separate vertex buffer keeps the overlay's cached geometry intact. */
+/* The buttons are untextured, blended quads over the HUD (semi-transparent), in
+ * three groups each drawn with one glDrawArrays: bodies (filled, dark), a thin
+ * border per button, and labels (bright glyphs). A separate vertex buffer keeps
+ * the overlay's cached geometry intact.
+ *
+ * Each rectangle is two triangles (GL_TRIANGLES): unlike GL_QUADS, which vitaGL
+ * emulates as a non-native primitive drawn through a shared, zero-based index
+ * buffer (the `first` offset only shifts the vertex stream), GL_TRIANGLES maps
+ * straight to a native sceGxm draw. On the real Vita the GL_QUADS path closed the
+ * game when the buttons were enabled; the native triangle path draws them fine. */
 #define BTN_MAX_VERTS 4096
 static float btn_verts[BTN_MAX_VERTS * 2];
 static int btn_count;
 
 static void btn_quad(float x0, float y0, float x1, float y1)
 {
-    if (btn_count + 4 > BTN_MAX_VERTS)
+    if (btn_count + 6 > BTN_MAX_VERTS)
         return;
     float *v = &btn_verts[btn_count * 2];
-    v[0] = x0; v[1] = y0; v[2] = x1; v[3] = y0; v[4] = x1; v[5] = y1; v[6] = x0; v[7] = y1;
-    btn_count += 4;
+    v[0] = x0; v[1] = y0; v[2] = x1; v[3] = y0; v[4] = x1; v[5] = y1;   /* tri 1 */
+    v[6] = x0; v[7] = y0; v[8] = x1; v[9] = y1; v[10] = x0; v[11] = y1; /* tri 2 */
+    btn_count += 6;
 }
 
 /* A label glyph centred in the button (px = font-pixel size). */
@@ -1489,9 +1503,8 @@ void bk_buttons(const void *p)
     float px = (float)B.fb_h / 181.0f;   /* same glyph scale as the overlay */
     float bw = px;                        /* border thickness */
 
-    /* All vertices are built once into btn_verts in four contiguous groups and
-     * drawn with a `first` offset (like bk_overlay): the client array is never
-     * mutated between draws, so it stays correct even if vitaGL defers it. */
+    /* All vertices are built once into btn_verts in four contiguous groups; each
+     * group is then drawn from the start of its own vertex pointer (first = 0). */
     btn_count = 0;
     /* Group 1: filled bodies. */
     int g1_first = btn_count;
@@ -1526,23 +1539,29 @@ void bk_buttons(const void *p)
     int g3_n = btn_count - g3_first;
 
     glEnableClientState(GL_VERTEX_ARRAY);
-    glVertexPointer(2, GL_FLOAT, 0, btn_verts);
-    ptr_cache_reset();
     if (g1_n) {
+        glVertexPointer(2, GL_FLOAT, 0, &btn_verts[g1_first * 2]);
+        ptr_cache_reset();
         glColor4f(0.08f, 0.08f, 0.10f, 0.42f);
-        glDrawArrays(GL_QUADS, g1_first, g1_n);
+        glDrawArrays(GL_TRIANGLES, 0, g1_n);
     }
     if (g2_n[0]) {
+        glVertexPointer(2, GL_FLOAT, 0, &btn_verts[g2_first[0] * 2]);
+        ptr_cache_reset();
         glColor4f(0.9f, 0.9f, 0.9f, 0.6f);        /* idle: light grey */
-        glDrawArrays(GL_QUADS, g2_first[0], g2_n[0]);
+        glDrawArrays(GL_TRIANGLES, 0, g2_n[0]);
     }
     if (g2_n[1]) {
+        glVertexPointer(2, GL_FLOAT, 0, &btn_verts[g2_first[1] * 2]);
+        ptr_cache_reset();
         glColor4f(1.0f, 0.9f, 0.2f, 0.95f);       /* pressed: yellow */
-        glDrawArrays(GL_QUADS, g2_first[1], g2_n[1]);
+        glDrawArrays(GL_TRIANGLES, 0, g2_n[1]);
     }
     if (g3_n) {
+        glVertexPointer(2, GL_FLOAT, 0, &btn_verts[g3_first * 2]);
+        ptr_cache_reset();
         glColor4f(1.0f, 1.0f, 1.0f, 0.95f);
-        glDrawArrays(GL_QUADS, g3_first, g3_n);
+        glDrawArrays(GL_TRIANGLES, 0, g3_n);
     }
     glDisable(GL_BLEND);   /* leave blend off, as every 2D path here expects on entry */
     glColor4f(1, 1, 1, 1);
