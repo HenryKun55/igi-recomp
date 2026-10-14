@@ -586,6 +586,7 @@ static int tap_click;        /* > 0: a computer tap click is held, released afte
 
 /* Menu/computer touch state (file scope so a mode flip mid-touch can reset it). */
 static int menu_active, menu_clicking, menu_last_x, menu_last_y, menu_moved, menu_frames;
+static int menu_snapped;   /* the menu cursor has been placed on this touch */
 static float menu_acc_x, menu_acc_y;
 
 /* Release a held menu click and forget the touch, so a later menu touch starts
@@ -594,7 +595,7 @@ static void front_menu_reset(void)
 {
     if (menu_clicking)
         pad_mouse_button(0, 0);
-    menu_active = menu_clicking = menu_moved = menu_frames = 0;
+    menu_active = menu_clicking = menu_moved = menu_frames = menu_snapped = 0;
     menu_acc_x = menu_acc_y = 0.0f;
 }
 
@@ -604,12 +605,18 @@ static void front_menu_touch(const SceTouchData *t, int computer)
     if (!down) {
         if (menu_clicking)
             pad_mouse_button(0, 0);
-        if (menu_active && computer && !menu_clicking && !tap_click && menu_moved <= TAP_MOVE &&
-            menu_frames <= TAP_FRAMES && igi_computer_active()) {
+        /* A tap (a short, still touch) clicks on release, for both the menus and
+         * the map computer: the cursor is already resting on the item, so the
+         * click lands there. The hold is released a few polls later in
+         * front_touch, so the game is sure to see it. No click while the controls
+         * screen waits for a key -- it would bind the mouse button, which the pad
+         * does not have in play. */
+        if (menu_active && !menu_clicking && !tap_click && menu_moved <= TAP_MOVE &&
+            menu_frames <= TAP_FRAMES && (computer ? igi_computer_active() : !pad_capturing_key())) {
             pad_mouse_button(0, 1);
             tap_click = TAP_CLICK_HOLD;
         }
-        menu_active = menu_clicking = 0;
+        menu_active = menu_clicking = menu_snapped = 0;
         return;
     }
     int x = t->report[0].x, y = t->report[0].y;
@@ -619,44 +626,54 @@ static void front_menu_touch(const SceTouchData *t, int computer)
         menu_last_y = y;
         menu_moved = menu_frames = 0;
         menu_acc_x = menu_acc_y = 0.0f;
+        menu_snapped = 0;
     }
     if (!computer) {
         /* Menus (main menu, options, mission select, the controls screen, the
          * Vita options) keep their own cursor and move it only by the relative
          * DirectInput mouse motion, hit-testing every widget against it (see
-         * runtime/src/igi_fixes.c igi_menu_cursor). To make a tap land exactly
-         * under the finger with no drift, read that cursor's current position
-         * and post the delta that takes it to the touched point, as the controls
-         * screen already does for the D-pad (shim/src/pad_input.c list_cursor_to).
+         * runtime/src/igi_fixes.c igi_menu_cursor). The cursor is snapped to the
+         * touched point ONCE, on the touch-down frame, by posting the delta that
+         * takes the cursor there (as the D-pad does, shim/src/pad_input.c
+         * list_cursor_to); after that it only follows the finger when the finger
+         * actually moves. Re-chasing the touched point every frame oscillated,
+         * because the game consumes the posted motion a poll or two later while
+         * touch_to_game's quantisation kept the target a pixel off, so each poll
+         * posted an opposite delta -- the cursor shook and never settled to
+         * click. Following real movement only, and holding otherwise, is steady.
          * touch_to_game honours mode_w/mode_h, aspect_keep and the real reported
-         * front-panel size, so it stays correct at any resolution or aspect.
-         * Fallback to the old absolute set if no menu cursor is readable. */
-        int32_t gx, gy, cx, cy;
-        touch_to_game(x, y, &gx, &gy);
-        /* Where the menu cursor effectively is: the game's own cursor plus the
-         * motion posted but not yet read (dx/dy), as the controls screen reckons
-         * it (shim/src/pad_input.c list_cursor). Targeting the delta against this
-         * keeps several touch polls before the game consumes the motion from
-         * doubling it, and leaves no drift. If no menu cursor is readable (a rare
-         * transient window state), fall back to the port's own position. */
-        if (!igi_menu_cursor(&cx, &cy)) {
-            cx = g_mouse.x;
-            cy = g_mouse.y;
+         * front-panel size, so it stays correct at any resolution or aspect. */
+        menu_frames++;
+        int dpx = x - menu_last_x, dpy = y - menu_last_y;
+        menu_moved += (dpx < 0 ? -dpx : dpx) + (dpy < 0 ? -dpy : dpy);
+        if (!menu_snapped || menu_moved > TAP_MOVE) {
+            /* Snap on the first frame, or re-snap once the finger has really
+             * moved (a drag): take the cursor to where the finger now is. */
+            int32_t gx, gy, cx, cy;
+            touch_to_game(x, y, &gx, &gy);
+            if (!igi_menu_cursor(&cx, &cy)) {
+                cx = g_mouse.x;
+                cy = g_mouse.y;
+            }
+            cx += g_mouse.dx;   /* motion posted but not yet read by the game */
+            cy += g_mouse.dy;
+            if (gx != cx || gy != cy) {
+                g_mouse.dx += gx - cx;
+                g_mouse.dy += gy - cy;
+                g_mouse.x = gx;
+                g_mouse.y = gy;
+                post_mouse_move();
+            }
+            menu_snapped = 1;
+            if (menu_moved > TAP_MOVE) {
+                menu_last_x = x;   /* start a fresh move window after a drag step */
+                menu_last_y = y;
+                menu_moved = 0;
+            }
         }
-        cx += g_mouse.dx;
-        cy += g_mouse.dy;
-        if (gx != cx || gy != cy) {
-            g_mouse.dx += gx - cx;
-            g_mouse.dy += gy - cy;
-            g_mouse.x = gx;
-            g_mouse.y = gy;
-            post_mouse_move();
-        } else if (!menu_clicking && !pad_capturing_key()) {
-            /* (no click while the controls screen waits for a key: it would
-             * bind the mouse button, which the pad has not in play) */
-            menu_clicking = 1;
-            pad_mouse_button(0, 1);
-        }
+        /* The click happens on release (below), as a tap: a short, still touch.
+         * Holding still here never re-posts motion, so the cursor rests exactly
+         * on the item and the release click lands on it. */
         return;
     }
     /* Map computer: relative motion from the finger's drag (trackpad). */
