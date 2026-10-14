@@ -160,22 +160,30 @@ static int list_control(const IgiControlsList *l, PadControl control, uint8_t *m
 
 /* ---- general menu navigation --------------------------------------------------
  *
- * Most menu screens (main menu, Options, the Vita settings, the in-game menu)
- * work like the controls screen but over the whole window instead of one list:
- * the window keeps its focusable widgets with their screen rectangles
- * (runtime/src/igi_fixes.c igi_menu_widgets), the shared hit-test focuses
- * whichever widget the window cursor is inside, and a click presses it. So the
- * D-pad moves the window cursor between the widgets' centres (relative deltas,
- * like the controls list), Cross clicks under it, and left/right fall through to
- * the game as arrow keys for a value widget (a ListBox) to consume.
+ * Every menu screen (main menu, Options, the Vita settings, the in-game menu and
+ * its Yes/No dialogs) keeps its focusable widgets with their screen rectangles
+ * (runtime/src/igi_fixes.c igi_menu_widgets). The D-pad walks that list: up/down
+ * step to the previous/next widget, wrapping, and the window cursor is steered
+ * onto it so the game highlights it (the shared hit-test marks whichever widget
+ * the cursor is inside). Cross then presses the widget the D-pad walked to
+ * directly, by its command field (igi_menu_activate_widget), the way the game's
+ * keyboard focus does -- so a small button (Yes/No, OK/Cancel) is always pressed
+ * exactly, with no dependence on the cursor landing pixel-perfect on it. Left and
+ * right fall through to the game as arrow keys for a value widget (a ListBox) to
+ * consume.
  *
- * The mission select is different: its mission list is a ScrollListBox that the
- * game scrolls with the arrow keys and that is NOT one of the window's focusable
- * widgets, and that screen does not move its cursor from the mouse at all (only
- * OK and Cancel are focusable, in a bottom strip). igi_menu_is_list_screen spots
- * it; there the D-pad sends the arrow keys so the list moves, and Cross presses
- * OK by its command field (igi_menu_activate_widget), as the game's own keyboard
- * focus does, which starts the mission the list has selected.
+ * The mission select is the one screen whose main content (the mission list) is a
+ * ScrollListBox that is not a focusable widget and does not answer the arrow keys,
+ * so the D-pad cannot reach its rows. There the player moves the cursor onto a
+ * mission with the right stick or the touch screen and R left-clicks under the
+ * cursor to pick it (updating the preview), then presses OK with the D-pad and
+ * Cross. R is a plain "click here" in the menus, useful on any screen. No screen
+ * needs special handling: Yes/No dialogs are ordinary two-widget windows.
+ *
+ * Steering the cursor is only for the highlight: the menu scales the relative
+ * motion it reads and reads it a frame after it moves, so the cursor is nudged
+ * towards the widget over a few polls (menu_seek) rather than jumped, which also
+ * keeps R's click landing where the cursor visibly is.
  *
  * The controls screen keeps its own path (list_control). */
 
@@ -187,17 +195,97 @@ static void menu_cursor(int32_t cursor_x, int32_t cursor_y, int32_t *x, int32_t 
     *y = cursor_y + g_mouse.dy;
 }
 
-/* Move the window cursor to (x, y) by posting the relative delta that takes it
- * there from where it effectively is, exactly as list_cursor_to does. */
-static void menu_cursor_to(int32_t cursor_x, int32_t cursor_y, int32_t x, int32_t y)
+/* The point the D-pad is steering the window cursor to (game-screen coordinates),
+ * or MENU_GOAL_NONE when it is not steering. The menu moves its cursor only by
+ * the relative mouse motion and scales that motion by its own cursor speed, so a
+ * single posted delta does not land exactly: a far target (Yes vs No in a narrow
+ * dialog) overshoots and misses a small button. menu_seek (run every input poll
+ * from pad_tick) closes the gap over a few frames, reading the game's own cursor
+ * each time, so it settles on the target whatever the cursor speed -- the same
+ * closed loop the front touch uses to land a tap (shim/src/platform_vita.c). */
+#define MENU_GOAL_NONE (-100000)
+#define MENU_SEEK_STEPS 20      /* give up after this many correction steps (jitter guard) */
+static int32_t menu_goal_x = MENU_GOAL_NONE, menu_goal_y;   /* the widget's centre, steered to */
+static int32_t menu_goal_rx, menu_goal_ry, menu_goal_rw, menu_goal_rh;   /* its rectangle */
+static int menu_seek_left;      /* correction steps left before giving up */
+static int32_t menu_seek_from_x, menu_seek_from_y;   /* the cursor when the last step was posted */
+static int menu_seek_posted;    /* a step is posted and the cursor has not yet moved from it */
+/* The widget object the D-pad last stepped to, so consecutive presses step
+ * through the widgets in order even before the cursor has reached one -- more
+ * reliable than re-reading the moving cursor, which can be mid-flight or a pixel
+ * off a small button. 0 when not set (reset on a click or on leaving the menus);
+ * revalidated against the live widget array each press, so a screen change (a
+ * different array) falls back to the cursor. */
+static uint32_t menu_cur_widget;
+
+/* Steer the window cursor one step toward the goal and stop once it is inside the
+ * target widget. Called when the D-pad sets a goal and then once per poll until it
+ * arrives. The correction is measured against the game's OWN cursor, not the
+ * effective position (cursor + pending delta): the menu scales the motion it
+ * reads, so a posted delta does not move the cursor by that much, and the next
+ * correction has to start from where the cursor actually ended up. A new step is
+ * posted only once the previous one has visibly moved the cursor, so steps do not
+ * stack. This converges in a few steps whatever the menu's cursor speed. */
+static void menu_seek(void)
 {
-    int32_t cx, cy;
-    menu_cursor(cursor_x, cursor_y, &cx, &cy);
-    g_mouse.dx += x - cx;
-    g_mouse.dy += y - cy;
-    g_mouse.x = x;
-    g_mouse.y = y;
-    user32_post_message(0x0200, 0, ((uint32_t)y << 16) | ((uint32_t)x & 0xFFFFu));
+    if (menu_goal_x == MENU_GOAL_NONE)
+        return;
+    int32_t cur_x, cur_y;
+    if (!igi_menu_cursor(&cur_x, &cur_y))
+        return;   /* no live menu window this frame (e.g. a dialog over gameplay
+                   * whose gameplay window drew last): keep the goal, retry next poll */
+    /* Wait until the last step's motion has actually moved the cursor before
+     * posting the next one. The game reads the mouse delta (clearing g_mouse.dx)
+     * at a different point than it moves its cursor, so "delta read" is not "cursor
+     * moved"; posting again too early stacks deltas and the cursor shoots past.
+     * Seeing the cursor at a new position is the reliable signal the step landed. */
+    if (menu_seek_posted) {
+        if (g_mouse.dx || g_mouse.dy || (cur_x == menu_seek_from_x && cur_y == menu_seek_from_y))
+            return;   /* still in flight */
+        menu_seek_posted = 0;
+    }
+    if (cur_x >= menu_goal_rx && cur_x < menu_goal_rx + menu_goal_rw && cur_y >= menu_goal_ry &&
+        cur_y < menu_goal_ry + menu_goal_rh) {
+        menu_goal_x = MENU_GOAL_NONE;   /* the cursor is inside the target widget: done */
+        return;
+    }
+    if (--menu_seek_left <= 0) {
+        menu_goal_x = MENU_GOAL_NONE;   /* out of tries: steer no more */
+        return;
+    }
+    /* Post about half the gap towards the centre: the menu scales the motion it
+     * reads, so posting the full error overshoots and oscillates; half converges
+     * smoothly whatever the scale, and the loop stops as soon as the cursor is
+     * anywhere inside the widget above. */
+    int32_t ex = menu_goal_x - cur_x, ey = menu_goal_y - cur_y;
+    int32_t dx = ex / 2, dy = ey / 2;
+    if (dx == 0)
+        dx = ex;   /* close the last pixel or two */
+    if (dy == 0)
+        dy = ey;
+    g_mouse.dx += dx;
+    g_mouse.dy += dy;
+    g_mouse.x = cur_x + dx;
+    g_mouse.y = cur_y + dy;
+    menu_seek_from_x = cur_x;
+    menu_seek_from_y = cur_y;
+    menu_seek_posted = 1;
+    user32_post_message(0x0200, 0, ((uint32_t)g_mouse.y << 16) | ((uint32_t)g_mouse.x & 0xFFFFu));
+}
+
+/* Steer the window cursor onto widget w: aim for its centre but stop as soon as
+ * the cursor is anywhere inside it. Takes the first step now. */
+static void menu_cursor_to(const IgiMenuWidget *w)
+{
+    menu_goal_x = w->x + w->w / 2;
+    menu_goal_y = w->y + w->h / 2;
+    menu_goal_rx = w->x;
+    menu_goal_ry = w->y;
+    menu_goal_rw = w->w;
+    menu_goal_rh = w->h;
+    menu_seek_left = MENU_SEEK_STEPS;
+    menu_seek_posted = 0;
+    menu_seek();
 }
 
 /* The widget (index into v) the cursor is inside, else -1. */
@@ -210,31 +298,29 @@ static int menu_widget_at(const IgiMenuWidget *v, int n, int32_t cx, int32_t cy)
 }
 
 /* A control on a menu screen other than the controls screen; 1 if handled.
- * Cross clicks wherever the cursor is (an item, OK/Cancel, a tap target). The
+ * Cross presses the widget the D-pad last walked to (by its command field); with
+ * nothing walked to yet, and always for R, it left-clicks wherever the cursor is
+ * (a mission row the right stick or touch put it on, or any hovered item). The
  * D-pad walks the window's widgets: up/down to the previous/next one, wrapping,
- * snapping the cursor to its centre. Left/right are left to the game (arrow keys
- * a value widget consumes). A cursor on no widget is brought to the item in
- * focus (or the first) so a first press always lands somewhere sensible. */
+ * steering the cursor onto it for the highlight. Left/right are left to the game
+ * (arrow keys a value widget consumes). When nothing has been walked to, the step
+ * starts from the widget the cursor sits on, else the one in focus, else the
+ * first, so a first press always lands somewhere sensible. */
 static int menu_nav(PadControl control, uint8_t *mouse_sent)
 {
-    int list_screen = igi_menu_is_list_screen();
-    if (control == PAD_CROSS) {
-        if (list_screen) {
-            /* The mission screen does not move its cursor, so OK cannot be reached
-             * by hovering it; press it the way the game's keyboard focus does, by
-             * setting its command field (igi_menu_activate_widget). OK is the
-             * topmost focusable widget (above Cancel). */
-            IgiMenuWidget v[32];
-            int n = igi_menu_widgets(v, (int)(sizeof(v) / sizeof(v[0])), NULL);
-            if (n <= 0)
-                return 0;
-            int ok = 0;
-            for (int i = 1; i < n; i++)
-                if (v[i].y < v[ok].y)
-                    ok = i;
-            igi_menu_activate_widget(v[ok].index);
+    if (control == PAD_CROSS || control == PAD_R) {
+        menu_goal_x = MENU_GOAL_NONE;   /* stop steering */
+        if (control == PAD_CROSS && menu_cur_widget) {
+            /* Cross presses the widget the D-pad walked to, by its command field,
+             * exactly as the game's keyboard focus does -- no dependence on the
+             * cursor sitting pixel-perfect on a small button (Yes/No, OK/Cancel). */
+            igi_menu_activate_widget(menu_cur_widget);
+            menu_cur_widget = 0;
             return 1;
         }
+        /* R (and Cross with nothing walked to) clicks where the cursor rests: the
+         * mission the right stick or touch put it on, or any hovered item. */
+        menu_cur_widget = 0;
         pad_mouse_button(0, 1);
         *mouse_sent = 1;
         return 1;
@@ -243,20 +329,28 @@ static int menu_nav(PadControl control, uint8_t *mouse_sent)
     int down = control == PAD_DPAD_DOWN || control == PAD_LSTICK_DOWN;
     if (!up && !down)
         return 0;   /* left/right/others: fall through to the game's arrow keys */
-    if (list_screen)
-        return 0;   /* mission select: let the arrow key scroll the list (it is not
-                     * a focusable widget, so the cursor cannot reach its rows);
-                     * Cross then clicks OK, which starts the selected mission */
     IgiMenuWidget v[32];
     int focus = 0;
     int n = igi_menu_widgets(v, (int)(sizeof(v) / sizeof(v[0])), &focus);
     if (n <= 0)
         return 0;   /* no menu window: let menu_key send arrow keys as before */
-    int32_t cx, cy, cur_x, cur_y;
+    int32_t cur_x, cur_y;
     if (!igi_menu_cursor(&cur_x, &cur_y))
         return 0;
-    menu_cursor(cur_x, cur_y, &cx, &cy);
-    int at = menu_widget_at(v, n, cx, cy);
+    /* Where we are in the widget list: the one the last press stepped to if it is
+     * still in this window's array, else the one the cursor sits on, else none. */
+    int at = -1;
+    if (menu_cur_widget)
+        for (int i = 0; i < n; i++)
+            if (v[i].widget == menu_cur_widget) {
+                at = i;
+                break;
+            }
+    if (at < 0) {
+        int32_t cx, cy;
+        menu_cursor(cur_x, cur_y, &cx, &cy);
+        at = menu_widget_at(v, n, cx, cy);
+    }
     int target;
     if (at < 0) {
         /* Not on any widget: go to the one in focus, else the first. */
@@ -273,7 +367,8 @@ static int menu_nav(PadControl control, uint8_t *mouse_sent)
         else if (target >= n)
             target = 0;
     }
-    menu_cursor_to(cur_x, cur_y, v[target].x + v[target].w / 2, v[target].y + v[target].h / 2);
+    menu_cur_widget = v[target].widget;
+    menu_cursor_to(&v[target]);
     return 1;
 }
 
@@ -335,9 +430,7 @@ void pad_control(PadControl control, int down)
 
 void pad_tick(void)
 {
-    /* A deferred OK click on the mission-select screen: fire it once the game has
-     * had a frame or two to move its cursor onto OK (see menu_nav). Held until
-     * Cross is released (pad_control's release frees it through s->mouse). */
+    menu_seek();   /* steer the window cursor to the D-pad's goal, a step per poll */
     /* The controls screen opening: the cursor on its first row, for the D-pad. */
     static int list_up;
     IgiControlsList l;

@@ -47,17 +47,10 @@ typedef struct IgiMenuWidget {
  * controls screen walks its binding rows (shim/src/pad_input.c). */
 int igi_menu_widgets(IgiMenuWidget *out, int max, int *focus);
 
-/* 1 when the current menu screen is a list dialog (the mission select): its only
- * focusable widgets are a small bottom button strip (OK/Cancel) and the content
- * is a non-focusable list the game scrolls with the arrow keys. On such a screen
- * the pad sends arrow keys for the list instead of walking the cursor between
- * the buttons. A normal menu (items spread down the window) returns 0. */
-int igi_menu_is_list_screen(void);
-
-/* Press a focusable widget by its index in the window's widget array, as the
- * game's keyboard focus does (sets the widget's command field so it fires on the
- * next update). Used for the mission-select OK button, which the shared cursor
- * hit-test cannot reach on that screen. 1 on success. */
-int igi_menu_activate_widget(int index);
+/* Press a focusable widget (one of the objects igi_menu_widgets returned) the way
+ * the game's keyboard focus does, by setting its command field so it fires on the
+ * next update. The D-pad presses the widget it navigated to this way, which needs
+ * no pixel-perfect cursor and always hits the intended widget. 0 is ignored. */
+void igi_menu_activate_widget(uint32_t widget);
 
 #endif

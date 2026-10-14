@@ -117,28 +117,29 @@ int igi_menu_cursor(int32_t *x, int32_t *y)
     return 1;
 }
 
-/* Press a focusable widget by its index in the window's widget array, the way the
- * game's own keyboard focus does: a widget fires when its command field (+0x50) is
- * -7 on the next update (FUN_00421070 checks exactly that, and FUN_00418580 sets
- * it when Enter/Space activates the focused widget). Used for the mission-select
- * OK button: that screen does not move its cursor from the mouse, so the shared
- * cursor hit-test cannot reach OK; setting its command presses it directly. 1 on
- * success. */
+/* Press a focusable widget the way the game's own keyboard focus does: a widget
+ * fires when its command field (+0x50) is -7 on the next update (FUN_00421070
+ * checks exactly that, and FUN_00418580 sets it when Enter/Space activates the
+ * focused widget). The D-pad walks the window's widgets and presses the one it is
+ * on this way (shim/src/pad_input.c), which is exact -- it needs no pixel-perfect
+ * cursor on a small button and so cannot land on the wrong one. `widget` must be
+ * one of the objects igi_menu_widgets returned for the live window; 0 is ignored. */
 #define WIDGET_COMMAND 0x50u
 #define WIDGET_CMD_ACTIVATE 0xFFFFFFF9u   /* -7: "activate this widget" */
-int igi_menu_activate_widget(int index)
+void igi_menu_activate_widget(uint32_t widget)
 {
     int32_t cx, cy;
-    if (!igi_menu_cursor(&cx, &cy))
-        return 0;
+    if (!widget || !igi_menu_cursor(&cx, &cy))
+        return;
+    /* Confirm the object is still a focusable widget of the live window. */
     uint32_t count = RD32(ui_window + WINDOW_WIDGET_COUNT);
-    if (index < 0 || (uint32_t)index >= count || count > WIDGET_MAX)
-        return 0;
-    uint32_t w = RD32(ui_window + WINDOW_WIDGETS + (uint32_t)index * 4u);
-    if (!w)
-        return 0;
-    WR32(w + WIDGET_COMMAND, WIDGET_CMD_ACTIVATE);
-    return 1;
+    if (count > WIDGET_MAX)
+        return;
+    for (uint32_t i = 0; i < count; i++)
+        if (RD32(ui_window + WINDOW_WIDGETS + i * 4u) == widget) {
+            WR32(widget + WIDGET_COMMAND, WIDGET_CMD_ACTIVATE);
+            return;
+        }
 }
 
 /* The current menu window's focusable widgets and their screen rectangles, for
@@ -176,42 +177,6 @@ int igi_menu_widgets(IgiMenuWidget *out, int max, int *focus)
     if (focus)
         *focus = focus_idx;
     return n;
-}
-
-/* 1 when the current menu screen is a "list dialog" -- a screen whose focusable
- * widgets are only a small cluster of buttons near the bottom (OK/Cancel), with
- * the main content a NON-focusable list the game scrolls with the arrow keys
- * (the mission select; its ScrollListBox is not in window+0x3C). On such a screen
- * the pad sends the arrow keys so the list moves, instead of walking the cursor
- * between the bottom buttons (which could land Cross on Cancel). A normal menu
- * (main menu, Options, the Vita settings) has its items as focusable widgets
- * spread down the window, so its topmost focusable widget sits in the upper part
- * and this returns 0 -> the cursor walks the items as usual. Measured against
- * the window's own rectangle, so it holds at any menu resolution. */
-int igi_menu_is_list_screen(void)
-{
-    int32_t cx, cy;
-    if (!igi_menu_cursor(&cx, &cy))
-        return 0;
-    uint32_t count = RD32(ui_window + WINDOW_WIDGET_COUNT);
-    if (count == 0u || count > 3u)
-        return 0;   /* a real menu stack has more items than a dialog's buttons */
-    /* The menus render in a fixed 640x480 virtual space (the window cursor and
-     * the widget rects live in it). A focusable widget above three fifths down
-     * (y < 288) is a menu item; only below it is the bottom button strip. */
-    const int32_t top_cut = 288;
-    int any = 0;
-    for (uint32_t i = 0; i < count; i++) {
-        uint32_t w = RD32(ui_window + WINDOW_WIDGETS + i * 4u);
-        if (!w)
-            continue;
-        if ((int32_t)RD32(w + WIDGET_W) <= 0 || (int32_t)RD32(w + WIDGET_H) <= 0)
-            continue;
-        any = 1;
-        if ((int32_t)RD32(w + WIDGET_Y) < top_cut)
-            return 0;   /* a focusable widget sits in the content area: a normal menu */
-    }
-    return any;   /* all (few) focusable widgets are in the bottom button strip */
 }
 
 /* ---- saving the options ---------------------------------------------------
@@ -295,6 +260,92 @@ static void loading_screen(uint32_t func, uint32_t sp)
     }
 }
 
+/* TEMP DIAGNOSTIC: dump the mission-select window so the ScrollListBox object,
+ * its rect and its selected-index field can be found empirically. Enabled by
+ * IGI_MISSION_DUMP=1. Removed before the final change. */
+static void mission_dump(uint32_t window)
+{
+    static int on = -1;
+    if (on < 0)
+        on = getenv("IGI_MISSION_DUMP") != NULL;
+    if (!on)
+        return;
+    static uint32_t last;
+    static int frames;
+    if (window != last) {
+        last = window;
+        frames = 0;
+    }
+    if (frames++ % 60u != 0u)
+        return;
+    uint32_t count = RD32(window + WINDOW_WIDGET_COUNT);
+    rt_log("[mdump] window %08X state %u widgetcount %u focus %u cursor %d,%d | g539560=%d g539564=%d",
+           window, RD32(window + 0x28u), count, RD32(window + WINDOW_FOCUS_INDEX),
+           (int32_t)RD32(window + 0x27CCu + 0xCu), (int32_t)RD32(window + 0x27CCu + 0x10u),
+           (int32_t)RD32(0x00539560u), (int32_t)RD32(0x00539564u));
+    for (uint32_t i = 0; i < count && i < WIDGET_MAX; i++) {
+        uint32_t w = RD32(window + WINDOW_WIDGETS + i * 4u);
+        if (w)
+            rt_log("[mdump]  widget[%u] %08X rect %d,%d %dx%d cmd %08X", i, w, (int32_t)RD32(w + WIDGET_X),
+                   (int32_t)RD32(w + WIDGET_Y), (int32_t)RD32(w + WIDGET_W), (int32_t)RD32(w + WIDGET_H),
+                   RD32(w + 0x50u));
+    }
+    /* window+0x30 is the screen's root container task (rect 0,0 640x480). Dump its
+     * first 0x120 bytes as dwords so its child pointers (one being the
+     * ScrollListBox) can be read; then follow each pointer-looking field one level
+     * and print its rect, so the list-sized rect (x~140..315, y~210) stands out. */
+    /* Every widget/task of this window keeps a back-pointer to the window at +0x44
+     * (prior RE). Scan the heap around the window's own address for every object
+     * whose +0x44 == window and print its rect plus candidate index fields, so the
+     * ScrollListBox (a tall list-sized rect, x~140..315) and its selected-index
+     * field are revealed. */
+    uint32_t lo = window > 0x20000u ? window - 0x20000u : 0x02000000u;
+    uint32_t hi = window + 0x20000u;
+    if (hi > 0x03000000u)
+        hi = 0x03000000u;
+    for (uint32_t a = lo & ~3u; a < hi; a += 4u) {
+        if (RD32(a + 0x44u) != window)
+            continue;
+        int32_t x = (int32_t)RD32(a + 0x20u), y = (int32_t)RD32(a + 0x24u);
+        int32_t w = (int32_t)RD32(a + 0x28u), h = (int32_t)RD32(a + 0x2Cu);
+        if (w <= 0 || w >= 640 || h <= 0 || h >= 480)
+            continue;
+        /* The mission ScrollListBox: a tall list at x~140, h~230 with the vtable's
+         * item array at +0x180 ({index,nameptr} entries). Narrow to it. */
+        if (x >= 130 && x <= 150 && w >= 150 && w <= 200 && h >= 200) {
+            rt_log("[mdump]  SCROLLBOX %08X rect %d,%d %dx%d full dump:", a, x, y, w, h);
+            for (uint32_t off = 0u; off < 0x200u; off += 0x10u)
+                rt_log("[mdump]   +%03X: %08X %08X %08X %08X", off, RD32(a + off), RD32(a + off + 4u),
+                       RD32(a + off + 8u), RD32(a + off + 0xCu));
+            uint32_t vt = RD32(a);
+            for (uint32_t s = 0u; s < 0x40u; s += 4u)
+                rt_log("[mdump]   vt+%02X: %08X", s, RD32(vt + s));
+            /* IGI_SB_SET=OFF:VAL writes VAL (decimal) to this object+OFF (hex) every
+             * dumped frame, to find which field is nActiveID (the preview changes). */
+            static int parsed;
+            static uint32_t set_off;
+            static int32_t set_val;
+            static int set_on;
+            if (!parsed) {
+                parsed = 1;
+                const char *e = getenv("IGI_SB_SET");
+                if (e) {
+                    set_off = (uint32_t)strtoul(e, NULL, 16);
+                    const char *c2 = strchr(e, ':');
+                    if (c2) {
+                        set_val = atoi(c2 + 1);
+                        set_on = 1;
+                    }
+                }
+            }
+            if (set_on) {
+                WR32(a + set_off, (uint32_t)set_val);
+                rt_log("[mdump]  SET +%03X = %d", set_off, set_val);
+            }
+        }
+    }
+}
+
 void rt_probe(Ctx *c, uint32_t func)
 {
     uint32_t sp = c->r[4];
@@ -304,6 +355,8 @@ void rt_probe(Ctx *c, uint32_t func)
         uint32_t state = RD32(obj + 0x28u);
         if (state == WINDOW_STATE_CUTSCENE)
             cutscene_window = obj;
+        if (state == WINDOW_STATE_ACTIVE)
+            mission_dump(obj);
         static int log_states = -1;
         if (log_states < 0)
             log_states = getenv("IGI_STATE_LOG") != NULL;
