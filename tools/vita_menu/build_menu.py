@@ -35,7 +35,14 @@ import resfile  # noqa: E402
 import qvm  # noqa: E402
 
 VITA_SCREEN = 980   # id of the new MenuScreen (clear of the game's 900..969)
-FIRST_WIDGET = 980  # first widget id (each row uses one)
+# The menu VM drops the SET/MODIFY data script of the FIRST value widget it shows
+# on a screen (its cached "this.<member>" binding is freed on first evaluation,
+# FUN_004F1740 in IGI.exe), so that widget can neither apply a change nor be read
+# at commit. To keep every real row working, the screen opens with one throwaway
+# off-screen widget (SACRIFICE_WIDGET) that takes that hit; the real rows start at
+# FIRST_WIDGET and are all "non-first", so their scripts behave normally.
+SACRIFICE_WIDGET = 980
+FIRST_WIDGET = 981  # first real widget id (each row uses one)
 
 # One row per setting, in screen order. kind: "toggle" or "list". `key` is the
 # row-title text key (LOCAL:<lang>/Vita_<key>); `fn` names the Vita_* script
@@ -113,13 +120,57 @@ def row(kind, title_key, fn, wid, y):
                                  I("TRUE"), label, widget])
 
 
+def commit_script():
+    """The MenuScreen's Set Data Script (the commit slot, arg index 10), run when
+    the screen is left with the TRUE transition (its OK button and On-Press-Escape).
+
+    It calls every row's Vita_Set with the widget's current value, read straight
+    off the widget (a ListBox's nActiveID / a ToggleBox's isOn, referenced by the
+    widget's id like the stock screens' "ListBox_951.nActiveID"). This is the
+    robust belt-and-suspenders apply: even if a row's per-change Modify script is
+    skipped, leaving the screen re-applies and persists every row from its shown
+    value. It references only the real rows (FIRST_WIDGET and up); referencing the
+    cursed SACRIFICE_WIDGET here would abort the screen transition.
+
+    The calls are chained with && like the stock "...RequestScreen(904, FALSE) &&
+    Game_UpdateVolume()"; Vita_Set returns a truthy value (runtime/src/vita_menu.c)
+    so the && does not short-circuit and every setter runs."""
+    parts = []
+    wid = FIRST_WIDGET
+    for kind, _title_key, fn, _en in ROWS:
+        if kind == "toggle":
+            parts.append("Vita_Set%s(ToggleBox_%d.isOn)" % (fn, wid))
+        else:
+            parts.append("Vita_Set%s(ListBox_%d.nActiveID)" % (fn, wid))
+        wid += 1
+    return " && ".join(parts)
+
+
+def sacrifice_frame():
+    """A throwaway off-screen ListBox (SACRIFICE_WIDGET) placed as the screen's
+    first value widget, so the VM's first-widget data-script drop lands on it and
+    the real rows keep working (see SACRIFICE_WIDGET). It is a direct screen child
+    at an off-screen position so it is laid out absolutely (not stacked with the
+    rows) and never drawn; its scripts are empty, so it touches nothing."""
+    widget = qvm.Call("Task_New", [SACRIFICE_WIDGET, S("ListBox"), S(""), S("slide"), S("font1.fnt"),
+                                   150, S(""), S(""), S(""), S("")])
+    return menuframe("", 900, 900, 10, 10, 0, 4, 4, False, widget)
+
+
 def vita_screen(commit_action):
     """The MenuScreen with every setting row.
 
     `commit_action` leaves the screen committing the widgets (the TRUE variant
-    of the game's screen transitions), so a ToggleBox's Set Data Script runs; it
+    of the game's screen transitions), so the screen's Set Data Script runs; it
     is used both for the OK button and for On Press Escape (Circle), so a change
-    is kept whichever way the player leaves, like a console settings screen."""
+    is kept whichever way the player leaves, like a console settings screen.
+
+    The Set Data Script (commit_script(), the MenuScreen's arg index 10) applies
+    and persists every row on leaving, so a change is kept even when a row's
+    per-change Modify script was skipped. The first screen child is an off-screen
+    sacrifice widget (sacrifice_frame()) that absorbs the VM's first-widget data-
+    script drop, so every real row applies both on change and on commit."""
+    sacrifice = sacrifice_frame()
     title = menuframe("", 95, 161, 455, 26, 0, 4, 4, False,
                       menutext("Vita Settings", "", "font3.fnt", 1))
     rows = []
@@ -133,8 +184,8 @@ def vita_screen(commit_action):
     okcancel = menuframe("OK/Cancel", 555, 400, 80, 80, 1, 4, 4, False,
                          menutext("OK", commit_action, "font3.fnt", 2, "menu_ok"))
     return qvm.Call("Task_New", [VITA_SCREEN, S("MenuScreen"), S("Vita Settings"), S("mainmenu.pic"),
-                                 100, 163, 540, 470, S(commit_action), S(""), S(""),
-                                 title, rows_frame, okcancel])
+                                 100, 163, 540, 470, S(commit_action), S(""), S(commit_script()),
+                                 sacrifice, title, rows_frame, okcancel])
 
 
 def add_entry(rows_frame, click):

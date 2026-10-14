@@ -779,7 +779,12 @@ static const struct { int toggle; const char *key; const char *fn; } ROWS[] = {
 };
 #define N_ROWS ((int)(sizeof(ROWS) / sizeof(ROWS[0])))
 #define VITA_SCREEN 980
-#define FIRST_WIDGET 980
+/* The menu VM drops the SET/MODIFY data script of the FIRST value widget on a
+ * screen, so the screen opens with one throwaway off-screen widget that takes
+ * that hit and the real rows (FIRST_WIDGET and up) all behave normally. Mirrors
+ * build_menu.py's SACRIFICE_WIDGET / FIRST_WIDGET. */
+#define SACRIFICE_WIDGET 980
+#define FIRST_WIDGET 981
 
 static Node *str_(Ctxp *x, const char *s) { return node_str(x, s); }
 static Node *int_(Ctxp *x, int64_t v) { return node_int(x, v); }
@@ -853,9 +858,62 @@ static Node *row(Ctxp *x, int toggle, const char *title_key, const char *fn, int
     return menuframe(x, title_key, 95, y, 454, 25, 8, 40, 4, 1, kids, 2);
 }
 
+/* The screen's Set Data Script (the commit slot, arg index 10), run when the
+ * screen is left with the TRUE transition (its OK button and On-Press-Escape):
+ * call every row's Vita_Set with the widget's current value (a ListBox's
+ * nActiveID / a ToggleBox's isOn, referenced by the widget id like the stock
+ * "ListBox_951.nActiveID"), chained with && like the stock
+ * "...RequestScreen(904, FALSE) && Game_UpdateVolume()". Vita_Set returns a
+ * truthy value (runtime/src/vita_menu.c) so the && does not short-circuit, so
+ * leaving the screen re-applies and persists every row even if a row's per-change
+ * Modify script was skipped. It references only the real rows (FIRST_WIDGET and
+ * up); referencing the cursed SACRIFICE_WIDGET here would abort the transition.
+ * Mirrors build_menu.py commit_script(). */
+static const char *commit_script(Ctxp *x)
+{
+    char buf[512];
+    size_t pos = 0;
+    int wid = FIRST_WIDGET;
+    for (int i = 0; i < N_ROWS; i++) {
+        const char *sep = i ? " && " : "";
+        const char *widget = ROWS[i].toggle ? "ToggleBox" : "ListBox";
+        const char *member = ROWS[i].toggle ? "isOn" : "nActiveID";
+        int n = snprintf(buf + pos, sizeof(buf) - pos, "%sVita_Set%s(%s_%d.%s)",
+                         sep, ROWS[i].fn, widget, wid, member);
+        if (n < 0 || (size_t)n >= sizeof(buf) - pos) {
+            fail(x);
+            return "";
+        }
+        pos += (size_t)n;
+        wid += 1;
+    }
+    const char *s = arena_strdup(x->a, buf);
+    if (!s) {
+        fail(x);
+        return "";
+    }
+    return s;
+}
+
+/* A throwaway off-screen ListBox (SACRIFICE_WIDGET) placed as the screen's first
+ * value widget, so the VM's first-widget data-script drop lands on it and the
+ * real rows keep working. A direct screen child at an off-screen position so it
+ * is laid out absolutely (not stacked with the rows) and never drawn; its scripts
+ * are empty. Mirrors build_menu.py sacrifice_frame(). */
+static Node *sacrifice_frame(Ctxp *x)
+{
+    Node *widget = node_call(x, "Task_New",
+                             int_(x, SACRIFICE_WIDGET), str_(x, "ListBox"), str_(x, ""), str_(x, "slide"),
+                             str_(x, "font1.fnt"), int_(x, 150), str_(x, ""), str_(x, ""), str_(x, ""),
+                             str_(x, ""), (Node *)NULL);
+    return menuframe(x, "", 900, 900, 10, 10, 0, 4, 4, 0, &widget, 1);
+}
+
 /* The MenuScreen 980 with every setting row (build_menu.py vita_screen()). */
 static Node *vita_screen(Ctxp *x, const char *commit_action)
 {
+    Node *sacrifice = sacrifice_frame(x);
+
     Node *tkid = menutext(x, "", "Vita Settings", "font3.fnt", 1, "", "");
     Node *title = menuframe(x, "", 95, 161, 455, 26, 0, 4, 4, 0, &tkid, 1);
 
@@ -874,8 +932,10 @@ static Node *vita_screen(Ctxp *x, const char *commit_action)
     Node *screen = node_call(x, "Task_New",
                              int_(x, VITA_SCREEN), str_(x, "MenuScreen"), str_(x, "Vita Settings"),
                              str_(x, "mainmenu.pic"), int_(x, 100), int_(x, 163), int_(x, 540),
-                             int_(x, 470), str_(x, commit_action), str_(x, ""), str_(x, ""),
+                             int_(x, 470), str_(x, commit_action), str_(x, ""),
+                             str_(x, commit_script(x)),
                              (Node *)NULL);
+    node_add(x, screen, sacrifice);
     node_add(x, screen, title);
     node_add(x, screen, rows_frame);
     node_add(x, screen, okcancel);

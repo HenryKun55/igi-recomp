@@ -26,6 +26,7 @@
 #include "runtime.h"
 #include "vita_settings.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #define DEFINE_GAME_OPTIONS 0x00402FF0u
@@ -160,8 +161,20 @@ static void do_set(Ctx *c, int r)
      * the same way). */
     const uint32_t args[2] = { arg_frame, 0u };
     int value = (int)guest_call(c, GAME_ARG_INT, 2, args);
+    /* IGI_MENU_LOG=1: trace every setter call (the per-change Modify and the
+     * commit chain), so a run can see each Vita_Set fire, not just the ones that
+     * changed a value (vita_setting_set only logs on a change). */
+    static int menu_log = -1;
+    if (menu_log < 0)
+        menu_log = getenv("IGI_MENU_LOG") != NULL;
+    if (menu_log)
+        rt_log("vita_menu: %s(%d)", rows[r].set_name, value);
     vita_setting_set(rows[r].setting, value);
-    write_number(ret, 0.0);
+    /* Return a truthy value so the screen's commit script can chain every row's
+     * setter with && (the VM's logical-and short-circuits on a falsy left side,
+     * like the stock "...RequestScreen(904, FALSE) && Game_UpdateVolume()"), so
+     * each Vita_Set runs on leaving even if a per-change Modify was skipped. */
+    write_number(ret, 1.0);
     /* guest_call restores esp; our own frame is intact. */
     handler_return(c, ret);
 }
