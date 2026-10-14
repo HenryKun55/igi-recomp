@@ -23,4 +23,12 @@ uint32_t igi_ui_state(void);
  * jumping the cursor to the finger (shim/src/platform_vita.c). */
 int igi_computer_active(void);
 
+/* The current menu screen's own mouse cursor (game-screen coordinates), when a
+ * menu window is up: 1 with the position stored, else 0. The menus (main menu,
+ * options, mission select, the controls screen) keep this cursor and move it
+ * only by the relative DirectInput mouse motion, hit-testing every widget
+ * against it. The front touch reads it and posts a relative delta to place it
+ * exactly on the touched point, with no accumulated drift (platform_vita.c). */
+int igi_menu_cursor(int32_t *x, int32_t *y);
+
 #endif

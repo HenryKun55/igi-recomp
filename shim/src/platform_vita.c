@@ -621,11 +621,33 @@ static void front_menu_touch(const SceTouchData *t, int computer)
         menu_acc_x = menu_acc_y = 0.0f;
     }
     if (!computer) {
-        int32_t gx, gy;
+        /* Menus (main menu, options, mission select, the controls screen, the
+         * Vita options) keep their own cursor and move it only by the relative
+         * DirectInput mouse motion, hit-testing every widget against it (see
+         * runtime/src/igi_fixes.c igi_menu_cursor). To make a tap land exactly
+         * under the finger with no drift, read that cursor's current position
+         * and post the delta that takes it to the touched point, as the controls
+         * screen already does for the D-pad (shim/src/pad_input.c list_cursor_to).
+         * touch_to_game honours mode_w/mode_h, aspect_keep and the real reported
+         * front-panel size, so it stays correct at any resolution or aspect.
+         * Fallback to the old absolute set if no menu cursor is readable. */
+        int32_t gx, gy, cx, cy;
         touch_to_game(x, y, &gx, &gy);
-        if (gx != g_mouse.x || gy != g_mouse.y) {
-            g_mouse.dx += gx - g_mouse.x;
-            g_mouse.dy += gy - g_mouse.y;
+        /* Where the menu cursor effectively is: the game's own cursor plus the
+         * motion posted but not yet read (dx/dy), as the controls screen reckons
+         * it (shim/src/pad_input.c list_cursor). Targeting the delta against this
+         * keeps several touch polls before the game consumes the motion from
+         * doubling it, and leaves no drift. If no menu cursor is readable (a rare
+         * transient window state), fall back to the port's own position. */
+        if (!igi_menu_cursor(&cx, &cy)) {
+            cx = g_mouse.x;
+            cy = g_mouse.y;
+        }
+        cx += g_mouse.dx;
+        cy += g_mouse.dy;
+        if (gx != cx || gy != cy) {
+            g_mouse.dx += gx - cx;
+            g_mouse.dy += gy - cy;
             g_mouse.x = gx;
             g_mouse.y = gy;
             post_mouse_move();

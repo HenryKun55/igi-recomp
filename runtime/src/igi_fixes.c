@@ -28,8 +28,22 @@
  * (shim/src/d3d7.c) calls it for every pre-transformed 2D draw. */
 
 #define WINDOW_STATE_CUTSCENE 16u
+#define WINDOW_STATE_GAMEPLAY 9u     /* the gameplay HUD window */
 #define WINDOW_NODE_OFFSET 0x266Cu   /* 2D queue node embedded in the window */
 #define NODE_STATE_OFFSET 0xCu       /* argument passed to the per-node setup */
+
+/* A menu window keeps its own mouse cursor at window+0x27CC (WINDOW_MOUSE):
+ * +0xC x, +0x10 y, in game-screen coordinates (the same space as the widget
+ * rects and the controls list, see runtime/src/igi_controls.c). The menu moves
+ * it only by the relative DirectInput mouse motion (window update 0x418415 adds
+ * the read delta each frame; it ignores any absolute position), and every menu
+ * widget is hit-tested against it by the shared 0x4248A0. So the front touch
+ * must drive it by posting a relative delta to reach the finger, not by jumping
+ * an absolute position -- analogous to the map computer (see
+ * shim/src/platform_vita.c front_menu_touch and igi_computer_active). */
+#define WINDOW_MOUSE 0x27CCu
+#define WINDOW_MOUSE_X 0xCu
+#define WINDOW_MOUSE_Y 0x10u
 
 static uint32_t cutscene_window;     /* window object seen in the cutscene state */
 static uint32_t ui_window, ui_state = IGI_UI_NONE;   /* last UI window rendered and its state */
@@ -65,6 +79,22 @@ uint32_t igi_ui_state(void)
 int igi_computer_active(void)
 {
     return computer_frames <= COMPUTER_SEEN_FRAMES;
+}
+
+/* The current menu window's own mouse cursor (window+0x27CC+0xC/+0x10), in
+ * game-screen coordinates, when a menu screen is up (the last window rendered is
+ * a live menu window, not gameplay, a cutscene or none). 1 on success. Used by
+ * the front touch to move the cursor to the touched point by a relative delta
+ * (shim/src/platform_vita.c), so a tap lands exactly where the finger is with no
+ * drift, whatever the resolution or aspect. */
+int igi_menu_cursor(int32_t *x, int32_t *y)
+{
+    if (!ui_window || ui_state == IGI_UI_NONE || ui_state == WINDOW_STATE_GAMEPLAY ||
+        ui_state == WINDOW_STATE_CUTSCENE)
+        return 0;
+    *x = (int32_t)RD32(ui_window + WINDOW_MOUSE + WINDOW_MOUSE_X);
+    *y = (int32_t)RD32(ui_window + WINDOW_MOUSE + WINDOW_MOUSE_Y);
+    return 1;
 }
 
 /* ---- saving the options ---------------------------------------------------
