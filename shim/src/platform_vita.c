@@ -211,11 +211,16 @@ static int power_callback(int notify_id, int notify_count, int arg, void *user)
         }
     }
     if (arg & PWR_RESUME_BITS) {
-        /* Note only; the exit happens on the game thread (see vita_power_checkpoint),
-         * so GPU/audio teardown runs on the right thread, not in the callback. */
-        atomic_store(&g_suspended, 0);
-        if (!atomic_exchange(&g_resume_exit, 1))
-            rt_log("power: resume (arg %08X) -- exiting to relaunch", (unsigned)arg);
+        /* A resume only counts if we were actually suspended first. scePowerRegisterCallback
+         * fires once at registration with the current power state (resume bits set), and the
+         * system sends resume notifications at other times too; treating those as a real
+         * resume made the game exit a few seconds after launch. Only exit when a suspend
+         * we observed is now ending. The exit itself happens on the game thread (see
+         * vita_power_checkpoint), so GPU/audio teardown runs on the right thread. */
+        if (atomic_exchange(&g_suspended, 0)) {
+            if (!atomic_exchange(&g_resume_exit, 1))
+                rt_log("power: resume (arg %08X) -- exiting to relaunch", (unsigned)arg);
+        }
     }
     return 0;
 }
