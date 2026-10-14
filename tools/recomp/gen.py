@@ -64,6 +64,7 @@ GAME_HOOKS = [
     0x00423EB0,   # controls screen: the list into the player's bindings
     0x004ED5E0,   # input: bind the player's key bindings for play
     0x0046AC30,   # map computer screen: per-frame update (its own mouse cursor)
+    0x00402FF0,   # DefineGameOptions: register the Vita options script functions
 ]
 
 # MSVC CRT setjmp/longjmp: setjmp call sites become host setjmp, and the

@@ -479,6 +479,8 @@ int rt_hle_memset(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *re
 int rt_lang_count(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
 int rt_lang_name(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
 void igi_language_probe(Ctx *c, uint32_t func, uint32_t sp);   /* its entry hooks */
+/* The Vita options rows' script functions (runtime/src/vita_menu.c). */
+void vita_menu_probe(Ctx *c, uint32_t func, uint32_t sp);
 /* Pad keys in the controls screen (runtime/src/igi_controls.c), same convention. */
 int rt_controls_key_count(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);
 int rt_controls_key_entry(Ctx *c, uint32_t esp, uint32_t ecx, uint32_t eax, uint64_t *ret);

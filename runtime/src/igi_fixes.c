@@ -200,6 +200,9 @@ void rt_probe(Ctx *c, uint32_t func)
     case 0x004B8810u:
         igi_language_probe(c, func, sp);
         return;   /* frequent: kept out of the probe log */
+    case 0x00402FF0u:
+        vita_menu_probe(c, func, sp);
+        break;   /* once at start-up: register the Vita options script functions */
     default:
         break;
     }
